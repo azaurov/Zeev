@@ -1,0 +1,22 @@
+[Unit]
+Description=Zeev llama-server
+After=local-fs.target
+
+[Service]
+Type=simple
+User=ragnar
+Environment=LD_LIBRARY_PATH=/home/ragnar/projects/zeev/bin
+ExecStart=/home/ragnar/projects/zeev/bin/llama-server \
+    -m /home/ragnar/projects/zeev/models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    --host 127.0.0.1 \
+    --port 8080 \
+    -c 2048 \
+    -t 4 \
+    -b 256 \
+    -np 1 \
+    --log-disable
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

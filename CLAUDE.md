@@ -32,8 +32,9 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
 - **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns at startup; caps in-session context at 60 messages.
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
-- **`_groq_stream()` / `_groq_stream_final()`** — Groq request helpers; first call includes tool definitions, second (post-tool-execution) does not.
-- **`_exec_tool_calls()`** — executes accumulated tool calls from a streaming response.
+- **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
+- **`_with_search(user_text, on_search)`** — returns the system prompt, augmented with Tavily results if the message warrants a search.
+- **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, and `quit` commands; readline history in `data/.readline_history`.
@@ -58,14 +59,14 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 
 `SYSTEM_PROMPT` is built at startup: the base persona string plus the contents of `swiftkey_system_prompt_snippet.md` (project root) if present. That file contains the user's personal vocabulary for correct name/term recognition.
 
-### Tool use / web search
+### Web search
 
-Zeev uses Groq's function calling to search the web via Tavily when it needs current information. Flow:
-1. First Groq call streams with `tools` + `tool_choice: auto`
-2. If `finish_reason == "tool_calls"`: execute `tavily_search()`, append results as `tool` messages
-3. Second Groq call streams the final answer (no tools)
+Zeev uses a keyword heuristic (`_SEARCH_RE`) to decide when to search — no model tool-use involved (llama models on Groq produce malformed function call syntax). Flow:
+1. If the user message matches `_SEARCH_RE` (words like "weather", "news", "today", "latest", "price", etc.) and `TAVILY_API_KEY` is set, call `tavily_search()`
+2. Inject results into the system prompt for that turn
+3. Stream the Groq response as normal
 
-Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SSE event) show a status line during search.
+Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SSE event) show a status line during search. No extra API round-trip — search happens before the single Groq call.
 
 ### Web UI features
 

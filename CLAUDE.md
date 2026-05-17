@@ -23,7 +23,7 @@ python3 zeev/zeev.py --web
 python3 zeev/zeev.py --https
 ```
 
-Requires `GROQ_API_KEY` environment variable. No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
+Requires `GROQ_API_KEY` and `TAVILY_API_KEY` environment variables (both in `~/.bashrc`). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
 
 ## Architecture
 
@@ -31,6 +31,9 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 
 - **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
 - **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns at startup; caps in-session context at 60 messages.
+- **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
+- **`_groq_stream()` / `_groq_stream_final()`** — Groq request helpers; first call includes tool definitions, second (post-tool-execution) does not.
+- **`_exec_tool_calls()`** — executes accumulated tool calls from a streaming response.
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, and `quit` commands; readline history in `data/.readline_history`.
@@ -54,6 +57,15 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 ### System prompt
 
 `SYSTEM_PROMPT` is built at startup: the base persona string plus the contents of `swiftkey_system_prompt_snippet.md` (project root) if present. That file contains the user's personal vocabulary for correct name/term recognition.
+
+### Tool use / web search
+
+Zeev uses Groq's function calling to search the web via Tavily when it needs current information. Flow:
+1. First Groq call streams with `tools` + `tool_choice: auto`
+2. If `finish_reason == "tool_calls"`: execute `tavily_search()`, append results as `tool` messages
+3. Second Groq call streams the final answer (no tools)
+
+Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SSE event) show a status line during search.
 
 ### Web UI features
 

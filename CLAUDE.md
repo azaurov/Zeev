@@ -4,30 +4,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project: Zeev
 
-A local AI companion running on a Raspberry Pi Zero 2W. It runs a `llama-server` subprocess (llama.cpp b9186 ARM64 binary) serving Qwen2.5-1.5B-Instruct-Q4_K_M, then chats with it over a local OpenAI-compatible HTTP API.
+A local AI companion running on a Raspberry Pi Zero 2W. It calls the [Groq](https://groq.com) API (OpenAI-compatible) for fast cloud inference and supports both a terminal REPL and a mobile-friendly web UI.
 
 ## Running
 
+**Terminal REPL:**
 ```bash
 python3 zeev/zeev.py
 ```
 
-First-time setup (downloads model ~930 MB and llama.cpp binaries):
-
+**Web server (HTTP, port 5000):**
 ```bash
-bash zeev/setup.sh
+python3 zeev/zeev.py --web
 ```
 
-No dependencies beyond the standard library and `requests` (`python3-requests` from apt).
+**Web server (HTTPS, port 5443):**
+```bash
+python3 zeev/zeev.py --https
+```
+
+Requires `GROQ_API_KEY` environment variable. No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
 
 ## Architecture
 
 Everything lives in `zeev/zeev.py` — a single-file script:
 
-- **`start_server()`** — spawns `bin/llama-server` with `LD_LIBRARY_PATH` set to `bin/` (where the `.so` files live), waits up to 90 × 2 s for `/health` to return `ok`.
-- **`stream_reply()`** — POSTs to `/v1/chat/completions` with `stream: true`, prints tokens as they arrive.
-- **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns (30 lines) at startup; caps in-session context at 60 messages.
-- **`main()`** — REPL loop with `/clear`, `/forget`, and `quit` commands; readline history in `data/.readline_history`.
+- **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
+- **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns at startup; caps in-session context at 60 messages.
+- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session.
+- **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
+- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, and `quit` commands; readline history in `data/.readline_history`.
+
+### Models (Groq)
+
+| Key | Model ID | Description |
+|---|---|---|
+| `1` (default) | `llama-3.1-8b-instant` | Fast |
+| `2` | `llama-3.3-70b-versatile` | Smart |
+| `3` | `deepseek-r1-distill-llama-70b` | Reasoning |
 
 ### Key constants
 
@@ -36,21 +50,29 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 | `PRIOR_TURNS` | 15 | Turns loaded from disk into each new session |
 | `max_tokens` | 400 | Max reply length |
 | `temperature` | 0.75 | Sampling temperature |
-| `-c` (context) | 2048 | llama-server context window |
-| `-t` (threads) | 4 | CPU threads (Pi Zero 2W has 4 cores) |
-| `-b` (batch) | 256 | Prompt eval batch size |
+
+### System prompt
+
+`SYSTEM_PROMPT` is built at startup: the base persona string plus the contents of `swiftkey_system_prompt_snippet.md` (project root) if present. That file contains the user's personal vocabulary for correct name/term recognition.
+
+### Web UI features
+
+- Dark mobile-first chat interface
+- Model selector (8B / 70B / DeepSeek R1)
+- TTS (Web Speech API) with sentence-level streaming
+- Voice input (Web Speech Recognition)
+- HTTPS mode with auto-generated self-signed cert (accept once in browser)
 
 ### File layout
 
 ```
 zeev/
-  zeev.py          # entire application
-  setup.sh         # one-time setup script
-  bin/             # llama-server + shared libs (ARM64, not in git)
-  models/          # qwen2.5-1.5b-instruct-q4_k_m.gguf (not in git)
-  data/            # history.jsonl + .readline_history (created at runtime)
+  zeev.py                        # entire application
+  setup.sh                       # one-time setup script (legacy llama.cpp)
+  data/                          # history.jsonl + .readline_history + TLS certs (runtime)
+swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). The 3 GB swap file on SD card is mandatory — model loading exceeds physical RAM. Inference is slow (~1–3 tok/s); the 90-second server startup timeout exists for this reason.
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Inference runs on Groq's cloud, so local hardware only handles the HTTP server and UI — no local model loading required.

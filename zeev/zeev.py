@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import readline
 import signal
 import socket
@@ -21,20 +22,15 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL = "https://api.tavily.com/search"
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "search",
-        "description": "Search the web for current information, news, or facts.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-            },
-            "required": ["query"],
-        },
-    },
-}]
+_SEARCH_RE = re.compile(
+    r"\b(weather|forecast|news|today|tonight|tomorrow|latest|current|score|"
+    r"stock|price|who won|happening|right now|recently|this week|this month|"
+    r"just announced|breaking|update|2024|2025|2026)\b",
+    re.IGNORECASE,
+)
+
+def needs_search(text):
+    return bool(_SEARCH_RE.search(text))
 MODELS = {
     "1": ("llama-3.1-8b-instant",          "Llama 3.1 8B  — fast"),
     "2": ("llama-3.3-70b-versatile",        "Llama 3.3 70B — smart"),
@@ -49,7 +45,6 @@ SYSTEM_PROMPT = (
     "questions to understand them better. "
     "You are talking to Ragnar."
 )
-
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():
     SYSTEM_PROMPT += "\n\n" + _vocab_path.read_text().strip()
@@ -110,139 +105,55 @@ def tavily_search(query):
         return f"Search error: {e}"
 
 
-def _exec_tool_calls(tool_calls):
-    """Execute accumulated tool calls, return list of tool-role messages."""
-    results = []
-    for tc in tool_calls.values():
-        if tc["name"] == "search":
-            try:
-                query = json.loads(tc["arguments"]).get("query", "")
-            except json.JSONDecodeError:
-                query = ""
-            content = tavily_search(query)
-        else:
-            query, content = "", "Unknown tool."
-        results.append((tc["id"], tc["name"], query, content))
-    return results
-
-
 # ---------------------------------------------------------------------------
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_stream(msgs, model):
-    """POST to Groq with streaming. Returns (resp, error_str)."""
+def _groq_post(msgs, model, stream=True):
+    """POST to Groq. Returns (response, error_str)."""
     try:
         return requests.post(
             GROQ_URL,
-            json={
-                "model": model,
-                "messages": msgs,
-                "temperature": 0.75,
-                "max_tokens": 400,
-                "stream": True,
-                "tools": TOOLS,
-                "tool_choice": "auto",
-            },
+            json={"model": model, "messages": msgs,
+                  "temperature": 0.75, "max_tokens": 400, "stream": stream},
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            stream=True,
+            stream=stream,
             timeout=60,
         ), None
     except requests.RequestException as e:
         return None, str(e)
 
 
-def _groq_stream_final(msgs, model):
-    """POST to Groq with streaming, no tools (used after tool execution)."""
-    try:
-        return requests.post(
-            GROQ_URL,
-            json={
-                "model": model,
-                "messages": msgs,
-                "temperature": 0.75,
-                "max_tokens": 400,
-                "stream": True,
-            },
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            stream=True,
-            timeout=60,
-        ), None
-    except requests.RequestException as e:
-        return None, str(e)
+def _with_search(user_text, on_search=None):
+    """Return an augmented system prompt if the message warrants a web search."""
+    if not needs_search(user_text) or not TAVILY_API_KEY:
+        return SYSTEM_PROMPT
+    if on_search:
+        on_search(user_text)
+    results = tavily_search(user_text)
+    return SYSTEM_PROMPT + f"\n\n[Web search results for '{user_text}']\n{results}"
 
 
 def stream_reply(messages, model):
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
 
-    sys_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
-    resp, err = _groq_stream(sys_messages, model)
+    user_text = messages[-1]["content"] if messages else ""
+
+    def on_search(q):
+        print(f"{DIM}[searching: {q}]{RESET}", flush=True)
+
+    sys_prompt = _with_search(user_text, on_search)
+    payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
+
+    resp, err = _groq_post(payload_msgs, model)
     if err:
         print(f"\nConnection error: {err}")
         return ""
 
     print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
-
-    tool_calls = {}
-    finish_reason = None
     full = ""
-
     for line in resp.iter_lines():
-        if not line or not line.startswith(b"data: "):
-            continue
-        data = line[6:]
-        if data == b"[DONE]":
-            break
-        try:
-            choice = json.loads(data)["choices"][0]
-            finish_reason = choice.get("finish_reason") or finish_reason
-            delta = choice.get("delta", {})
-            if delta.get("content"):
-                print(delta["content"], end="", flush=True)
-                full += delta["content"]
-            for tc in delta.get("tool_calls", []):
-                idx = tc["index"]
-                if idx not in tool_calls:
-                    tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
-                tool_calls[idx]["id"] = tc.get("id") or tool_calls[idx]["id"]
-                fn = tc.get("function", {})
-                tool_calls[idx]["name"] += fn.get("name", "")
-                tool_calls[idx]["arguments"] += fn.get("arguments", "")
-        except (json.JSONDecodeError, KeyError, IndexError):
-            pass
-
-    if finish_reason != "tool_calls":
-        print()
-        return full
-
-    # Execute tools and do a second streaming call
-    tool_results = _exec_tool_calls(tool_calls)
-    for _, _, query, _ in tool_results:
-        print(f"\n{DIM}[searching: {query}]{RESET}", flush=True)
-
-    assistant_msg = {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {"id": tc["id"], "type": "function",
-             "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-            for tc in tool_calls.values()
-        ],
-    }
-    tool_msgs = [
-        {"role": "tool", "tool_call_id": tc_id, "name": name, "content": content}
-        for tc_id, name, _, content in tool_results
-    ]
-
-    resp2, err2 = _groq_stream_final(sys_messages + [assistant_msg] + tool_msgs, model)
-    if err2:
-        print(f"\nConnection error: {err2}")
-        return ""
-
-    print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
-    full = ""
-    for line in resp2.iter_lines():
         if not line or not line.startswith(b"data: "):
             continue
         data = line[6:]
@@ -624,18 +535,19 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 append_message("user", user_msg)
                 snapshot = list(session)
 
-            sys_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + snapshot
+            def on_search(q):
+                sse({"info": f"[searching: {q}]"})
+
+            sys_prompt = _with_search(user_msg, on_search)
+            payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
             full_reply = ""
             try:
-                resp, err = _groq_stream(sys_messages, model)
+                resp, err = _groq_post(payload_msgs, model)
                 if err:
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                     return
-
-                tool_calls = {}
-                finish_reason = None
 
                 for line in resp.iter_lines():
                     if not line or not line.startswith(b"data: "):
@@ -644,60 +556,12 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     if chunk == b"[DONE]":
                         break
                     try:
-                        choice = json.loads(chunk)["choices"][0]
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                        delta = choice.get("delta", {})
-                        if delta.get("content"):
-                            full_reply += delta["content"]
-                            sse({"token": delta["content"]})
-                        for tc in delta.get("tool_calls", []):
-                            idx = tc["index"]
-                            if idx not in tool_calls:
-                                tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
-                            tool_calls[idx]["id"] = tc.get("id") or tool_calls[idx]["id"]
-                            fn = tc.get("function", {})
-                            tool_calls[idx]["name"] += fn.get("name", "")
-                            tool_calls[idx]["arguments"] += fn.get("arguments", "")
+                        delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            full_reply += delta
+                            sse({"token": delta})
                     except (json.JSONDecodeError, KeyError, IndexError):
                         pass
-
-                if finish_reason == "tool_calls":
-                    tool_results = _exec_tool_calls(tool_calls)
-                    for _, _, query, _ in tool_results:
-                        sse({"info": f"[searching: {query}]"})
-
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {"id": tc["id"], "type": "function",
-                             "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                            for tc in tool_calls.values()
-                        ],
-                    }
-                    tool_msgs = [
-                        {"role": "tool", "tool_call_id": tc_id, "name": name, "content": content}
-                        for tc_id, name, _, content in tool_results
-                    ]
-
-                    resp2, err2 = _groq_stream_final(sys_messages + [assistant_msg] + tool_msgs, model)
-                    if err2:
-                        sse({"error": err2})
-                    else:
-                        full_reply = ""
-                        for line in resp2.iter_lines():
-                            if not line or not line.startswith(b"data: "):
-                                continue
-                            chunk = line[6:]
-                            if chunk == b"[DONE]":
-                                break
-                            try:
-                                delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
-                                if delta:
-                                    full_reply += delta
-                                    sse({"token": delta})
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                pass
 
             except requests.RequestException as e:
                 sse({"error": str(e)})

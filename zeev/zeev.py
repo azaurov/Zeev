@@ -29,7 +29,8 @@ PRIOR_TURNS = 15
 SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
-    "questions to understand them better."
+    "questions to understand them better. "
+    "You are talking to Ragnar."
 )
 
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"

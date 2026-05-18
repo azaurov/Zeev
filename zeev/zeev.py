@@ -5,8 +5,10 @@ import json
 import os
 import re
 import readline
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -121,6 +123,84 @@ def get_battery():
     except (AttributeError, IndexError):
         charging = None
     return level, charging
+
+
+# ---------------------------------------------------------------------------
+# Bluetooth device management + terminal TTS
+# ---------------------------------------------------------------------------
+
+TTS_AVAILABLE = False   # set by init_tts()
+
+
+def init_tts():
+    global TTS_AVAILABLE
+    TTS_AVAILABLE = shutil.which("espeak-ng") is not None
+
+
+def speak_terminal(text):
+    """Speak text via espeak-ng in background. No-op if not available."""
+    if not TTS_AVAILABLE:
+        return
+    clean = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    clean = re.sub(r"[*_`#~]", "", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return
+    try:
+        subprocess.Popen(
+            ["espeak-ng", "-s", "145", "-v", "en", clean],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def bt_list():
+    """Return list of (mac, name, connected) for all paired BT devices."""
+    try:
+        out = subprocess.check_output(
+            ["bluetoothctl", "devices"], stderr=subprocess.DEVNULL, timeout=5
+        ).decode()
+        devices = []
+        for line in out.splitlines():
+            parts = line.strip().split(" ", 2)
+            if len(parts) < 3:
+                continue
+            mac, name = parts[1], parts[2]
+            try:
+                info = subprocess.check_output(
+                    ["bluetoothctl", "info", mac],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                ).decode()
+                connected = "Connected: yes" in info
+            except Exception:
+                connected = False
+            devices.append((mac, name, connected))
+        return devices
+    except Exception:
+        return []
+
+
+def bt_connect(mac):
+    try:
+        r = subprocess.run(
+            ["bluetoothctl", "connect", mac],
+            capture_output=True, timeout=15,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def bt_disconnect(mac):
+    try:
+        subprocess.run(
+            ["bluetoothctl", "disconnect", mac],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 SYSTEM_PROMPT = (
@@ -1044,6 +1124,8 @@ def main():
         pass
     readline.set_history_length(200)
 
+    init_tts()
+
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
     print(f"{DIM}  /clear        wipe session context")
     print(f"  /forget       delete all history")
@@ -1051,10 +1133,13 @@ def main():
     print(f"  /memory       show stored facts")
     print(f"  /memorize     learn from this session")
     print(f"  /forget-fact  remove a fact by number")
+    print(f"  /tts          toggle speech output")
+    print(f"  /bt           manage Bluetooth devices")
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
-    session = load_prior()
+    tts_on       = False
+    session      = load_prior()
 
     if session:
         turns = len(session) // 2
@@ -1141,6 +1226,50 @@ def main():
                 print(f"{DIM}No fact #{parts[1]}.{RESET}\n")
             continue
 
+        if user_input.lower() == "/tts":
+            if not TTS_AVAILABLE:
+                print(f"{DIM}espeak-ng not installed. Run: sudo apt install espeak-ng{RESET}\n")
+                continue
+            tts_on = not tts_on
+            state = "on" if tts_on else "off"
+            print(f"{DIM}Speech {state}.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/bt"):
+            parts = user_input.split()
+            devices = bt_list()
+            if not devices:
+                print(f"{DIM}No paired Bluetooth devices found.")
+                print(f"Run setup_bluetooth.sh to pair a device.{RESET}\n")
+                continue
+            if len(parts) == 1:
+                # show status
+                print(f"{DIM}Paired devices:{RESET}")
+                for i, (mac, name, connected) in enumerate(devices, 1):
+                    dot = f"{CYAN}●{RESET}" if connected else f"{DIM}○{RESET}"
+                    status = f"{DIM} connected{RESET}" if connected else ""
+                    print(f"  {i}) {dot} {name}  {DIM}{mac}{RESET}{status}")
+                print(f"\n{DIM}  /bt <number>   connect a device")
+                print(f"  /bt off        disconnect all{RESET}\n")
+            elif parts[1].lower() == "off":
+                for mac, name, connected in devices:
+                    if connected:
+                        bt_disconnect(mac)
+                        print(f"{DIM}Disconnected {name}.{RESET}")
+                print()
+            elif parts[1].isdigit():
+                idx = int(parts[1]) - 1
+                if 0 <= idx < len(devices):
+                    mac, name, _ = devices[idx]
+                    print(f"{DIM}Connecting to {name}...{RESET}", end=" ", flush=True)
+                    ok = bt_connect(mac)
+                    print(f"{DIM}{'done' if ok else 'failed'}.{RESET}\n")
+                else:
+                    print(f"{DIM}No device #{parts[1]}.{RESET}\n")
+            else:
+                print(f"{DIM}Usage: /bt  /bt <number>  /bt off{RESET}\n")
+            continue
+
         batt_level, batt_charging = get_battery()
         if batt_level is not None and batt_level < 20 and not batt_charging:
             print(f"\033[33m⚠ Battery low: {batt_level:.0f}%{RESET}", flush=True)
@@ -1156,6 +1285,8 @@ def main():
         if reply:
             session.append({"role": "assistant", "content": reply})
             append_message("assistant", reply)
+            if tts_on:
+                speak_terminal(reply)
 
         if len(session) > 60:
             session = session[-60:]

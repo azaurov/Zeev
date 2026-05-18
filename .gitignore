@@ -4,8 +4,10 @@ zeev/bin/
 # Model weights
 zeev/models/
 
-# Runtime data
-zeev/data/
+# Runtime data — keep history and memory, exclude certs and readline
+zeev/data/cert.pem
+zeev/data/key.pem
+zeev/data/.readline_history
 
 # Python
 __pycache__/

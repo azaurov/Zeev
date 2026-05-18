@@ -89,6 +89,40 @@ def route_model(text):
 def model_label(model_id):
     return _MODEL_SHORT.get(model_id, "?")
 
+
+# ---------------------------------------------------------------------------
+# PiSugar battery
+# ---------------------------------------------------------------------------
+
+def _pisugar_query(cmd):
+    """Send a command to the PiSugar server socket. Returns response or None."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", 8423))
+        s.sendall((cmd + "\n").encode())
+        data = s.recv(64).decode().strip()
+        s.close()
+        return data
+    except Exception:
+        return None
+
+
+def get_battery():
+    """Return (level: float, charging: bool) or (None, None) if unavailable."""
+    level_resp  = _pisugar_query("get battery")
+    charge_resp = _pisugar_query("get battery_charging")
+    try:
+        level = float(level_resp.split(": ")[1])
+    except (AttributeError, IndexError, ValueError):
+        level = None
+    try:
+        charging = charge_resp.split(": ")[1].strip().lower() == "true"
+    except (AttributeError, IndexError):
+        charging = None
+    return level, charging
+
+
 SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
@@ -456,6 +490,10 @@ footer {
   display: block; margin-top: 5px;
   font-size: 0.7rem; color: #3a3a3a; letter-spacing: 0.03em;
 }
+#battPct {
+  font-size: 0.78rem; font-weight: 600; padding: 2px 4px;
+  letter-spacing: 0.02em;
+}
 /* Memory overlay */
 #memOverlay {
   display: none; position: fixed; inset: 0;
@@ -498,6 +536,7 @@ footer {
 <header>
   <span class="brand">Zeev</span>
   <div class="controls">
+    <span id="battPct" style="display:none"></span>
     <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
     <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
@@ -714,6 +753,22 @@ memorizeBtn.onclick = async () => {
   memorizeBtn.disabled = false;
 };
 
+// --- Battery ---
+const battPct = document.getElementById("battPct");
+async function updateBattery() {
+  try {
+    const res = await fetch("/battery");
+    const d = await res.json();
+    if (d.level === null) { battPct.style.display = "none"; return; }
+    const pct = Math.round(d.level);
+    battPct.textContent = (d.charging ? "⚡" : "🔋") + " " + pct + "%";
+    battPct.style.color = pct < 20 ? "#ef4444" : pct < 50 ? "#eab308" : "#4ade80";
+    battPct.style.display = "";
+  } catch (_) { battPct.style.display = "none"; }
+}
+updateBattery();
+setInterval(updateBattery, 30000);
+
 // --- Speech recognition ---
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) {
@@ -788,6 +843,14 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 body = _WEB_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/battery":
+                level, charging = get_battery()
+                body = json.dumps({"level": level, "charging": charging}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -998,7 +1061,11 @@ def main():
         print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", end="")
     if USER_FACTS:
         print(f"  {DIM}({len(USER_FACTS)} fact{'s' if len(USER_FACTS) != 1 else ''} in memory){RESET}", end="")
-    if session or USER_FACTS:
+    batt_level, batt_charging = get_battery()
+    if batt_level is not None:
+        batt_icon = "⚡" if batt_charging else "🔋"
+        print(f"  {DIM}{batt_icon} {batt_level:.0f}%{RESET}", end="")
+    if session or USER_FACTS or batt_level is not None:
         print()
     print(f"{DIM}Model: auto-routing  (/model to change){RESET}\n")
 
@@ -1073,6 +1140,10 @@ def main():
             else:
                 print(f"{DIM}No fact #{parts[1]}.{RESET}\n")
             continue
+
+        batt_level, batt_charging = get_battery()
+        if batt_level is not None and batt_level < 20 and not batt_charging:
+            print(f"\033[33m⚠ Battery low: {batt_level:.0f}%{RESET}", flush=True)
 
         model_id = locked_model if locked_model else route_model(user_input)
         if locked_model is None:

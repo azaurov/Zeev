@@ -16,11 +16,27 @@ import requests
 
 BASE_DIR = Path(__file__).resolve().parent
 HISTORY_FILE = BASE_DIR / "data" / "history.jsonl"
-RL_HISTORY = BASE_DIR / "data" / ".readline_history"
+MEMORY_FILE  = BASE_DIR / "data" / "user_memory.json"
+RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_your_key_here")
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-TAVILY_URL = "https://api.tavily.com/search"
+TAVILY_URL     = "https://api.tavily.com/search"
+
+# Learning state — populated by init_learning() at startup
+USER_FACTS       = []   # persistent facts about the user
+_HISTORY_ENTRIES = []   # raw parsed entries from history.jsonl for RAG
+_HISTORY_INDEX   = {}   # word → [entry indices] inverted index
+
+_STOP_WORDS = frozenset([
+    "the", "and", "for", "are", "but", "not", "you", "all", "can",
+    "was", "one", "our", "out", "get", "has", "him", "his", "how",
+    "its", "may", "new", "now", "old", "see", "two", "who", "did",
+    "let", "say", "she", "too", "use", "that", "this", "with", "have",
+    "from", "they", "will", "been", "what", "when", "your", "than",
+    "just", "more", "also", "into", "then", "some", "could", "would",
+    "about", "there", "their", "which", "were", "does", "very", "like",
+])
 
 _SEARCH_RE = re.compile(
     r"\b(weather|forecast|news|today|tonight|tomorrow|latest|current|score|"
@@ -31,13 +47,47 @@ _SEARCH_RE = re.compile(
 
 def needs_search(text):
     return bool(_SEARCH_RE.search(text))
+
+# Model auto-routing heuristics
+_REASONING_RE = re.compile(
+    r"\b(prove|proof|calculate|solve|equation|formula|math|"
+    r"step.by.step|walk me through|think through|deduce|infer|"
+    r"probability|logic|algorithm|complexity|optimize|"
+    r"puzzle|riddle|paradox|theorem)\b",
+    re.IGNORECASE,
+)
+_SMART_RE = re.compile(
+    r"\b(write|implement|code|function|class|debug|refactor|"
+    r"script|program|python|javascript|typescript|rust|golang|java|sql|"
+    r"explain|summarize|compare|analyze|analyse|essay|report|draft|"
+    r"architecture|design|difference between|how does|regex)\b",
+    re.IGNORECASE,
+)
+
 MODELS = {
     "1": ("llama-3.1-8b-instant",          "Llama 3.1 8B  — fast"),
     "2": ("llama-3.3-70b-versatile",        "Llama 3.3 70B — smart"),
     "3": ("deepseek-r1-distill-llama-70b",  "DeepSeek R1   — reasoning"),
 }
-DEFAULT_MODEL = "1"
+_MODEL_SHORT = {
+    "llama-3.1-8b-instant":         "8B",
+    "llama-3.3-70b-versatile":      "70B",
+    "deepseek-r1-distill-llama-70b":"R1",
+}
 PRIOR_TURNS = 15
+
+
+def route_model(text):
+    """Pick model ID automatically based on message content."""
+    if _REASONING_RE.search(text):
+        return MODELS["3"][0]   # DeepSeek R1
+    if _SMART_RE.search(text):
+        return MODELS["2"][0]   # 70B Smart
+    return MODELS["1"][0]       # 8B Fast
+
+
+def model_label(model_id):
+    return _MODEL_SHORT.get(model_id, "?")
 
 SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
@@ -49,10 +99,11 @@ _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():
     SYSTEM_PROMPT += "\n\n" + _vocab_path.read_text().strip()
 
-CYAN = "\033[96m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
+CYAN  = "\033[96m"
+BOLD  = "\033[1m"
+DIM   = "\033[2m"
 RESET = "\033[0m"
+
 
 # ---------------------------------------------------------------------------
 # Persistence
@@ -80,6 +131,147 @@ def append_message(role, content):
             "content": content,
             "ts": datetime.now().isoformat(),
         }) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# User memory (persistent facts)
+# ---------------------------------------------------------------------------
+
+def load_memory():
+    if not MEMORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(MEMORY_FILE.read_text())
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
+def save_memory(facts):
+    MEMORY_FILE.parent.mkdir(exist_ok=True)
+    MEMORY_FILE.write_text(json.dumps(facts, indent=2))
+
+
+def extract_memory(session_msgs):
+    """Ask Groq to extract new user facts from session_msgs. Updates USER_FACTS in-place."""
+    global USER_FACTS
+    if not session_msgs:
+        return USER_FACTS
+    transcript = "\n".join(
+        ("USER" if m["role"] == "user" else "ZEEV") + ": " + m["content"]
+        for m in session_msgs[-30:]
+    )
+    existing_str = "\n".join(f"- {f}" for f in USER_FACTS) if USER_FACTS else "(none)"
+    user_prompt = (
+        f"Conversation transcript:\n{transcript}\n\n"
+        f"Already known facts about the user:\n{existing_str}\n\n"
+        "List NEW facts revealed about the USER in this transcript. "
+        "Focus on: location, job, preferences, hobbies, relationships, goals, habits.\n"
+        'Output a JSON object: {"facts": ["...", "..."]}. If nothing new: {"facts": []}'
+    )
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {"role": "system", "content": "You are a data extractor. Output only valid JSON."},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 300,
+                "stream": False,
+                "response_format": {"type": "json_object"},
+            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            return None  # rate-limited; caller shows a warning
+        resp.raise_for_status()
+        new_facts = resp.json()["choices"][0]["message"]["content"]
+        new_facts = json.loads(new_facts).get("facts", [])
+        if isinstance(new_facts, list):
+            merged = list(USER_FACTS)
+            for f in new_facts:
+                if isinstance(f, str) and f.strip() and f.strip() not in merged:
+                    merged.append(f.strip())
+            USER_FACTS = merged
+            save_memory(USER_FACTS)
+    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError, ValueError):
+        pass
+    return USER_FACTS
+
+
+# ---------------------------------------------------------------------------
+# History RAG (keyword retrieval over past conversations)
+# ---------------------------------------------------------------------------
+
+def _tokenize(text):
+    return {w for w in re.findall(r"\b[a-z]{3,}\b", text.lower()) if w not in _STOP_WORDS}
+
+
+def build_rag_index():
+    """Parse history.jsonl into module-level globals for retrieval."""
+    global _HISTORY_ENTRIES, _HISTORY_INDEX
+    if not HISTORY_FILE.exists():
+        return
+    entries = []
+    index = {}
+    for line in HISTORY_FILE.read_text().splitlines():
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    for i, entry in enumerate(entries):
+        for word in _tokenize(entry.get("content", "")):
+            index.setdefault(word, []).append(i)
+    _HISTORY_ENTRIES = entries
+    _HISTORY_INDEX   = index
+
+
+def retrieve_relevant(query, k=2, min_score=2):
+    """Return up to k (user_msg, assistant_reply) pairs most relevant to query."""
+    if not _HISTORY_INDEX or not _HISTORY_ENTRIES:
+        return []
+    scores = {}
+    for word in _tokenize(query):
+        for idx in _HISTORY_INDEX.get(word, []):
+            scores[idx] = scores.get(idx, 0) + 1
+    if not scores:
+        return []
+    ranked = sorted(scores, key=lambda i: -scores[i])
+    pairs = []
+    seen = set()
+    for idx in ranked:
+        if scores[idx] < min_score or len(pairs) >= k:
+            break
+        if idx in seen:
+            continue
+        entry = _HISTORY_ENTRIES[idx]
+        role  = entry.get("role")
+        if role == "user":
+            seen.add(idx)
+            for j in range(idx + 1, min(idx + 4, len(_HISTORY_ENTRIES))):
+                if _HISTORY_ENTRIES[j].get("role") == "assistant" and j not in seen:
+                    pairs.append((entry["content"], _HISTORY_ENTRIES[j]["content"]))
+                    seen.add(j)
+                    break
+        elif role == "assistant":
+            seen.add(idx)
+            for j in range(idx - 1, max(idx - 4, -1), -1):
+                if _HISTORY_ENTRIES[j].get("role") == "user" and j not in seen:
+                    pairs.append((_HISTORY_ENTRIES[j]["content"], entry["content"]))
+                    seen.add(j)
+                    break
+    return pairs
+
+
+def init_learning():
+    """Load memory facts and build RAG index. Call once at startup."""
+    global USER_FACTS
+    USER_FACTS = load_memory()
+    build_rag_index()
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +316,33 @@ def _groq_post(msgs, model, stream=True):
         return None, str(e)
 
 
+def _build_system_prompt(user_text, on_search=None):
+    """Assemble system prompt: base + memory facts + RAG hits + optional web search."""
+    parts = [SYSTEM_PROMPT]
+
+    if USER_FACTS:
+        facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
+        parts.append(f"\n\n## What I know about Ragnar:\n{facts_str}")
+
+    hits = retrieve_relevant(user_text)
+    if hits:
+        rag_lines = []
+        for u, a in hits:
+            rag_lines.append(f"User: {u[:300]}\nZeev: {a[:300]}")
+        parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
+
+    if needs_search(user_text) and TAVILY_API_KEY:
+        if on_search:
+            on_search(user_text)
+        results = tavily_search(user_text)
+        parts.append(f"\n\n[Web search results for '{user_text}']\n{results}")
+
+    return "".join(parts)
+
+
+# Keep old name as alias so nothing else breaks
 def _with_search(user_text, on_search=None):
-    """Return an augmented system prompt if the message warrants a web search."""
-    if not needs_search(user_text) or not TAVILY_API_KEY:
-        return SYSTEM_PROMPT
-    if on_search:
-        on_search(user_text)
-    results = tavily_search(user_text)
-    return SYSTEM_PROMPT + f"\n\n[Web search results for '{user_text}']\n{results}"
+    return _build_system_prompt(user_text, on_search)
 
 
 def stream_reply(messages, model):
@@ -143,7 +354,7 @@ def stream_reply(messages, model):
     def on_search(q):
         print(f"{DIM}[searching: {q}]{RESET}", flush=True)
 
-    sys_prompt = _with_search(user_text, on_search)
+    sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
     resp, err = _groq_post(payload_msgs, model)
@@ -241,15 +452,57 @@ footer {
   background: none; border: none; cursor: pointer; font-size: 1.1rem;
   color: #7dd3fc; padding: 4px; line-height: 1;
 }
+.model-tag {
+  display: block; margin-top: 5px;
+  font-size: 0.7rem; color: #3a3a3a; letter-spacing: 0.03em;
+}
+/* Memory overlay */
+#memOverlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.85); z-index: 100;
+  padding: 20px; overflow-y: auto;
+}
+#memPanel {
+  background: #141414; border: 1px solid #252525; border-radius: 14px;
+  padding: 20px; max-width: 480px; margin: 0 auto;
+}
+#memPanel h2 { color: #7dd3fc; font-size: 1rem; margin-bottom: 14px; }
+#memList { font-size: 0.88rem; line-height: 1.9; color: #ccc; min-height: 40px; }
+#memList em { color: #444; }
+.mem-actions {
+  display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap;
+}
+.mem-btn {
+  padding: 7px 14px; border: none; border-radius: 8px;
+  font-size: 0.85rem; cursor: pointer;
+}
+#memorizeBtn { background: #1d4ed8; color: #fff; }
+#memorizeBtn:disabled { background: #1a2a4a; color: #556; cursor: not-allowed; }
+#memCloseBtn { background: #1e1e1e; color: #aaa; border: 1px solid #333; }
 </style>
 </head>
 <body>
+
+<!-- Memory overlay -->
+<div id="memOverlay">
+  <div id="memPanel">
+    <h2>&#129504; Memory</h2>
+    <div id="memList"><em>Loading...</em></div>
+    <div class="mem-actions">
+      <button class="mem-btn" id="memorizeBtn">Memorize this session</button>
+      <button class="mem-btn" id="memCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <span class="brand">Zeev</span>
   <div class="controls">
+    <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
     <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
     <select id="modelSel">
+      <option value="auto" selected>Auto</option>
       <option value="llama-3.1-8b-instant">8B Fast</option>
       <option value="llama-3.3-70b-versatile">70B Smart</option>
       <option value="deepseek-r1-distill-llama-70b">DeepSeek R1</option>
@@ -272,16 +525,22 @@ const micBtn = document.getElementById("micBtn");
 const ttsBtn = document.getElementById("ttsBtn");
 const clearBtn = document.getElementById("clearBtn");
 const modelSel = document.getElementById("modelSel");
+const memBtn = document.getElementById("memBtn");
+const memOverlay = document.getElementById("memOverlay");
+const memList = document.getElementById("memList");
+const memorizeBtn = document.getElementById("memorizeBtn");
+const memCloseBtn = document.getElementById("memCloseBtn");
 
 let ttsOn = true;
 let busy = false;
 let speechBuf = "";
 let maleVoice = null;
+let pendingModel = null;
 
 function loadVoices() {
   const voices = speechSynthesis.getVoices();
   maleVoice = voices.find(v => /male/i.test(v.name)) ||
-              voices.find(v => /\bman\b/i.test(v.name)) ||
+              voices.find(v => /\\bman\\b/i.test(v.name)) ||
               null;
 }
 speechSynthesis.onvoiceschanged = loadVoices;
@@ -299,7 +558,6 @@ function speak(text) {
 function feedSpeech(chunk) {
   if (!ttsOn) return;
   speechBuf += chunk;
-  // speak complete sentences as they arrive
   let m;
   while ((m = speechBuf.match(/^([^]*?[.!?])([ \\t\\r\\n]|$)/)) !== null) {
     speak(m[1]);
@@ -341,6 +599,7 @@ async function send(msg) {
 
   speechSynthesis.cancel();
   speechBuf = "";
+  pendingModel = null;
 
   try {
     const res = await fetch("/chat", {
@@ -378,12 +637,20 @@ async function send(msg) {
           } else if (p.info) {
             zd.classList.remove("pending");
             zd.textContent = p.info;
+          } else if (p.model) {
+            pendingModel = p.model;
           }
         } catch (_) {}
       }
     }
     flushSpeech();
     if (!full && !zd.textContent) zd.textContent = "(no response)";
+    if (pendingModel && full) {
+      const tag = document.createElement("span");
+      tag.className = "model-tag";
+      tag.textContent = pendingModel;
+      zd.appendChild(tag);
+    }
   } catch (e) {
     zd.classList.remove("pending");
     zd.textContent = "Connection error.";
@@ -403,6 +670,48 @@ clearBtn.onclick = async () => {
   await fetch("/clear", {method: "POST"});
   chat.innerHTML = "";
   speechSynthesis.cancel();
+};
+
+// --- Memory UI ---
+function renderFacts(facts) {
+  if (!facts || facts.length === 0) {
+    memList.innerHTML = "<em>No facts stored yet. Chat a while, then tap 'Memorize'.</em>";
+  } else {
+    memList.innerHTML = facts.map((f, i) =>
+      `<div><span style="color:#444">${i+1}.</span> ${f}</div>`
+    ).join("");
+  }
+}
+
+memBtn.onclick = async () => {
+  memOverlay.style.display = "block";
+  memList.innerHTML = "<em>Loading...</em>";
+  try {
+    const res = await fetch("/memory");
+    const data = await res.json();
+    renderFacts(data.facts);
+  } catch (_) {
+    memList.innerHTML = "<em style='color:#c00'>Failed to load memory.</em>";
+  }
+};
+
+memCloseBtn.onclick = () => { memOverlay.style.display = "none"; };
+memOverlay.addEventListener("click", e => {
+  if (e.target === memOverlay) memOverlay.style.display = "none";
+});
+
+memorizeBtn.onclick = async () => {
+  memorizeBtn.textContent = "Memorizing…";
+  memorizeBtn.disabled = true;
+  try {
+    const res = await fetch("/memorize", {method: "POST"});
+    const data = await res.json();
+    renderFacts(data.facts);
+  } catch (_) {
+    memList.innerHTML = "<em style='color:#c00'>Memorization failed.</em>";
+  }
+  memorizeBtn.textContent = "Memorize this session";
+  memorizeBtn.disabled = false;
 };
 
 // --- Speech recognition ---
@@ -466,18 +775,26 @@ def _ensure_cert(cert_path, key_path, ip):
 def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    init_learning()
     session = load_prior()
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            pass  # suppress default request logging
+            pass
 
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 body = _WEB_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/memory":
+                body = json.dumps({"facts": USER_FACTS}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -493,6 +810,18 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.end_headers()
                 return
 
+            if self.path == "/memorize":
+                with lock:
+                    snap = list(session)
+                facts = extract_memory(snap)
+                body = json.dumps({"facts": facts}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             if self.path != "/chat":
                 self.send_response(404)
                 self.end_headers()
@@ -506,8 +835,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.end_headers()
                 return
 
-            user_msg = data.get("message", "").strip()
-            model = data.get("model", "llama-3.1-8b-instant")
+            user_msg   = data.get("message", "").strip()
+            model_pref = data.get("model", "auto")
+            model      = route_model(user_msg) if model_pref == "auto" else model_pref
 
             if not user_msg:
                 self.send_response(400)
@@ -535,10 +865,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 append_message("user", user_msg)
                 snapshot = list(session)
 
+            if model_pref == "auto":
+                sse({"model": model_label(model)})
+
             def on_search(q):
                 sse({"info": f"[searching: {q}]"})
 
-            sys_prompt = _with_search(user_msg, on_search)
+            sys_prompt = _build_system_prompt(user_msg, on_search)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
             full_reply = ""
             try:
@@ -608,20 +941,29 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 # Terminal REPL
 # ---------------------------------------------------------------------------
 
-def pick_model():
+def pick_model(current_locked=None):
+    """Interactive model picker. Returns model_id to lock, or None for auto."""
     print(f"{DIM}Select model:{RESET}")
-    for key, (_, label) in MODELS.items():
-        print(f"  {key}) {label}")
+    auto_tag = " (current)" if current_locked is None else ""
+    print(f"  0) Auto  — smart routing{auto_tag}")
+    for key, (mid, label) in MODELS.items():
+        tag = " (current)" if mid == current_locked else ""
+        print(f"  {key}) {label}{tag}")
     while True:
-        choice = input(f"{DIM}[{DEFAULT_MODEL}]:{RESET} ").strip() or DEFAULT_MODEL
+        choice = input(f"{DIM}[0]:{RESET} ").strip() or "0"
+        if choice == "0":
+            print(f"{DIM}Auto-routing enabled.{RESET}\n")
+            return None
         if choice in MODELS:
             model_id, label = MODELS[choice]
-            print(f"{DIM}Using {label.split('—')[0].strip()}.{RESET}\n")
+            print(f"{DIM}Locked to {label.split('—')[0].strip()}.{RESET}\n")
             return model_id
-        print(f"{DIM}Enter 1, 2, or 3.{RESET}")
+        print(f"{DIM}Enter 0, 1, 2, or 3.{RESET}")
 
 
 def main():
+    init_learning()
+
     def shutdown(sig=None, frame=None):
         try:
             readline.write_history_file(str(RL_HISTORY))
@@ -640,16 +982,25 @@ def main():
     readline.set_history_length(200)
 
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
-    print(f"{DIM}  /clear   wipe session context")
-    print(f"  /forget  delete all history")
-    print(f"  /model   switch model")
-    print(f"  quit     exit{RESET}\n")
+    print(f"{DIM}  /clear        wipe session context")
+    print(f"  /forget       delete all history")
+    print(f"  /model        switch model")
+    print(f"  /memory       show stored facts")
+    print(f"  /memorize     learn from this session")
+    print(f"  /forget-fact  remove a fact by number")
+    print(f"  quit          exit{RESET}\n")
 
-    model = pick_model()
+    locked_model = None   # None = auto-routing
     session = load_prior()
+
     if session:
         turns = len(session) // 2
-        print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}\n")
+        print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", end="")
+    if USER_FACTS:
+        print(f"  {DIM}({len(USER_FACTS)} fact{'s' if len(USER_FACTS) != 1 else ''} in memory){RESET}", end="")
+    if session or USER_FACTS:
+        print()
+    print(f"{DIM}Model: auto-routing  (/model to change){RESET}\n")
 
     while True:
         try:
@@ -661,6 +1012,13 @@ def main():
             continue
 
         if user_input.lower() in ("quit", "exit", "bye"):
+            if session:
+                print(f"{DIM}Memorizing session...{RESET}", end=" ", flush=True)
+                facts = extract_memory(session)
+                if facts is None:
+                    print(f"{DIM}(rate-limited, try /memorize later){RESET}")
+                else:
+                    print(f"{DIM}({len(facts)} fact{'s' if len(facts) != 1 else ''} stored){RESET}")
             print(f"\n{CYAN}Zeev:{RESET} Take care. I'll be here when you need me.\n")
             break
 
@@ -677,13 +1035,53 @@ def main():
             continue
 
         if user_input.lower() == "/model":
-            model = pick_model()
+            locked_model = pick_model(locked_model)
             continue
+
+        if user_input.lower() == "/memory":
+            if USER_FACTS:
+                print(f"{DIM}Stored facts:{RESET}")
+                for i, f in enumerate(USER_FACTS, 1):
+                    print(f"  {DIM}{i}.{RESET} {f}")
+            else:
+                print(f"{DIM}No facts stored yet.{RESET}")
+            print()
+            continue
+
+        if user_input.lower() == "/memorize":
+            if not session:
+                print(f"{DIM}Nothing to memorize yet.{RESET}\n")
+                continue
+            print(f"{DIM}Memorizing...{RESET}", end=" ", flush=True)
+            facts = extract_memory(session)
+            if facts is None:
+                print(f"{DIM}(rate-limited, try again in a moment){RESET}\n")
+            else:
+                print(f"{DIM}({len(facts)} fact{'s' if len(facts) != 1 else ''} stored){RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/forget-fact"):
+            parts = user_input.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                print(f"{DIM}Usage: /forget-fact <number>{RESET}\n")
+                continue
+            idx = int(parts[1]) - 1
+            if 0 <= idx < len(USER_FACTS):
+                removed = USER_FACTS.pop(idx)
+                save_memory(USER_FACTS)
+                print(f"{DIM}Removed: {removed}{RESET}\n")
+            else:
+                print(f"{DIM}No fact #{parts[1]}.{RESET}\n")
+            continue
+
+        model_id = locked_model if locked_model else route_model(user_input)
+        if locked_model is None:
+            print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
 
         session.append({"role": "user", "content": user_input})
         append_message("user", user_input)
 
-        reply = stream_reply(session, model)
+        reply = stream_reply(session, model_id)
         if reply:
             session.append({"role": "assistant", "content": reply})
             append_message("assistant", reply)

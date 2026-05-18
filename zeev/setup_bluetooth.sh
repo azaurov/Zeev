@@ -11,21 +11,19 @@ echo "[1/3] Installing packages..."
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends bluez bluez-tools espeak-ng
 
-# Bluetooth audio backend — detect what's running
-if systemctl is-active --quiet pipewire 2>/dev/null || \
-   dpkg -l pipewire 2>/dev/null | grep -q "^ii"; then
-  echo "      Detected PipeWire — installing Bluetooth audio support..."
-  sudo apt-get install -y --no-install-recommends \
-    pipewire-audio libspa-0.2-bluetooth wireplumber
-elif command -v pulseaudio &>/dev/null; then
+# Bluetooth audio backend — detect what's running, install if needed
+if command -v pulseaudio &>/dev/null && pulseaudio --check 2>/dev/null; then
   echo "      Detected PulseAudio — installing Bluetooth module..."
   sudo apt-get install -y --no-install-recommends pulseaudio-module-bluetooth
   pulseaudio -k 2>/dev/null || true
 else
-  echo "      Installing BlueALSA..."
-  sudo apt-get install -y --no-install-recommends bluealsa
-  sudo systemctl enable bluealsa
-  sudo systemctl start bluealsa
+  # PipeWire is the standard on Pi OS Bookworm (Lite or Desktop)
+  echo "      Installing PipeWire Bluetooth audio..."
+  sudo apt-get install -y --no-install-recommends \
+    pipewire pipewire-audio libspa-0.2-bluetooth wireplumber
+  # Enable for current user (no sudo — PipeWire runs as user service)
+  systemctl --user enable pipewire pipewire-pulse wireplumber 2>/dev/null || true
+  systemctl --user start  pipewire pipewire-pulse wireplumber 2>/dev/null || true
 fi
 
 # ── 2. Enable Bluetooth service ───────────────────────────────────────────────

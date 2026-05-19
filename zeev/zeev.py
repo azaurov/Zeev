@@ -132,23 +132,49 @@ def get_battery():
 
 TTS_AVAILABLE = False   # set by init_tts()
 PIPER_BIN     = ""
-PIPER_MODEL   = os.environ.get("PIPER_MODEL", "")
+PIPER_MODELS  = {}      # lang -> model path, populated by init_tts()
+
+# Hebrew Unicode block: U+0590–U+05FF
+_HE_RE = re.compile(r"[֐-׿]")
+# Spanish markers: ñ, ¿, ¡, or common accented vowels
+_ES_RE = re.compile(r"[ñÑ¿¡áéíóúüÁÉÍÓÚÜ]")
+
+
+def detect_lang(text):
+    """Return 'he', 'es', or 'en' based on characters in text."""
+    if _HE_RE.search(text):
+        return "he"
+    if _ES_RE.search(text):
+        return "es"
+    return "en"
 
 
 def init_tts():
-    global TTS_AVAILABLE, PIPER_BIN, PIPER_MODEL
+    global TTS_AVAILABLE, PIPER_BIN, PIPER_MODELS
     PIPER_BIN = shutil.which("piper") or ""
-    if PIPER_BIN and not PIPER_MODEL:
-        for candidate in [
-            BASE_DIR / "data" / "piper_voice.onnx",
-            Path.home() / "piper" / "en_US-lessac-medium.onnx",
-            Path.home() / ".local" / "share" / "piper" / "en_US-lessac-medium.onnx",
-        ]:
-            if candidate.exists():
-                PIPER_MODEL = str(candidate)
-                break
+    piper_dir = Path.home() / "piper"
+    data_dir  = BASE_DIR / "data"
+    share_dir = Path.home() / ".local" / "share" / "piper"
+
+    def _find(candidates):
+        for c in candidates:
+            if Path(c).exists():
+                return str(c)
+        return ""
+
+    if PIPER_BIN:
+        PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
+            data_dir / "piper_voice.onnx",
+            piper_dir / "en_US-lessac-medium.onnx",
+            share_dir / "en_US-lessac-medium.onnx",
+        ])
+        PIPER_MODELS["es"] = _find([
+            piper_dir / "es_MX-ald-medium.onnx",
+            share_dir / "es_MX-ald-medium.onnx",
+        ])
+
     TTS_AVAILABLE = bool(
-        (PIPER_BIN and PIPER_MODEL) or shutil.which("espeak-ng")
+        (PIPER_BIN and PIPER_MODELS.get("en")) or shutil.which("espeak-ng")
     )
 
 
@@ -158,39 +184,50 @@ def _clean_for_tts(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _piper_speak(clean, model):
+    """Run Piper in a background thread, piping output to aplay."""
+    def _run():
+        try:
+            piper_proc = subprocess.Popen(
+                [PIPER_BIN, "--model", model, "--output_raw"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            aplay_proc = subprocess.Popen(
+                ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+                stdin=piper_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            piper_proc.stdout.close()
+            piper_proc.stdin.write(clean.encode())
+            piper_proc.stdin.close()
+            aplay_proc.wait()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def speak_terminal(text):
-    """Speak text via Piper (preferred) or espeak-ng (fallback) in background."""
+    """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
     if not TTS_AVAILABLE:
         return
     clean = _clean_for_tts(text)
     if not clean:
         return
-    if PIPER_BIN and PIPER_MODEL:
-        def _run():
-            try:
-                piper_proc = subprocess.Popen(
-                    [PIPER_BIN, "--model", PIPER_MODEL, "--output_raw"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
-                aplay_proc = subprocess.Popen(
-                    ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
-                    stdin=piper_proc.stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                piper_proc.stdout.close()
-                piper_proc.stdin.write(clean.encode())
-                piper_proc.stdin.close()
-                aplay_proc.wait()
-            except Exception:
-                pass
-        threading.Thread(target=_run, daemon=True).start()
+    lang = detect_lang(clean)
+
+    if PIPER_BIN and PIPER_MODELS.get(lang):
+        _piper_speak(clean, PIPER_MODELS[lang])
+    elif PIPER_BIN and PIPER_MODELS.get("en") and lang != "he":
+        # no lang-specific Piper model, fall back to English Piper
+        _piper_speak(clean, PIPER_MODELS["en"])
     else:
+        espeak_lang = {"he": "he", "es": "es"}.get(lang, "en")
         try:
             subprocess.Popen(
-                ["espeak-ng", "-s", "145", "-v", "en", clean],
+                ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -199,11 +236,11 @@ def speak_terminal(text):
 
 
 def groq_tts(text):
-    """Call Groq Orpheus TTS. Returns WAV bytes or None on error."""
+    """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
     if not GROQ_API_KEY or not text.strip():
         return None
     clean = _clean_for_tts(text)
-    if not clean:
+    if not clean or detect_lang(clean) != "en":
         return None
     try:
         resp = requests.post(
@@ -724,8 +761,18 @@ let busy = false;
 let pendingModel = null;
 let currentAudio = null;
 
+const LANG_BCP47 = {en: "en-US", es: "es-MX", he: "he-IL"};
+
 function cancelSpeech() {
   if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; }
+  speechSynthesis.cancel();
+}
+
+function _speakBrowser(text, lang) {
+  const u = new SpeechSynthesisUtterance(text.trim());
+  u.lang = LANG_BCP47[lang] || "en-US";
+  u.rate = 1.05;
+  speechSynthesis.speak(u);
 }
 
 async function speak(text) {
@@ -737,13 +784,18 @@ async function speak(text) {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({text}),
     });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    currentAudio = new Audio(url);
-    currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
-    currentAudio.play();
-  } catch (_) {}
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+      currentAudio.play();
+    } else {
+      // Groq TTS unavailable (non-English) — fall back to browser speechSynthesis
+      const data = await res.json().catch(() => ({}));
+      _speakBrowser(text, data.lang || "en");
+    }
+  } catch (_) { _speakBrowser(text, "en"); }
 }
 
 ttsBtn.onclick = () => {
@@ -1017,7 +1069,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.send_response(400)
                     self.end_headers()
                     return
-                audio = groq_tts(data.get("text", ""))
+                text = data.get("text", "")
+                lang = detect_lang(_clean_for_tts(text))
+                audio = groq_tts(text)
                 if audio:
                     self.send_response(200)
                     self.send_header("Content-Type", "audio/wav")
@@ -1025,8 +1079,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.end_headers()
                     self.wfile.write(audio)
                 else:
+                    # Tell the browser the detected language so it can use speechSynthesis
+                    body = json.dumps({"lang": lang}).encode()
                     self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
+                    self.wfile.write(body)
                 return
 
             if self.path == "/memorize":

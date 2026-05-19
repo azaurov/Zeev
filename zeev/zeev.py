@@ -136,14 +136,18 @@ PIPER_MODELS  = {}      # lang -> model path, populated by init_tts()
 
 # Hebrew Unicode block: U+0590–U+05FF
 _HE_RE = re.compile(r"[֐-׿]")
+# Cyrillic block: U+0400–U+04FF
+_RU_RE = re.compile(r"[Ѐ-ӿ]")
 # Spanish markers: ñ, ¿, ¡, or common accented vowels
 _ES_RE = re.compile(r"[ñÑ¿¡áéíóúüÁÉÍÓÚÜ]")
 
 
 def detect_lang(text):
-    """Return 'he', 'es', or 'en' based on characters in text."""
+    """Return 'he', 'ru', 'es', or 'en' based on characters in text."""
     if _HE_RE.search(text):
         return "he"
+    if _RU_RE.search(text):
+        return "ru"
     if _ES_RE.search(text):
         return "es"
     return "en"
@@ -171,6 +175,10 @@ def init_tts():
         PIPER_MODELS["es"] = _find([
             piper_dir / "es_MX-ald-medium.onnx",
             share_dir / "es_MX-ald-medium.onnx",
+        ])
+        PIPER_MODELS["ru"] = _find([
+            piper_dir / "ru_RU-dmitri-medium.onnx",
+            share_dir / "ru_RU-dmitri-medium.onnx",
         ])
 
     TTS_AVAILABLE = bool(
@@ -224,7 +232,7 @@ def speak_terminal(text):
         # no lang-specific Piper model, fall back to English Piper
         _piper_speak(clean, PIPER_MODELS["en"])
     else:
-        espeak_lang = {"he": "he", "es": "es"}.get(lang, "en")
+        espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
         try:
             subprocess.Popen(
                 ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
@@ -761,7 +769,7 @@ let busy = false;
 let pendingModel = null;
 let currentAudio = null;
 
-const LANG_BCP47 = {en: "en-US", es: "es-MX", he: "he-IL"};
+const LANG_BCP47 = {en: "en-US", es: "es-MX", he: "he-IL", ru: "ru-RU"};
 
 function cancelSpeech() {
   if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; }

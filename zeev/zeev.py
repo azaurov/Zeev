@@ -737,7 +737,7 @@ footer {
 <div id="chat"></div>
 <footer>
   <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
-  <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" />
+  <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
   <button class="btn" id="sendBtn" title="Send">&#10148;</button>
 </footer>
 <script>
@@ -808,6 +808,7 @@ ttsBtn.onclick = () => {
 function addBubble(role, text) {
   const d = document.createElement("div");
   d.className = "bubble " + (role === "user" ? "user-bubble" : "zeev-bubble");
+  d.dir = "auto";
   if (!text) d.classList.add("pending");
   d.textContent = text || "⋯";
   chat.appendChild(d);

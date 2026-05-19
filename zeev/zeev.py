@@ -22,6 +22,7 @@ MEMORY_FILE  = BASE_DIR / "data" / "user_memory.json"
 RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_your_key_here")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
 
@@ -130,30 +131,98 @@ def get_battery():
 # ---------------------------------------------------------------------------
 
 TTS_AVAILABLE = False   # set by init_tts()
+PIPER_BIN     = ""
+PIPER_MODEL   = os.environ.get("PIPER_MODEL", "")
 
 
 def init_tts():
-    global TTS_AVAILABLE
-    TTS_AVAILABLE = shutil.which("espeak-ng") is not None
+    global TTS_AVAILABLE, PIPER_BIN, PIPER_MODEL
+    PIPER_BIN = shutil.which("piper") or ""
+    if PIPER_BIN and not PIPER_MODEL:
+        for candidate in [
+            BASE_DIR / "data" / "piper_voice.onnx",
+            Path.home() / "piper" / "en_US-lessac-medium.onnx",
+            Path.home() / ".local" / "share" / "piper" / "en_US-lessac-medium.onnx",
+        ]:
+            if candidate.exists():
+                PIPER_MODEL = str(candidate)
+                break
+    TTS_AVAILABLE = bool(
+        (PIPER_BIN and PIPER_MODEL) or shutil.which("espeak-ng")
+    )
+
+
+def _clean_for_tts(text):
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"[*_`#~]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def speak_terminal(text):
-    """Speak text via espeak-ng in background. No-op if not available."""
+    """Speak text via Piper (preferred) or espeak-ng (fallback) in background."""
     if not TTS_AVAILABLE:
         return
-    clean = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    clean = re.sub(r"[*_`#~]", "", clean)
-    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = _clean_for_tts(text)
     if not clean:
         return
+    if PIPER_BIN and PIPER_MODEL:
+        def _run():
+            try:
+                piper_proc = subprocess.Popen(
+                    [PIPER_BIN, "--model", PIPER_MODEL, "--output_raw"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                aplay_proc = subprocess.Popen(
+                    ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+                    stdin=piper_proc.stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                piper_proc.stdout.close()
+                piper_proc.stdin.write(clean.encode())
+                piper_proc.stdin.close()
+                aplay_proc.wait()
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+    else:
+        try:
+            subprocess.Popen(
+                ["espeak-ng", "-s", "145", "-v", "en", clean],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+
+def groq_tts(text):
+    """Call Groq Orpheus TTS. Returns WAV bytes or None on error."""
+    if not GROQ_API_KEY or not text.strip():
+        return None
+    clean = _clean_for_tts(text)
+    if not clean:
+        return None
     try:
-        subprocess.Popen(
-            ["espeak-ng", "-s", "145", "-v", "en", clean],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        resp = requests.post(
+            GROQ_TTS_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "canopylabs/orpheus-v1-english",
+                "input": clean[:4096],
+                "voice": "daniel",
+                "response_format": "wav",
+            },
+            timeout=30,
         )
+        return resp.content if resp.status_code == 200 else None
     except Exception:
-        pass
+        return None
 
 
 def bt_list():
@@ -652,46 +721,35 @@ const memCloseBtn = document.getElementById("memCloseBtn");
 
 let ttsOn = true;
 let busy = false;
-let speechBuf = "";
-let maleVoice = null;
 let pendingModel = null;
+let currentAudio = null;
 
-function loadVoices() {
-  const voices = speechSynthesis.getVoices();
-  maleVoice = voices.find(v => /male/i.test(v.name)) ||
-              voices.find(v => /\\bman\\b/i.test(v.name)) ||
-              null;
+function cancelSpeech() {
+  if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; }
 }
-speechSynthesis.onvoiceschanged = loadVoices;
-loadVoices();
 
-// --- TTS ---
-function speak(text) {
+async function speak(text) {
   if (!ttsOn || !text.trim()) return;
-  const u = new SpeechSynthesisUtterance(text.trim());
-  u.rate = 1.05;
-  u.pitch = maleVoice ? 1.0 : 0.7;
-  if (maleVoice) u.voice = maleVoice;
-  speechSynthesis.speak(u);
-}
-function feedSpeech(chunk) {
-  if (!ttsOn) return;
-  speechBuf += chunk;
-  let m;
-  while ((m = speechBuf.match(/^([^]*?[.!?])([ \\t\\r\\n]|$)/)) !== null) {
-    speak(m[1]);
-    speechBuf = speechBuf.slice(m[0].length);
-  }
-}
-function flushSpeech() {
-  if (speechBuf.trim()) speak(speechBuf);
-  speechBuf = "";
+  cancelSpeech();
+  try {
+    const res = await fetch("/tts", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text}),
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    currentAudio = new Audio(url);
+    currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+    currentAudio.play();
+  } catch (_) {}
 }
 
 ttsBtn.onclick = () => {
   ttsOn = !ttsOn;
   ttsBtn.innerHTML = ttsOn ? "&#128266;" : "&#128263;";
-  if (!ttsOn) speechSynthesis.cancel();
+  if (!ttsOn) cancelSpeech();
 };
 
 // --- UI helpers ---
@@ -716,8 +774,7 @@ async function send(msg) {
   addBubble("user", msg);
   const zd = addBubble("zeev", "");
 
-  speechSynthesis.cancel();
-  speechBuf = "";
+  cancelSpeech();
   pendingModel = null;
 
   try {
@@ -749,7 +806,6 @@ async function send(msg) {
             full += p.token;
             zd.textContent = full;
             chat.scrollTop = chat.scrollHeight;
-            feedSpeech(p.token);
           } else if (p.error) {
             zd.classList.remove("pending");
             zd.textContent = "Error: " + p.error;
@@ -762,7 +818,7 @@ async function send(msg) {
         } catch (_) {}
       }
     }
-    flushSpeech();
+    speak(full);
     if (!full && !zd.textContent) zd.textContent = "(no response)";
     if (pendingModel && full) {
       const tag = document.createElement("span");
@@ -788,7 +844,7 @@ inp.addEventListener("keydown", e => {
 clearBtn.onclick = async () => {
   await fetch("/clear", {method: "POST"});
   chat.innerHTML = "";
-  speechSynthesis.cancel();
+  cancelSpeech();
 };
 
 // --- Memory UI ---
@@ -951,6 +1007,26 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     session.clear()
                 self.send_response(204)
                 self.end_headers()
+                return
+
+            if self.path == "/tts":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length))
+                except json.JSONDecodeError:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                audio = groq_tts(data.get("text", ""))
+                if audio:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(audio)))
+                    self.end_headers()
+                    self.wfile.write(audio)
+                else:
+                    self.send_response(503)
+                    self.end_headers()
                 return
 
             if self.path == "/memorize":
@@ -1228,7 +1304,9 @@ def main():
 
         if user_input.lower() == "/tts":
             if not TTS_AVAILABLE:
-                print(f"{DIM}espeak-ng not installed. Run: sudo apt install espeak-ng{RESET}\n")
+                print(f"{DIM}No TTS engine found. Install Piper (recommended) or espeak-ng.")
+                print(f"  Piper: download from github.com/rhasspy/piper and set PIPER_MODEL=/path/to/model.onnx")
+                print(f"  espeak-ng: sudo apt install espeak-ng{RESET}\n")
                 continue
             tts_on = not tts_on
             state = "on" if tts_on else "off"

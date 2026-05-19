@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -530,18 +531,23 @@ def tavily_search(query):
 # ---------------------------------------------------------------------------
 
 def _groq_post(msgs, model, stream=True):
-    """POST to Groq. Returns (response, error_str)."""
-    try:
-        return requests.post(
-            GROQ_URL,
-            json={"model": model, "messages": msgs,
-                  "temperature": 0.75, "max_tokens": 400, "stream": stream},
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            stream=stream,
-            timeout=60,
-        ), None
-    except requests.RequestException as e:
-        return None, str(e)
+    """POST to Groq. Returns (response, error_str). Retries up to 3x on network errors."""
+    last_err = ""
+    for attempt in range(3):
+        try:
+            return requests.post(
+                GROQ_URL,
+                json={"model": model, "messages": msgs,
+                      "temperature": 0.75, "max_tokens": 400, "stream": stream},
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                stream=stream,
+                timeout=60,
+            ), None
+        except requests.RequestException as e:
+            last_err = str(e)
+            if attempt < 2:
+                time.sleep(1)
+    return None, last_err
 
 
 def _build_system_prompt(user_text, on_search=None):

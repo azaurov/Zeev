@@ -1447,9 +1447,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--https" in sys.argv:
+    if "--https" in sys.argv or "-https" in sys.argv:
         run_web_server(port=5443, use_https=True)
-    elif "--web" in sys.argv:
+    elif "--web" in sys.argv or "-web" in sys.argv:
         run_web_server()
     else:
         main()

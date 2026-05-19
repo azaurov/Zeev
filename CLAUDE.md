@@ -36,9 +36,13 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
 - **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
-- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction.
+- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus.
+- **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None` on error.
+- **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
+- **`speak_terminal(text)`** — speaks via Piper (preferred) or espeak-ng (fallback) in a background thread. Piper binary and model are auto-detected by `init_tts()`.
+- **`init_tts()`** — detects Piper binary (`piper` in PATH) and model file (checks `data/piper_voice.onnx`, `~/piper/en_US-lessac-medium.onnx`, `~/.local/share/piper/`); falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODEL`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
-- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, and `quit` commands; readline history in `data/.readline_history`.
+- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, and `quit` commands; readline history in `data/.readline_history`.
 
 ### Models (Groq)
 
@@ -103,7 +107,7 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 - Dark mobile-first chat interface
 - Model selector (Auto / 8B / 70B / DeepSeek R1) — Auto is default; model tag shown on each bubble
 - 🧠 memory panel — view stored facts, trigger memorization
-- TTS (Web Speech API) with sentence-level streaming
+- TTS via Groq Orpheus (`daniel` voice) — called after each reply finishes, played via browser Audio API
 - Voice input (Web Speech Recognition)
 - HTTPS mode with auto-generated self-signed cert (accept once in browser)
 
@@ -127,9 +131,14 @@ zeev/
     user_memory.json             # persistent user facts
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)
+    piper_voice.onnx             # optional: drop a Piper model here for auto-detection
+~/piper/                         # Piper TTS install (outside repo)
+  piper                          # binary (symlinked to ~/.local/bin/piper)
+  en_US-lessac-medium.onnx       # voice model (auto-detected by init_tts)
+  en_US-lessac-medium.onnx.json  # voice config
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Inference runs on Groq's cloud, so local hardware only handles the HTTP server and UI — no local model loading required.
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Terminal TTS runs locally via Piper (model load ~7s, then a few seconds per response); web UI TTS is also cloud-based via Groq Orpheus so it does not burden the Pi.

@@ -37,10 +37,11 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus.
-- **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None` on error.
+- **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
+- **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
 - **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
-- **`speak_terminal(text)`** — speaks via Piper (preferred) or espeak-ng (fallback) in a background thread. Piper binary and model are auto-detected by `init_tts()`.
-- **`init_tts()`** — detects Piper binary (`piper` in PATH) and model file (checks `data/piper_voice.onnx`, `~/piper/en_US-lessac-medium.onnx`, `~/.local/share/piper/`); falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODEL`.
+- **`speak_terminal(text)`** — detects language, routes to the appropriate Piper model (en/es/ru) or espeak-ng (he, or fallback). Runs in a background thread.
+- **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`, `es`, `ru`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, and `quit` commands; readline history in `data/.readline_history`.
 
@@ -107,9 +108,23 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 - Dark mobile-first chat interface
 - Model selector (Auto / 8B / 70B / DeepSeek R1) — Auto is default; model tag shown on each bubble
 - 🧠 memory panel — view stored facts, trigger memorization
-- TTS via Groq Orpheus (`daniel` voice) — called after each reply finishes, played via browser Audio API
+- TTS: Groq Orpheus (`daniel`) for English; browser `speechSynthesis` fallback for Spanish (`es-MX`), Hebrew (`he-IL`), Russian (`ru-RU`)
+- Chat bubbles and input field use `dir="auto"` for automatic RTL layout with Hebrew
 - Voice input (Web Speech Recognition)
 - HTTPS mode with auto-generated self-signed cert (accept once in browser)
+
+### Multilingual TTS
+
+`detect_lang()` inspects each reply before speaking:
+
+| Language | Detection | Terminal engine | Web UI engine |
+|---|---|---|---|
+| English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
+| Spanish | ñ, ¿, ¡, accented vowels | Piper `es_MX-ald-medium` | `speechSynthesis` `es-MX` |
+| Hebrew | Hebrew Unicode block (U+0590–U+05FF) | espeak-ng `-v he` | `speechSynthesis` `he-IL` |
+| Russian | Cyrillic block (U+0400–U+04FF) | Piper `ru_RU-dmitri-medium` | `speechSynthesis` `ru-RU` |
+
+Groq Orpheus only supports English; non-English replies return `None` from `groq_tts()` and the web UI falls back to `speechSynthesis` with the correct BCP-47 language tag. Hebrew chat bubbles and the input field use `dir="auto"` for automatic RTL layout.
 
 ### Web UI SSE events
 
@@ -134,8 +149,10 @@ zeev/
     piper_voice.onnx             # optional: drop a Piper model here for auto-detection
 ~/piper/                         # Piper TTS install (outside repo)
   piper                          # binary (symlinked to ~/.local/bin/piper)
-  en_US-lessac-medium.onnx       # voice model (auto-detected by init_tts)
-  en_US-lessac-medium.onnx.json  # voice config
+  en_US-lessac-medium.onnx       # English voice (auto-detected by init_tts)
+  es_MX-ald-medium.onnx          # Spanish voice
+  ru_RU-dmitri-medium.onnx       # Russian voice
+  *.onnx.json                    # voice configs (one per model)
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 

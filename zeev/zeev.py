@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Zeev — AI Companion"""
 
+import base64
+import io
 import json
 import os
 import re
@@ -78,7 +80,10 @@ _MODEL_SHORT = {
     "llama-3.3-70b-versatile":      "70B",
     "deepseek-r1-distill-llama-70b":"R1",
 }
-PRIOR_TURNS = 15
+PRIOR_TURNS  = 15
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+CAMERA_AVAILABLE = False   # set by init_camera()
 
 
 def route_model(text):
@@ -579,6 +584,55 @@ def _with_search(user_text, on_search=None):
     return _build_system_prompt(user_text, on_search)
 
 
+# ---------------------------------------------------------------------------
+# Camera (Raspberry Pi NoIR Camera Module V2)
+# ---------------------------------------------------------------------------
+
+def init_camera():
+    global CAMERA_AVAILABLE
+    try:
+        from picamera2 import Picamera2
+        cam = Picamera2()
+        cam.close()
+        CAMERA_AVAILABLE = True
+    except Exception:
+        CAMERA_AVAILABLE = False
+
+
+def capture_image(width=1280, height=720):
+    """Capture a JPEG via picamera2. Returns base64 string or None."""
+    try:
+        from picamera2 import Picamera2
+        cam = Picamera2()
+        config = cam.create_still_configuration(main={"size": (width, height)})
+        cam.configure(config)
+        cam.start()
+        time.sleep(0.5)  # let auto-exposure settle
+        buf = io.BytesIO()
+        cam.capture_file(buf, format="jpeg")
+        cam.stop()
+        cam.close()
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+    except Exception:
+        return None
+
+
+def _build_vision_msgs(image_b64, question=""):
+    """Build the multimodal messages list for a vision API call."""
+    q = question or "What do you see in this image? Describe it concisely."
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                {"type": "text", "text": q},
+            ],
+        },
+    ]
+
+
 def stream_reply(messages, model):
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
@@ -682,6 +736,8 @@ footer {
 #sendBtn:disabled { background: #222; cursor: not-allowed; }
 #micBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
 #micBtn.active { background: #dc2626; border-color: #dc2626; }
+#snapBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#snapBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 .icon-btn {
   background: none; border: none; cursor: pointer; font-size: 1.1rem;
   color: #7dd3fc; padding: 4px; line-height: 1;
@@ -751,6 +807,7 @@ footer {
 <div id="chat"></div>
 <footer>
   <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
+  <button class="btn" id="snapBtn" title="Take photo">&#128247;</button>
   <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
   <button class="btn" id="sendBtn" title="Send">&#10148;</button>
 </footer>
@@ -761,6 +818,7 @@ const chat = document.getElementById("chat");
 const inp = document.getElementById("inp");
 const sendBtn = document.getElementById("sendBtn");
 const micBtn = document.getElementById("micBtn");
+const snapBtn = document.getElementById("snapBtn");
 const ttsBtn = document.getElementById("ttsBtn");
 const clearBtn = document.getElementById("clearBtn");
 const modelSel = document.getElementById("modelSel");
@@ -769,6 +827,8 @@ const memOverlay = document.getElementById("memOverlay");
 const memList = document.getElementById("memList");
 const memorizeBtn = document.getElementById("memorizeBtn");
 const memCloseBtn = document.getElementById("memCloseBtn");
+
+fetch("/camera").then(r=>r.json()).then(d=>{if(!d.available)snapBtn.style.display="none";}).catch(()=>{snapBtn.style.display="none";});
 
 let ttsOn = true;
 let busy = false;
@@ -908,6 +968,93 @@ inp.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(inp.value); }
 });
 
+// --- Camera / snap ---
+async function snap() {
+  if (busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  snapBtn.disabled = true;
+
+  const question = inp.value.trim();
+  inp.value = "";
+
+  addBubble("user", question || "📷 What do you see?");
+  const zd = addBubble("zeev", "");
+  cancelSpeech();
+  pendingModel = null;
+
+  let full = "";
+  let hasImage = false;
+  let textSpan = null;
+
+  try {
+    const res = await fetch("/snap", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question}),
+    });
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const d = line.slice(6);
+        if (d === "[DONE]") continue;
+        try {
+          const p = JSON.parse(d);
+          if (p.image) {
+            zd.classList.remove("pending");
+            const img = document.createElement("img");
+            img.src = p.image;
+            img.style.cssText = "max-width:100%;border-radius:8px;margin-bottom:6px;display:block;";
+            zd.insertBefore(img, zd.firstChild);
+            hasImage = true;
+          } else if (p.token) {
+            zd.classList.remove("pending");
+            full += p.token;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
+            chat.scrollTop = chat.scrollHeight;
+          } else if (p.error) {
+            zd.classList.remove("pending");
+            zd.textContent = "Error: " + p.error;
+          } else if (p.info && !hasImage) {
+            zd.classList.remove("pending");
+            zd.textContent = p.info;
+          } else if (p.model) {
+            pendingModel = p.model;
+          }
+        } catch (_) {}
+      }
+    }
+    speak(full);
+    if (pendingModel && full) {
+      const tag = document.createElement("span");
+      tag.className = "model-tag";
+      tag.textContent = pendingModel;
+      zd.appendChild(tag);
+    }
+  } catch (e) {
+    zd.classList.remove("pending");
+    zd.textContent = "Connection error.";
+  }
+
+  busy = false;
+  sendBtn.disabled = false;
+  snapBtn.disabled = false;
+  inp.focus();
+}
+
+snapBtn.onclick = snap;
+
 clearBtn.onclick = async () => {
   await fetch("/clear", {method: "POST"});
   chat.innerHTML = "";
@@ -1034,6 +1181,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     init_learning()
+    init_camera()
     session = load_prior()
     lock = threading.Lock()
 
@@ -1059,6 +1207,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(body)
             elif self.path == "/memory":
                 body = json.dumps({"facts": USER_FACTS}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/camera":
+                body = json.dumps({"available": CAMERA_AVAILABLE}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -1113,6 +1268,78 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+
+            if self.path == "/snap":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length)) if length else {}
+                except json.JSONDecodeError:
+                    data = {}
+                question = data.get("question", "").strip()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+
+                def snap_sse(obj):
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+
+                if not CAMERA_AVAILABLE:
+                    snap_sse({"error": "Camera not available"})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+
+                snap_sse({"info": "Capturing…"})
+                img = capture_image()
+                if not img:
+                    snap_sse({"error": "Capture failed"})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+
+                snap_sse({"image": f"data:image/jpeg;base64,{img}"})
+                snap_sse({"model": "Scout"})
+
+                vision_payload = _build_vision_msgs(img, question)
+                snap_reply = ""
+                try:
+                    resp, err = _groq_post(vision_payload, VISION_MODEL)
+                    if err:
+                        snap_sse({"error": err})
+                    else:
+                        for line in resp.iter_lines():
+                            if not line or not line.startswith(b"data: "):
+                                continue
+                            chunk = line[6:]
+                            if chunk == b"[DONE]":
+                                break
+                            try:
+                                delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
+                                if delta:
+                                    snap_reply += delta
+                                    snap_sse({"token": delta})
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                pass
+                except requests.RequestException as e:
+                    snap_sse({"error": str(e)})
+
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+                if snap_reply:
+                    q_text = question or "What do you see?"
+                    with lock:
+                        session.append({"role": "user", "content": f"[camera] {q_text}"})
+                        session.append({"role": "assistant", "content": snap_reply})
+                        append_message("user", f"[camera] {q_text}")
+                        append_message("assistant", snap_reply)
+                        if len(session) > 60:
+                            session[:] = session[-60:]
                 return
 
             if self.path != "/chat":
@@ -1275,6 +1502,7 @@ def main():
     readline.set_history_length(200)
 
     init_tts()
+    init_camera()
 
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
     print(f"{DIM}  /clear        wipe session context")
@@ -1285,6 +1513,7 @@ def main():
     print(f"  /forget-fact  remove a fact by number")
     print(f"  /tts          toggle speech output")
     print(f"  /bt           manage Bluetooth devices")
+    print(f"  /look [q]     take a photo and ask Zeev about it")
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
@@ -1385,6 +1614,46 @@ def main():
             tts_on = not tts_on
             state = "on" if tts_on else "off"
             print(f"{DIM}Speech {state}.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/look"):
+            if not CAMERA_AVAILABLE:
+                print(f"{DIM}Camera not available.{RESET}\n")
+                continue
+            question = user_input[5:].strip()
+            print(f"{DIM}[capturing...]{RESET}", flush=True)
+            img = capture_image()
+            if not img:
+                print(f"{DIM}Capture failed.{RESET}\n")
+                continue
+            vision_msgs = _build_vision_msgs(img, question)
+            resp, err = _groq_post(vision_msgs, VISION_MODEL, stream=True)
+            if err:
+                print(f"Error: {err}\n")
+                continue
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
+            full_reply = ""
+            for line in resp.iter_lines():
+                if not line or not line.startswith(b"data: "):
+                    continue
+                chunk = line[6:]
+                if chunk == b"[DONE]":
+                    break
+                try:
+                    delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
+                    print(delta, end="", flush=True)
+                    full_reply += delta
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
+            print()
+            if full_reply:
+                q_text = question or "What do you see?"
+                session.append({"role": "user", "content": f"[camera] {q_text}"})
+                session.append({"role": "assistant", "content": full_reply})
+                append_message("user", f"[camera] {q_text}")
+                append_message("assistant", full_reply)
+                if tts_on:
+                    speak_terminal(full_reply)
             continue
 
         if user_input.lower().startswith("/bt"):

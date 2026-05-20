@@ -22,6 +22,7 @@ import requests
 BASE_DIR = Path(__file__).resolve().parent
 HISTORY_FILE = BASE_DIR / "data" / "history.jsonl"
 MEMORY_FILE  = BASE_DIR / "data" / "user_memory.json"
+NOTES_FILE   = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_your_key_here")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
@@ -31,8 +32,10 @@ TAVILY_URL     = "https://api.tavily.com/search"
 
 # Learning state — populated by init_learning() at startup
 USER_FACTS       = []   # persistent facts about the user
+USER_NOTES       = []   # persistent notes saved by the user
 _HISTORY_ENTRIES = []   # raw parsed entries from history.jsonl for RAG
 _HISTORY_INDEX   = {}   # word → [entry indices] inverted index
+_notes_lock      = threading.Lock()
 
 _STOP_WORDS = frozenset([
     "the", "and", "for", "are", "but", "not", "you", "all", "can",
@@ -438,6 +441,45 @@ def extract_memory(session_msgs):
 
 
 # ---------------------------------------------------------------------------
+# Notes (persistent user-saved notes)
+# ---------------------------------------------------------------------------
+
+def load_notes():
+    if not NOTES_FILE.exists():
+        return []
+    notes = []
+    for line in NOTES_FILE.read_text().splitlines():
+        try:
+            notes.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return notes
+
+
+def add_note(text):
+    global USER_NOTES
+    note = {"text": text.strip(), "ts": datetime.now().isoformat()}
+    NOTES_FILE.parent.mkdir(exist_ok=True)
+    with open(NOTES_FILE, "a") as f:
+        f.write(json.dumps(note) + "\n")
+    with _notes_lock:
+        USER_NOTES.append(note)
+    return USER_NOTES
+
+
+def delete_note(idx):
+    global USER_NOTES
+    with _notes_lock:
+        if not (0 <= idx < len(USER_NOTES)):
+            return False
+        USER_NOTES.pop(idx)
+        NOTES_FILE.write_text(
+            "".join(json.dumps(n) + "\n" for n in USER_NOTES)
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # History RAG (keyword retrieval over past conversations)
 # ---------------------------------------------------------------------------
 
@@ -502,9 +544,10 @@ def retrieve_relevant(query, k=2, min_score=2):
 
 
 def init_learning():
-    """Load memory facts and build RAG index. Call once at startup."""
-    global USER_FACTS
+    """Load memory facts, notes, and build RAG index. Call once at startup."""
+    global USER_FACTS, USER_NOTES
     USER_FACTS = load_memory()
+    USER_NOTES = load_notes()
     build_rag_index()
 
 
@@ -562,6 +605,12 @@ def _build_system_prompt(user_text, on_search=None):
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
         parts.append(f"\n\n## What I know about Ragnar:\n{facts_str}")
+
+    with _notes_lock:
+        notes_snapshot = list(USER_NOTES)
+    if notes_snapshot:
+        notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
+        parts.append(f"\n\n## Ragnar's notes:\n{notes_str}")
 
     hits = retrieve_relevant(user_text)
     if hits:
@@ -773,6 +822,43 @@ footer {
 #memorizeBtn { background: #1d4ed8; color: #fff; }
 #memorizeBtn:disabled { background: #1a2a4a; color: #556; cursor: not-allowed; }
 #memCloseBtn { background: #1e1e1e; color: #aaa; border: 1px solid #333; }
+/* Notes overlay */
+#noteOverlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.85); z-index: 100;
+  padding: 20px; overflow-y: auto;
+}
+#notePanel {
+  background: #141414; border: 1px solid #252525; border-radius: 14px;
+  padding: 20px; max-width: 480px; margin: 0 auto;
+}
+#notePanel h2 { color: #7dd3fc; font-size: 1rem; margin-bottom: 14px; }
+#noteList { font-size: 0.88rem; line-height: 1.9; color: #ccc; min-height: 40px; }
+#noteList em { color: #444; }
+.note-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+.note-row span { flex: 1; }
+.note-del {
+  background: none; border: none; color: #555; cursor: pointer;
+  font-size: 0.9rem; padding: 0 2px; line-height: 1.9; flex-shrink: 0;
+}
+.note-del:hover { color: #ef4444; }
+.note-add-row {
+  display: flex; gap: 8px; margin-top: 16px; align-items: center;
+}
+#noteInp {
+  flex: 1; background: #1a1a1a; color: #e8e8e8;
+  border: 1px solid #2e2e2e; border-radius: 10px;
+  padding: 8px 12px; font-size: 0.9rem; outline: none;
+}
+#noteInp:focus { border-color: #7dd3fc; }
+#noteMicBtn {
+  background: #1e1e1e; border: 1px solid #333; border-radius: 50%;
+  width: 36px; height: 36px; cursor: pointer; font-size: 1rem;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+#noteMicBtn.active { background: #dc2626; border-color: #dc2626; }
+#noteAddBtn { background: #1d4ed8; color: #fff; }
+#noteCloseBtn { background: #1e1e1e; color: #aaa; border: 1px solid #333; }
 </style>
 </head>
 <body>
@@ -789,10 +875,25 @@ footer {
   </div>
 </div>
 
+<!-- Notes overlay -->
+<div id="noteOverlay">
+  <div id="notePanel">
+    <h2>&#128221; Notes</h2>
+    <div id="noteList"><em>Loading...</em></div>
+    <div class="note-add-row">
+      <input id="noteInp" type="text" placeholder="New note…" dir="auto" />
+      <button id="noteMicBtn" title="Dictate note">&#127908;</button>
+      <button class="mem-btn" id="noteAddBtn">Add</button>
+      <button class="mem-btn" id="noteCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <span class="brand">Zeev</span>
   <div class="controls">
     <span id="battPct" style="display:none"></span>
+    <button class="icon-btn" id="noteBtn" title="Notes">&#128221;</button>
     <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
     <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
@@ -1103,6 +1204,91 @@ memorizeBtn.onclick = async () => {
   memorizeBtn.disabled = false;
 };
 
+// --- Speech recognition (shared) ---
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// --- Notes UI ---
+const noteBtn = document.getElementById("noteBtn");
+const noteOverlay = document.getElementById("noteOverlay");
+const noteList = document.getElementById("noteList");
+const noteInp = document.getElementById("noteInp");
+const noteAddBtn = document.getElementById("noteAddBtn");
+const noteCloseBtn = document.getElementById("noteCloseBtn");
+const noteMicBtn = document.getElementById("noteMicBtn");
+
+function renderNotes(notes) {
+  if (!notes || notes.length === 0) {
+    noteList.innerHTML = "<em>No notes yet. Type one below or tap the mic.</em>";
+    return;
+  }
+  noteList.innerHTML = notes.map((n, i) => {
+    const ts = (n.ts || "").slice(0, 10);
+    const safe = n.text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    return `<div class="note-row"><span><span style="color:#444">${i+1}.</span> <span style="color:#555;font-size:0.78rem">${ts}</span> ${safe}</span><button class="note-del" data-idx="${i}" title="Delete">&#10005;</button></div>`;
+  }).join("");
+  noteList.querySelectorAll(".note-del").forEach(btn => {
+    btn.onclick = async () => {
+      const idx = parseInt(btn.dataset.idx);
+      const res = await fetch("/delete-note", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({idx})});
+      const d = await res.json();
+      renderNotes(d.notes);
+    };
+  });
+}
+
+noteBtn.onclick = async () => {
+  noteOverlay.style.display = "block";
+  noteList.innerHTML = "<em>Loading...</em>";
+  try {
+    const res = await fetch("/notes");
+    const d = await res.json();
+    renderNotes(d.notes);
+  } catch (_) {
+    noteList.innerHTML = "<em style='color:#c00'>Failed to load notes.</em>";
+  }
+  noteInp.focus();
+};
+
+noteCloseBtn.onclick = () => { noteOverlay.style.display = "none"; };
+noteOverlay.addEventListener("click", e => {
+  if (e.target === noteOverlay) noteOverlay.style.display = "none";
+});
+
+async function submitNote() {
+  const text = noteInp.value.trim();
+  if (!text) return;
+  noteInp.value = "";
+  try {
+    const res = await fetch("/note", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    const d = await res.json();
+    renderNotes(d.notes);
+  } catch (_) {}
+}
+
+noteAddBtn.onclick = submitNote;
+noteInp.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); submitNote(); }
+});
+
+if (SR) {
+  const noteRec = new SR();
+  noteRec.continuous = false;
+  noteRec.interimResults = false;
+  noteRec.lang = "en-US";
+  noteRec.onresult = e => {
+    noteInp.value = e.results[0][0].transcript;
+    noteMicBtn.classList.remove("active");
+  };
+  noteRec.onend = () => noteMicBtn.classList.remove("active");
+  noteRec.onerror = () => noteMicBtn.classList.remove("active");
+  noteMicBtn.onclick = () => {
+    if (noteMicBtn.classList.contains("active")) { noteRec.stop(); }
+    else { noteMicBtn.classList.add("active"); noteRec.start(); }
+  };
+} else {
+  noteMicBtn.style.display = "none";
+}
+
 // --- Battery ---
 const battPct = document.getElementById("battPct");
 async function updateBattery() {
@@ -1119,8 +1305,7 @@ async function updateBattery() {
 updateBattery();
 setInterval(updateBattery, 30000);
 
-// --- Speech recognition ---
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+// --- Chat speech recognition ---
 if (SR) {
   const rec = new SR();
   rec.continuous = false;
@@ -1219,6 +1404,15 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/notes":
+                with _notes_lock:
+                    notes_data = list(USER_NOTES)
+                body = json.dumps({"notes": notes_data}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1256,6 +1450,47 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                return
+
+            if self.path == "/note":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length))
+                except json.JSONDecodeError:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                text = data.get("text", "").strip()
+                if text:
+                    add_note(text)
+                with _notes_lock:
+                    notes_data = list(USER_NOTES)
+                body = json.dumps({"notes": notes_data}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if self.path == "/delete-note":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length))
+                except json.JSONDecodeError:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                idx = data.get("idx", -1)
+                delete_note(idx)
+                with _notes_lock:
+                    notes_data = list(USER_NOTES)
+                body = json.dumps({"notes": notes_data}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
 
             if self.path == "/memorize":
@@ -1511,6 +1746,9 @@ def main():
     print(f"  /memory       show stored facts")
     print(f"  /memorize     learn from this session")
     print(f"  /forget-fact  remove a fact by number")
+    print(f"  /note <text>  save a persistent note")
+    print(f"  /notes        list all notes")
+    print(f"  /forget-note  remove a note by number")
     print(f"  /tts          toggle speech output")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
@@ -1603,6 +1841,38 @@ def main():
                 print(f"{DIM}Removed: {removed}{RESET}\n")
             else:
                 print(f"{DIM}No fact #{parts[1]}.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/note "):
+            text = user_input[6:].strip()
+            if not text:
+                print(f"{DIM}Usage: /note <text>{RESET}\n")
+            else:
+                add_note(text)
+                print(f"{DIM}Note saved.{RESET}\n")
+            continue
+
+        if user_input.lower() == "/notes":
+            if USER_NOTES:
+                print(f"{DIM}Notes:{RESET}")
+                for i, n in enumerate(USER_NOTES, 1):
+                    ts = n.get("ts", "")[:10]
+                    print(f"  {DIM}{i}.{RESET} [{ts}] {n['text']}")
+            else:
+                print(f"{DIM}No notes yet. Use /note <text> to save one.{RESET}")
+            print()
+            continue
+
+        if user_input.lower().startswith("/forget-note"):
+            parts = user_input.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                print(f"{DIM}Usage: /forget-note <number>{RESET}\n")
+                continue
+            idx = int(parts[1]) - 1
+            if delete_note(idx):
+                print(f"{DIM}Note removed.{RESET}\n")
+            else:
+                print(f"{DIM}No note #{parts[1]}.{RESET}\n")
             continue
 
         if user_input.lower() == "/tts":

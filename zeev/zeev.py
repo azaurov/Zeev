@@ -27,6 +27,7 @@ RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_your_key_here")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
 
@@ -785,6 +786,9 @@ footer {
 #sendBtn:disabled { background: #222; cursor: not-allowed; }
 #micBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
 #micBtn.active { background: #dc2626; border-color: #dc2626; }
+#recBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#recBtn.active { background: #dc2626; border-color: #dc2626; animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 #snapBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
 #snapBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 .icon-btn {
@@ -908,6 +912,7 @@ footer {
 <div id="chat"></div>
 <footer>
   <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
+  <button class="btn" id="recBtn" title="Hold to record, tap stop to send">&#9210;</button>
   <button class="btn" id="snapBtn" title="Take photo">&#128247;</button>
   <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
   <button class="btn" id="sendBtn" title="Send">&#10148;</button>
@@ -1305,7 +1310,7 @@ async function updateBattery() {
 updateBattery();
 setInterval(updateBattery, 30000);
 
-// --- Chat speech recognition ---
+// --- Chat speech recognition (tap-to-speak, auto-send on silence) ---
 if (SR) {
   const rec = new SR();
   rec.continuous = false;
@@ -1321,6 +1326,56 @@ if (SR) {
 } else {
   micBtn.style.display = "none";
 }
+
+// --- Continuous recording (tap start → record until tap stop → transcribe & send) ---
+const recBtn = document.getElementById("recBtn");
+let mediaRec = null;
+let recChunks = [];
+
+recBtn.onclick = async () => {
+  if (mediaRec && mediaRec.state === "recording") {
+    mediaRec.stop();
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    addBubble("assistant", "Microphone access denied.");
+    return;
+  }
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")
+      ? "audio/ogg;codecs=opus"
+      : "";
+  mediaRec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  recChunks = [];
+  mediaRec.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
+  mediaRec.onstop = async () => {
+    recBtn.classList.remove("active");
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(recChunks, { type: mediaRec.mimeType || "audio/webm" });
+    recChunks = [];
+    const statusDiv = addBubble("assistant", "Transcribing…");
+    try {
+      const resp = await fetch("/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": blob.type },
+        body: blob,
+      });
+      const data = await resp.json();
+      statusDiv.remove();
+      if (data.transcript) { send(data.transcript); }
+      else { addBubble("assistant", "Could not transcribe: " + (data.error || "unknown error")); }
+    } catch (err) {
+      statusDiv.remove();
+      addBubble("assistant", "Transcription request failed.");
+    }
+  };
+  mediaRec.start();
+  recBtn.classList.add("active");
+};
 </script>
 </body>
 </html>
@@ -1498,6 +1553,56 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     snap = list(session)
                 facts = extract_memory(snap)
                 body = json.dumps({"facts": facts}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if self.path == "/transcribe":
+                length = int(self.headers.get("Content-Length", 0))
+                audio_bytes = self.rfile.read(length) if length else b""
+                if not audio_bytes:
+                    body = json.dumps({"error": "no audio"}).encode()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                content_type = self.headers.get("Content-Type", "audio/webm")
+                ext = "webm" if "webm" in content_type else "ogg" if "ogg" in content_type else "wav"
+                boundary = b"--boundary\r\n"
+                cd = f'Content-Disposition: form-data; name="file"; filename="audio.{ext}"\r\n'.encode()
+                ct = f"Content-Type: {content_type}\r\n\r\n".encode()
+                model_part = (
+                    b"--boundary\r\n"
+                    b'Content-Disposition: form-data; name="model"\r\n\r\n'
+                    b"whisper-large-v3-turbo\r\n"
+                )
+                multipart = (
+                    boundary + cd + ct + audio_bytes + b"\r\n"
+                    + model_part
+                    + b"--boundary--\r\n"
+                )
+                try:
+                    r = requests.post(
+                        GROQ_STT_URL,
+                        headers={
+                            "Authorization": f"Bearer {GROQ_API_KEY}",
+                            "Content-Type": "multipart/form-data; boundary=boundary",
+                        },
+                        data=multipart,
+                        timeout=30,
+                    )
+                    if r.status_code == 200:
+                        transcript = r.json().get("text", "").strip()
+                        body = json.dumps({"transcript": transcript}).encode()
+                    else:
+                        body = json.dumps({"error": f"STT {r.status_code}: {r.text[:200]}"}).encode()
+                except requests.RequestException as e:
+                    body = json.dumps({"error": str(e)}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

@@ -23,7 +23,7 @@ python3 zeev/zeev.py --web
 python3 zeev/zeev.py --https
 ```
 
-Requires `GROQ_API_KEY` and `TAVILY_API_KEY` environment variables (both in `~/.bashrc`). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
+Requires `GROQ_API_KEY` and `TAVILY_API_KEY` environment variables (both in `~/.bashrc`). `GROQ_API_KEY` is used for chat completions, TTS (Orpheus), and STT (Whisper). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
 - **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
-- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus.
+- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
 - **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
 - **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
@@ -110,7 +110,8 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 - 🧠 memory panel — view stored facts, trigger memorization
 - TTS: Groq Orpheus (`daniel`) for English; browser `speechSynthesis` fallback for Spanish (`es-MX`), Hebrew (`he-IL`), Russian (`ru-RU`)
 - Chat bubbles and input field use `dir="auto"` for automatic RTL layout with Hebrew
-- Voice input (Web Speech Recognition)
+- Voice input: tap-to-speak (Web Speech Recognition, auto-sends on silence) via 🎤 button
+- Continuous recording: tap ⏺ to start, tap again to stop → audio sent to `/transcribe` (Groq `whisper-large-v3-turbo`) → transcript auto-sent as message
 - HTTPS mode with auto-generated self-signed cert (accept once in browser)
 
 ### Multilingual TTS

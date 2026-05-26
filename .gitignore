@@ -17,3 +17,6 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Environment secrets — never commit the real .env
+.env

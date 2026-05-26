@@ -24,7 +24,18 @@ HISTORY_FILE = BASE_DIR / "data" / "history.jsonl"
 MEMORY_FILE  = BASE_DIR / "data" / "user_memory.json"
 NOTES_FILE   = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_your_key_here")
+
+# Load .env from repo root if present (supplements environment variables)
+_ENV_FILE = BASE_DIR.parent / ".env"
+if _ENV_FILE.exists():
+    with open(_ENV_FILE) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip())
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"

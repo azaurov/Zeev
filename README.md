@@ -29,7 +29,7 @@ python3 zeev/zeev.py --web
 python3 zeev/zeev.py --https
 ```
 
-Requires `GROQ_API_KEY` and `TAVILY_API_KEY` in your environment (`~/.bashrc`). Only external dependency: `python3-requests`.
+Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and fill in your keys — the app loads `.env` automatically. Only external dependency: `python3-requests`.
 
 ## Models
 

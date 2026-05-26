@@ -23,7 +23,7 @@ python3 zeev/zeev.py --web
 python3 zeev/zeev.py --https
 ```
 
-Requires `GROQ_API_KEY` and `TAVILY_API_KEY` environment variables (both in `~/.bashrc`). `GROQ_API_KEY` is used for chat completions, TTS (Orpheus), and STT (Whisper). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
+Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and fill in your keys — `zeev.py` loads `.env` automatically at startup via a plain-text parser (no `python-dotenv` needed). `GROQ_API_KEY` is used for chat completions, TTS (Orpheus), and STT (Whisper). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
 
 ## Architecture
 

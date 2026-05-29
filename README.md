@@ -1,6 +1,6 @@
 # Zeev
 
-A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](https://groq.com) for fast cloud inference and speaks back in human-quality voices. Supports a terminal REPL and a mobile-friendly web UI.
+A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](https://groq.com) for fast cloud inference and speaks back in human-quality voices. Supports a terminal REPL, a mobile-friendly web UI, and a standalone push-to-talk device mode via the Whisplay HAT.
 
 ## Features
 
@@ -9,8 +9,10 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
 - **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices
-- **Voice input** — Web Speech Recognition in the browser
+- **Voice input** — Web Speech Recognition in the browser; Groq Whisper STT in device mode
+- **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
+- **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
 
 ## Running
 
@@ -29,6 +31,11 @@ python3 zeev/zeev.py --web
 python3 zeev/zeev.py --https
 ```
 
+**Whisplay HAT device mode:**
+```bash
+python3 zeev/zeev.py --device
+```
+
 Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and fill in your keys — the app loads `.env` automatically. Only external dependency: `python3-requests`.
 
 ## Models
@@ -44,12 +51,14 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 
 ## TTS
 
-| Language | Detection | Terminal | Web UI |
-|----------|-----------|----------|--------|
-| English | default | [Piper](https://github.com/rhasspy/piper) `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Spanish | ñ ¿ ¡ accented vowels | Piper `es_MX-ald-medium` | Browser `speechSynthesis` |
-| Russian | Cyrillic characters | Piper `ru_RU-dmitri-medium` | Browser `speechSynthesis` |
-| Hebrew | Hebrew Unicode block | espeak-ng `-v he` | Browser `speechSynthesis` |
+| Language | Detection | Terminal | Web UI | Device mode |
+|----------|-----------|----------|--------|-------------|
+| English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
+| Spanish | ñ ¿ ¡ accented vowels | Piper `es_MX-ald-medium` | Browser `speechSynthesis` | Piper `es_MX-ald-medium` |
+| Russian | Cyrillic characters | Piper `ru_RU-dmitri-medium` | Browser `speechSynthesis` | Piper `ru_RU-dmitri-medium` |
+| Hebrew | Hebrew Unicode block | espeak-ng `-v he` | Browser `speechSynthesis` | espeak-ng `-v he` |
+
+Device mode tries Groq Orpheus first (fast cloud synthesis, ~200ms), falls back to Piper, then espeak-ng.
 
 ### Installing Piper (terminal TTS)
 
@@ -72,7 +81,33 @@ wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_R
 wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json
 ```
 
-Hebrew uses `espeak-ng` which is available via apt: `sudo apt install espeak-ng`
+Hebrew uses `espeak-ng`: `sudo apt install espeak-ng`
+
+## Thermal camera (MLX90640)
+
+Connect the MLX90640 to the **software I2C bus** on GPIO5 (SDA) / GPIO6 (SCL). Add to `/boot/firmware/config.txt`:
+
+```
+dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10
+```
+
+Install dependencies:
+```bash
+pip3 install adafruit-circuitpython-mlx90640 smbus2
+```
+
+Zeev auto-detects the sensor at startup. In the terminal use `/thermal` for a colored ASCII heatmap, or `/thermal <question>` to ask Zeev about what it sees. The web UI shows a 🌡 button that renders a live canvas heatmap.
+
+## Whisplay HAT device mode
+
+Install the driver once:
+```bash
+git clone https://github.com/PiSugar/Whisplay.git ~/Whisplay
+cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot
+sudo apt install -y espeak-ng python3-pillow
+```
+
+Hold the button to speak, release to send. Press again while Zeev is speaking to interrupt. The LCD shows an animated face that reflects the current state (idle / listening / thinking / speaking).
 
 ## Terminal commands
 
@@ -80,9 +115,14 @@ Hebrew uses `espeak-ng` which is available via apt: `sudo apt install espeak-ng`
 |---------|--------|
 | `/model [0-3]` | Lock model or return to auto |
 | `/tts` | Toggle speech output |
+| `/look [question]` | Take a photo and ask Zeev about it |
+| `/thermal [question]` | Capture thermal frame; optionally ask Zeev |
 | `/memory` | Show stored facts |
 | `/memorize` | Extract facts from this session |
 | `/forget-fact N` | Remove fact #N |
+| `/note <text>` | Save a persistent note |
+| `/notes` | List all notes |
+| `/forget-note N` | Remove note #N |
 | `/clear` | Clear session context |
 | `/forget` | Clear session + history |
 | `/bt` | Manage Bluetooth audio devices |
@@ -90,4 +130,4 @@ Hebrew uses `espeak-ng` which is available via apt: `sudo apt install espeak-ng`
 
 ## Hardware
 
-Raspberry Pi Zero 2W — 512 MB RAM, 4× ARM Cortex-A53. All inference is on Groq's cloud; the Pi only runs the HTTP server and Piper TTS locally.
+Raspberry Pi Zero 2W — 512 MB RAM, 4× ARM Cortex-A53. All LLM inference and TTS (device mode) run on Groq's cloud; the Pi handles the HTTP server, local Piper TTS, and sensor I/O.

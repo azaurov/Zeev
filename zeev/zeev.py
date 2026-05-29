@@ -20,10 +20,11 @@ from pathlib import Path
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
-HISTORY_FILE = BASE_DIR / "data" / "history.jsonl"
-MEMORY_FILE  = BASE_DIR / "data" / "user_memory.json"
-NOTES_FILE   = BASE_DIR / "data" / "notes.jsonl"
-RL_HISTORY   = BASE_DIR / "data" / ".readline_history"
+HISTORY_FILE  = BASE_DIR / "data" / "history.jsonl"
+MEMORY_FILE   = BASE_DIR / "data" / "user_memory.json"
+NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
+RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
+SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
 
 # Load .env from repo root if present (supplements environment variables)
 _ENV_FILE = BASE_DIR.parent / ".env"
@@ -100,6 +101,7 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 CAMERA_AVAILABLE  = False   # set by init_camera()
 THERMAL_AVAILABLE = False   # set by init_thermal()
+CAMERA_FLIP       = False   # set by load_settings()
 
 
 def route_model(text):
@@ -522,6 +524,22 @@ def delete_note(idx):
 
 
 # ---------------------------------------------------------------------------
+# Persistent settings
+# ---------------------------------------------------------------------------
+
+def load_settings():
+    global CAMERA_FLIP
+    try:
+        data = json.loads(SETTINGS_FILE.read_text())
+        CAMERA_FLIP = bool(data.get("camera_flip", False))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+def save_settings():
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps({"camera_flip": CAMERA_FLIP}))
+
+# ---------------------------------------------------------------------------
 # History RAG (keyword retrieval over past conversations)
 # ---------------------------------------------------------------------------
 
@@ -586,10 +604,11 @@ def retrieve_relevant(query, k=2, min_score=2):
 
 
 def init_learning():
-    """Load memory facts, notes, and build RAG index. Call once at startup."""
+    """Load memory facts, notes, settings, and build RAG index. Call once at startup."""
     global USER_FACTS, USER_NOTES
     USER_FACTS = load_memory()
     USER_NOTES = load_notes()
+    load_settings()
     build_rag_index()
 
 
@@ -715,7 +734,17 @@ def capture_image(width=1280, height=720):
         cam.stop()
         cam.close()
         buf.seek(0)
-        return base64.b64encode(buf.read()).decode()
+        jpeg = buf.read()
+        if CAMERA_FLIP:
+            try:
+                from PIL import Image
+                img = Image.open(io.BytesIO(jpeg)).rotate(180)
+                out = io.BytesIO()
+                img.save(out, format="jpeg")
+                jpeg = out.getvalue()
+            except Exception:
+                pass
+        return base64.b64encode(jpeg).decode()
     except Exception:
         return None
 
@@ -845,6 +874,8 @@ footer {
 #snapBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 #thermalBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
 #thermalBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+#flipBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#flipBtn.active { background: #1a3a2a; border-color: #2d6a4f; color: #52b788; }
 .thermal-canvas { display: block; border-radius: 6px; margin-bottom: 6px; image-rendering: pixelated; }
 .icon-btn {
   background: none; border: none; cursor: pointer; font-size: 1.1rem;
@@ -969,6 +1000,7 @@ footer {
   <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
   <button class="btn" id="recBtn" title="Hold to record, tap stop to send">&#9210;</button>
   <button class="btn" id="snapBtn" title="Take photo">&#128247;</button>
+  <button class="btn" id="flipBtn" title="Toggle camera flip" style="display:none">&#8597;</button>
   <button class="btn" id="thermalBtn" title="Thermal camera" style="display:none">&#127777;</button>
   <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
   <button class="btn" id="sendBtn" title="Send">&#10148;</button>
@@ -990,9 +1022,14 @@ const memList = document.getElementById("memList");
 const memorizeBtn = document.getElementById("memorizeBtn");
 const memCloseBtn = document.getElementById("memCloseBtn");
 const thermalBtn = document.getElementById("thermalBtn");
+const flipBtn = document.getElementById("flipBtn");
 
-fetch("/camera").then(r=>r.json()).then(d=>{if(!d.available)snapBtn.style.display="none";}).catch(()=>{snapBtn.style.display="none";});
+fetch("/camera").then(r=>r.json()).then(d=>{
+  if(!d.available) { snapBtn.style.display="none"; }
+  else { flipBtn.style.display=""; }
+}).catch(()=>{snapBtn.style.display="none";});
 fetch("/thermal-status").then(r=>r.json()).then(d=>{if(d.available)thermalBtn.style.display="";}).catch(()=>{});
+fetch("/camera-flip").then(r=>r.json()).then(d=>{if(d.flip)flipBtn.classList.add("active");}).catch(()=>{});
 
 let ttsOn = true;
 let busy = false;
@@ -1218,6 +1255,13 @@ async function snap() {
 }
 
 snapBtn.onclick = snap;
+
+flipBtn.onclick = async () => {
+  const res = await fetch("/flip", {method: "POST"});
+  const d = await res.json();
+  flipBtn.classList.toggle("active", d.flip);
+  flipBtn.title = d.flip ? "Camera flip ON (click to disable)" : "Toggle camera flip";
+};
 
 // --- Thermal camera ---
 const _THERMAL_PALETTE = [
@@ -1623,6 +1667,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/camera-flip":
+                body = json.dumps({"flip": CAMERA_FLIP}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif self.path == "/thermal-status":
                 body = json.dumps({"available": THERMAL_AVAILABLE}).encode()
                 self.send_response(200)
@@ -1649,6 +1700,18 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     session.clear()
                 self.send_response(204)
                 self.end_headers()
+                return
+
+            if self.path == "/flip":
+                global CAMERA_FLIP
+                CAMERA_FLIP = not CAMERA_FLIP
+                save_settings()
+                body = json.dumps({"flip": CAMERA_FLIP}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
 
             if self.path == "/tts":
@@ -2567,6 +2630,7 @@ def main():
     print(f"  /tts          toggle speech output")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
+    print(f"  /flip         toggle camera 180° rotation (persistent)")
     print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
     print(f"  quit          exit{RESET}\n")
 
@@ -2700,6 +2764,13 @@ def main():
             tts_on = not tts_on
             state = "on" if tts_on else "off"
             print(f"{DIM}Speech {state}.{RESET}\n")
+            continue
+
+        if user_input.lower() == "/flip":
+            CAMERA_FLIP = not CAMERA_FLIP
+            save_settings()
+            state = "on (180° rotation)" if CAMERA_FLIP else "off"
+            print(f"{DIM}Camera flip {state}.{RESET}\n")
             continue
 
         if user_input.lower().startswith("/look"):

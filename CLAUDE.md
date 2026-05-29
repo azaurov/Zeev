@@ -36,14 +36,15 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
 - **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
-- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper.
+- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
 - **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
 - **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
 - **`speak_terminal(text)`** — detects language, routes to the appropriate Piper model (en/es/ru) or espeak-ng (he, or fallback). Runs in a background thread.
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`, `es`, `ru`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
+- **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
-- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, and `quit` commands; readline history in `data/.readline_history`.
+- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`.
 
 ### Models (Groq)
 
@@ -112,6 +113,7 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 - Chat bubbles and input field use `dir="auto"` for automatic RTL layout with Hebrew
 - Voice input: tap-to-speak (Web Speech Recognition, auto-sends on silence) via 🎤 button
 - Continuous recording: tap ⏺ to start, tap again to stop → audio sent to `/transcribe` (Groq `whisper-large-v3-turbo`) → transcript auto-sent as message
+- 🌡 thermal camera button (shown when MLX90640 detected) — renders a 32×24 canvas heatmap (blue→red gradient, white crosshair on hotspot) with min/max/center stats; optional question sent to LLM
 - HTTPS mode with auto-generated self-signed cert (accept once in browser)
 
 ### Multilingual TTS
@@ -135,12 +137,15 @@ Groq Orpheus only supports English; non-English replies return `None` from `groq
 | `{"model": "8B"}` | Auto-routed model label (sent before first token) |
 | `{"info": "..."}` | Status message (e.g. search in progress) |
 | `{"error": "..."}` | Error from server |
+| `{"thermal": {...}}` | Thermal frame data: `frame` (768 floats °C), `min`, `max`, `center`, `hotspot_row`, `hotspot_col` |
+| `{"image": "data:image/jpeg;..."}` | Camera snapshot (from `/snap`) |
 
 ### File layout
 
 ```
 zeev/
   zeev.py                        # entire application
+  mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
   setup.sh                       # one-time setup script (legacy llama.cpp)
   data/                          # runtime files (git-ignored)
     history.jsonl                # conversation history (JSONL)
@@ -157,6 +162,32 @@ zeev/
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 
+### Thermal camera (MLX90640)
+
+The MLX90640 32×24 thermal camera is connected to the software I2C bus on GPIO5 (SDA) / GPIO6 (SCL), configured in `/boot/firmware/config.txt` as:
+
+```
+dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10
+```
+
+It appears at `/dev/i2c-3`, address `0x33`. The hardware I2C bus (`/dev/i2c-1`) is used by the WM8960 audio codec at address `0x19`.
+
+All thermal camera logic lives in `zeev/mlx90640.py`:
+- `init_thermal()` — connects via a `smbus2`-backed busio shim (Adafruit's blinka can't route to bus 3 automatically)
+- `capture_frame()` — returns 768 calibrated °C floats via `adafruit_mlx90640`
+- `frame_summary(frame)` — `{min, max, center, hotspot_row, hotspot_col}`
+- `ascii_map(frame)` — ANSI 24-bit color ASCII heatmap for the terminal
+
+### Whisplay HAT device mode
+
+`python3 zeev/zeev.py --device` runs a push-to-talk voice companion on the PiSugar Whisplay HAT (1.96" ST7789 LCD 240×280, WM8960 audio codec, RGB LED, KEY button on GPIO17).
+
+- **TTS priority**: Groq Orpheus (cloud, fast, English) → Piper (local neural) → espeak-ng (fallback)
+- **Speaker volume**: set to 75% via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control)
+- **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
+- **STT**: Groq Whisper `whisper-large-v3-turbo`
+- Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
+
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Terminal TTS runs locally via Piper (model load ~7s, then a few seconds per response); web UI TTS is also cloud-based via Groq Orpheus so it does not burden the Pi.
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for low latency; terminal TTS uses local Piper (model load ~7s, then a few seconds per response); web UI TTS is also Groq Orpheus.

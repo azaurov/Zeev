@@ -98,7 +98,8 @@ _MODEL_SHORT = {
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-CAMERA_AVAILABLE = False   # set by init_camera()
+CAMERA_AVAILABLE  = False   # set by init_camera()
+THERMAL_AVAILABLE = False   # set by init_thermal()
 
 
 def route_model(text):
@@ -289,6 +290,35 @@ def groq_tts(text):
         return resp.content if resp.status_code == 200 else None
     except Exception:
         return None
+
+
+def groq_stt(wav_bytes):
+    """Send WAV bytes to Groq Whisper. Returns transcript string or ''."""
+    if not GROQ_API_KEY or not wav_bytes:
+        return ""
+    boundary = b"--boundary\r\n"
+    cd = b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'
+    model_part = (
+        b"--boundary\r\n"
+        b'Content-Disposition: form-data; name="model"\r\n\r\n'
+        b"whisper-large-v3-turbo\r\n"
+    )
+    multipart = boundary + cd + wav_bytes + b"\r\n" + model_part + b"--boundary--\r\n"
+    try:
+        r = requests.post(
+            GROQ_STT_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "multipart/form-data; boundary=boundary",
+            },
+            data=multipart,
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.json().get("text", "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def bt_list():
@@ -660,6 +690,17 @@ def init_camera():
         CAMERA_AVAILABLE = False
 
 
+def init_thermal():
+    global THERMAL_AVAILABLE
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        import mlx90640 as _t
+        THERMAL_AVAILABLE = _t.init_thermal()
+    except Exception:
+        THERMAL_AVAILABLE = False
+
+
 def capture_image(width=1280, height=720):
     """Capture a JPEG via picamera2. Returns base64 string or None."""
     try:
@@ -802,6 +843,9 @@ footer {
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 #snapBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
 #snapBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+#thermalBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#thermalBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.thermal-canvas { display: block; border-radius: 6px; margin-bottom: 6px; image-rendering: pixelated; }
 .icon-btn {
   background: none; border: none; cursor: pointer; font-size: 1.1rem;
   color: #7dd3fc; padding: 4px; line-height: 1;
@@ -925,6 +969,7 @@ footer {
   <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
   <button class="btn" id="recBtn" title="Hold to record, tap stop to send">&#9210;</button>
   <button class="btn" id="snapBtn" title="Take photo">&#128247;</button>
+  <button class="btn" id="thermalBtn" title="Thermal camera" style="display:none">&#127777;</button>
   <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
   <button class="btn" id="sendBtn" title="Send">&#10148;</button>
 </footer>
@@ -944,8 +989,10 @@ const memOverlay = document.getElementById("memOverlay");
 const memList = document.getElementById("memList");
 const memorizeBtn = document.getElementById("memorizeBtn");
 const memCloseBtn = document.getElementById("memCloseBtn");
+const thermalBtn = document.getElementById("thermalBtn");
 
 fetch("/camera").then(r=>r.json()).then(d=>{if(!d.available)snapBtn.style.display="none";}).catch(()=>{snapBtn.style.display="none";});
+fetch("/thermal-status").then(r=>r.json()).then(d=>{if(d.available)thermalBtn.style.display="";}).catch(()=>{});
 
 let ttsOn = true;
 let busy = false;
@@ -1171,6 +1218,111 @@ async function snap() {
 }
 
 snapBtn.onclick = snap;
+
+// --- Thermal camera ---
+const _THERMAL_PALETTE = [
+  [0,0,200],[0,180,220],[0,200,80],[220,200,0],[230,80,0],[230,0,0]
+];
+function _thermalColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  const seg = t * (_THERMAL_PALETTE.length - 1);
+  const lo = Math.floor(seg), hi = Math.min(lo+1, _THERMAL_PALETTE.length-1);
+  const f = seg - lo;
+  const [r0,g0,b0] = _THERMAL_PALETTE[lo], [r1,g1,b1] = _THERMAL_PALETTE[hi];
+  return [r0+f*(r1-r0), g0+f*(g1-g0), b0+f*(b1-b0)];
+}
+function renderThermalCanvas(frame, summary) {
+  const SCALE = 8, W = 32, H = 24;
+  const canvas = document.createElement("canvas");
+  canvas.width = W * SCALE; canvas.height = H * SCALE;
+  canvas.className = "thermal-canvas";
+  const ctx2 = canvas.getContext("2d");
+  const img = ctx2.createImageData(W * SCALE, H * SCALE);
+  const span = summary.max - summary.min || 1;
+  for (let row = 0; row < H; row++) {
+    for (let col = 0; col < W; col++) {
+      const t = (frame[row*W+col] - summary.min) / span;
+      const [r,g,b] = _thermalColor(t);
+      for (let dy = 0; dy < SCALE; dy++) {
+        for (let dx = 0; dx < SCALE; dx++) {
+          const i = ((row*SCALE+dy)*W*SCALE + col*SCALE+dx) * 4;
+          img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+        }
+      }
+    }
+  }
+  ctx2.putImageData(img, 0, 0);
+  // hotspot crosshair
+  ctx2.strokeStyle = "white"; ctx2.lineWidth = 1.5;
+  const hx = (summary.hotspot_col + 0.5) * SCALE, hy = (summary.hotspot_row + 0.5) * SCALE;
+  ctx2.beginPath(); ctx2.moveTo(hx-6,hy); ctx2.lineTo(hx+6,hy); ctx2.moveTo(hx,hy-6); ctx2.lineTo(hx,hy+6); ctx2.stroke();
+  return canvas;
+}
+
+async function thermal() {
+  if (busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  thermalBtn.disabled = true;
+
+  const question = inp.value.trim();
+  inp.value = "";
+
+  addBubble("user", question || "🌡 Thermal scan");
+  const zd = addBubble("zeev", "");
+  cancelSpeech();
+  pendingModel = null;
+
+  let full = "", textSpan = null;
+  try {
+    const res = await fetch("/thermal", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question}),
+    });
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const d = line.slice(6); if (d === "[DONE]") continue;
+        try {
+          const p = JSON.parse(d);
+          if (p.thermal) {
+            zd.classList.remove("pending");
+            const canvas = renderThermalCanvas(p.thermal.frame, p.thermal);
+            zd.insertBefore(canvas, zd.firstChild);
+            const statsEl = document.createElement("div");
+            statsEl.style.cssText = "font-size:0.75rem;color:#888;margin-bottom:4px;";
+            statsEl.textContent = `Min ${p.thermal.min}°C  Max ${p.thermal.max}°C  Center ${p.thermal.center}°C`;
+            zd.insertBefore(statsEl, canvas.nextSibling);
+          } else if (p.token) {
+            zd.classList.remove("pending");
+            full += p.token;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
+            chat.scrollTop = chat.scrollHeight;
+          } else if (p.error) {
+            zd.classList.remove("pending"); zd.textContent = "Error: " + p.error;
+          } else if (p.info) {
+            if (!full) { zd.classList.remove("pending"); zd.textContent = p.info; }
+          } else if (p.model) { pendingModel = p.model; }
+        } catch (_) {}
+      }
+    }
+    if (full) speak(full);
+    if (pendingModel && full) {
+      const tag = document.createElement("span"); tag.className = "model-tag"; tag.textContent = pendingModel; zd.appendChild(tag);
+    }
+  } catch(e) { zd.classList.remove("pending"); zd.textContent = "Connection error."; }
+
+  busy = false; sendBtn.disabled = false; thermalBtn.disabled = false; inp.focus();
+}
+thermalBtn.onclick = thermal;
 
 clearBtn.onclick = async () => {
   await fetch("/clear", {method: "POST"});
@@ -1433,6 +1585,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
     init_learning()
     init_camera()
+    init_thermal()
     session = load_prior()
     lock = threading.Lock()
 
@@ -1465,6 +1618,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(body)
             elif self.path == "/camera":
                 body = json.dumps({"available": CAMERA_AVAILABLE}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/thermal-status":
+                body = json.dumps({"available": THERMAL_AVAILABLE}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -1619,6 +1779,93 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+
+            if self.path == "/thermal":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length)) if length else {}
+                except json.JSONDecodeError:
+                    data = {}
+                question = data.get("question", "").strip()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+
+                def thermal_sse(obj):
+                    self.wfile.write(("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+
+                if not THERMAL_AVAILABLE:
+                    thermal_sse({"error": "Thermal camera not available"})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, str(BASE_DIR))
+                    import mlx90640 as _t
+                    frame   = _t.capture_frame()
+                    summary = _t.frame_summary(frame)
+                except Exception as e:
+                    thermal_sse({"error": f"Thermal read failed: {e}"})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+
+                thermal_sse({"thermal": {**summary, "frame": frame}})
+
+                if question:
+                    ctx = (f"[thermal camera] Min {summary['min']}°C, Max {summary['max']}°C, "
+                           f"Center {summary['center']}°C, hotspot at row {summary['hotspot_row']} "
+                           f"col {summary['hotspot_col']} (32×24 grid). {question}")
+                    model_id = route_model(question)
+                    thermal_sse({"model": model_label(model_id)})
+
+                    def on_search(q):
+                        thermal_sse({"info": f"[searching: {q}]"})
+
+                    sys_prompt   = _build_system_prompt(ctx, on_search)
+                    with lock:
+                        snapshot = list(session) + [{"role": "user", "content": ctx}]
+                    payload = [{"role": "system", "content": sys_prompt}] + snapshot
+                    thermal_reply = ""
+                    try:
+                        resp, err = _groq_post(payload, model_id)
+                        if err:
+                            thermal_sse({"error": err})
+                        else:
+                            for line in resp.iter_lines():
+                                if not line or not line.startswith(b"data: "):
+                                    continue
+                                chunk = line[6:]
+                                if chunk == b"[DONE]":
+                                    break
+                                try:
+                                    delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
+                                    if delta:
+                                        thermal_reply += delta
+                                        thermal_sse({"token": delta})
+                                except (json.JSONDecodeError, KeyError, IndexError):
+                                    pass
+                    except requests.RequestException as e:
+                        thermal_sse({"error": str(e)})
+
+                    if thermal_reply:
+                        with lock:
+                            session.append({"role": "user", "content": ctx})
+                            session.append({"role": "assistant", "content": thermal_reply})
+                            append_message("user", ctx)
+                            append_message("assistant", thermal_reply)
+                            if len(session) > 60:
+                                session[:] = session[-60:]
+
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
                 return
 
             if self.path == "/snap":
@@ -1832,6 +2079,457 @@ def pick_model(current_locked=None):
         print(f"{DIM}Enter 0, 1, 2, or 3.{RESET}")
 
 
+def run_device_mode():
+    """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
+    sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
+    try:
+        from whisplay import WhisplayBoard
+    except ImportError:
+        sys.exit("Whisplay runtime not found. Clone https://github.com/PiSugar/Whisplay to ~/Whisplay")
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        _have_pil = True
+    except ImportError:
+        _have_pil = False
+        print("python3-pillow not found — LCD display disabled. Install with: sudo apt install python3-pillow")
+
+    init_learning()
+    init_tts()
+
+    # Lower speaker volume to 75%
+    try:
+        subprocess.run(
+            ["amixer", "-D", "hw:wm8960soundcard", "sset", "Speaker", "75%"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    board  = WhisplayBoard()
+    session = load_prior()
+
+    W, H = 240, 280
+    _FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    _FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+    # ── LCD helpers ──────────────────────────────────────────────────────────
+
+    def _push_lcd(img):
+        pixels = list(img.convert("RGB").getdata())
+        buf = bytearray(len(pixels) * 2)
+        for i, (r, g, b) in enumerate(pixels):
+            v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+            buf[i * 2]     = v >> 8
+            buf[i * 2 + 1] = v & 0xFF
+        board.draw_image(0, 0, W, H, bytes(buf))
+
+    def _load_font(path, size):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            return ImageFont.load_default()
+
+    def _wrap_text(draw, text, font, max_w):
+        words = text.split()
+        lines, line = [], []
+        for w in words:
+            test = " ".join(line + [w])
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if bbox[2] - bbox[0] > max_w and line:
+                lines.append(" ".join(line))
+                line = [w]
+            else:
+                line.append(w)
+        if line:
+            lines.append(" ".join(line))
+        return lines
+
+    # ── Animated face ────────────────────────────────────────────────────────
+    # Face: circle centred at (120, 118), radius 90 → leaves 52 px below for caption
+
+    _FACE_CX, _FACE_CY, _FACE_R = 120, 118, 90
+
+    _STATE_COLORS = {
+        "idle":      (50,  120, 220),
+        "ready":     (0,   160, 255),
+        "listening": (0,   210, 230),
+        "thinking":  (210, 155,  10),
+        "speaking":  (40,  210,  90),
+        "error":     (220,  60,  60),
+    }
+
+    _face_state   = "idle"
+    _face_caption = ""          # short text shown below the face
+    _mouth_open   = False
+    _face_lock    = threading.Lock()
+
+    def _draw_face_img(state, mouth_open, caption):
+        img  = Image.new("RGB", (W, H), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        col  = _STATE_COLORS.get(state, (120, 120, 120))
+
+        cx, cy, r = _FACE_CX, _FACE_CY, _FACE_R
+
+        # Face circle
+        draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=(22, 28, 45), outline=col, width=4)
+
+        # Eyes
+        for ex, ey in [(cx-30, cy-22), (cx+30, cy-22)]:
+            draw.ellipse([ex-13, ey-13, ex+13, ey+13], fill=(235, 235, 255))
+            if state == "thinking":
+                # pupils look up-right
+                draw.ellipse([ex+1, ey-8, ex+9, ey+1], fill=(18, 18, 30))
+            elif state == "listening":
+                # wide pupils, centred
+                draw.ellipse([ex-7, ey-7, ex+7, ey+7], fill=(18, 18, 30))
+            else:
+                draw.ellipse([ex-5, ey-5, ex+5, ey+5], fill=(18, 18, 30))
+
+            # Eyebrows
+            brow_y = ey - 18
+            if state == "listening":
+                draw.line([ex-13, brow_y+4, ex+13, brow_y-2], fill=col, width=3)
+            elif state == "thinking":
+                draw.line([ex-13, brow_y-2, ex+13, brow_y+4], fill=col, width=3)
+            else:
+                draw.line([ex-13, brow_y, ex+13, brow_y], fill=col, width=2)
+
+        # Mouth
+        mouth_y = cy + 28
+        if state == "listening":
+            # small 'o'
+            draw.ellipse([cx-8, mouth_y-6, cx+8, mouth_y+10], outline=(210, 150, 160), width=2)
+        elif state in ("speaking",) and mouth_open:
+            # open oval
+            draw.ellipse([cx-22, mouth_y-5, cx+22, mouth_y+20], fill=(160, 50, 60))
+            draw.ellipse([cx-22, mouth_y-5, cx+22, mouth_y+5],  fill=(210, 110, 120))
+        else:
+            # gentle smile arc
+            draw.arc([cx-26, mouth_y-8, cx+26, mouth_y+22],
+                     start=15, end=165, fill=(210, 150, 160), width=3)
+
+        # Caption below face
+        if caption and _have_pil:
+            font_sm = _load_font(_FONT_PATH, 13)
+            lines   = _wrap_text(draw, caption, font_sm, W - 16)
+            y       = cy + r + 8
+            for ln in lines[:3]:
+                bbox = draw.textbbox((0, 0), ln, font=font_sm)
+                tw   = bbox[2] - bbox[0]
+                draw.text(((W - tw) // 2, y), ln, font=font_sm, fill=(200, 200, 200))
+                y += 16
+                if y > H - 4:
+                    break
+
+        # State label at very bottom
+        font_lbl = _load_font(_FONT_PATH, 12)
+        labels   = {"idle": "Press to start", "ready": "Your turn",
+                    "listening": "Listening...", "thinking": "Thinking...",
+                    "speaking": "Speaking...", "error": "Error"}
+        label    = labels.get(state, state)
+        bbox     = draw.textbbox((0, 0), label, font=font_lbl)
+        tw       = bbox[2] - bbox[0]
+        draw.text(((W - tw) // 2, H - 16), label, font=font_lbl, fill=col)
+
+        return img
+
+    def _set_face(state, caption=""):
+        nonlocal _face_state, _face_caption
+        with _face_lock:
+            _face_state   = state
+            _face_caption = caption
+
+    def _face_loop():
+        nonlocal _mouth_open
+        last_state = ""
+        while True:
+            with _face_lock:
+                state   = _face_state
+                caption = _face_caption
+            if state == "speaking":
+                _mouth_open = not _mouth_open
+                interval    = 0.18
+            else:
+                _mouth_open = False
+                interval    = 0.12 if state != last_state else 0.5
+            last_state = state
+            if _have_pil:
+                try:
+                    img = _draw_face_img(state, _mouth_open, caption)
+                    _push_lcd(img)
+                except Exception as e:
+                    print(f"LCD error: {e}")
+            time.sleep(interval)
+
+    threading.Thread(target=_face_loop, daemon=True).start()
+
+    # ── TTS (interruptible, blocking) ────────────────────────────────────────
+
+    _tts_p1 = None
+    _tts_p2 = None
+
+    def _interrupt_tts():
+        nonlocal _tts_p1, _tts_p2
+        for p in (_tts_p2, _tts_p1):
+            if p:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+    def _speak_device(text):
+        nonlocal _tts_p1, _tts_p2
+        clean = _clean_for_tts(text)
+        if not clean:
+            return
+        lang = detect_lang(clean)
+
+        # 1. Groq Orpheus — fast cloud TTS, English only
+        wav = groq_tts(clean) if lang == "en" else None
+        if wav:
+            try:
+                p2 = subprocess.Popen(
+                    ["aplay", "-D", "plughw:wm8960soundcard,0", "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                _tts_p1, _tts_p2 = None, p2
+                try:
+                    p2.stdin.write(wav)
+                    p2.stdin.close()
+                except BrokenPipeError:
+                    pass
+                p2.wait()
+                return
+            except Exception as e:
+                print(f"Groq TTS playback error: {e}")
+            finally:
+                _tts_p1 = _tts_p2 = None
+
+        # 2. Piper — local neural TTS fallback
+        model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
+        try:
+            if model:
+                p1 = subprocess.Popen(
+                    [PIPER_BIN, "--model", model, "--output_raw"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                p2 = subprocess.Popen(
+                    ["aplay", "-D", "plughw:wm8960soundcard,0",
+                     "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
+                    stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                p1.stdout.close()
+                _tts_p1, _tts_p2 = p1, p2
+                p1.stdin.write(clean.encode())
+                p1.stdin.close()
+            else:
+                # 3. espeak-ng — last resort
+                espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
+                p1 = subprocess.Popen(
+                    ["espeak-ng", "-s", "145", "-v", espeak_lang, "--stdout", clean],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                p2 = subprocess.Popen(
+                    ["aplay", "-D", "plughw:wm8960soundcard,0",
+                     "-f", "S16_LE", "-r", "22050", "-t", "raw", "-c", "1", "-q", "-"],
+                    stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                p1.stdout.close()
+                _tts_p1, _tts_p2 = p1, p2
+            p2.wait()
+            p1.wait()
+        except Exception as e:
+            print(f"TTS error: {e}")
+        finally:
+            _tts_p1 = _tts_p2 = None
+
+    # ── Recording state ──────────────────────────────────────────────────────
+    # States: idle → listening → thinking → speaking → ready → listening → …
+    #   idle    : no active session
+    #   ready   : session active, waiting for button press to speak
+    #   listening : recording
+    #   thinking  : STT + LLM in flight
+    #   speaking  : Zeev talking
+    #
+    # Button semantics (consistent throughout):
+    #   idle/ready + press   → start recording
+    #   listening  + release → stop recording, send
+    #   listening  + press   → cancel turn, end session → idle
+    #   speaking   + press   → interrupt TTS → ready
+    #   thinking   + press   → ignored
+
+    _rec_proc   = None
+    _busy       = threading.Event()   # set while a session is active
+    _state_lock = threading.Lock()
+    _rec_file   = Path("/tmp/zeev_rec.wav")
+
+    _LED_IDLE      = (0,  20,  0)
+    _LED_READY     = (0,  40, 80)
+    _LED_RECORDING = (180, 0,  0)
+    _LED_THINKING  = (0,   0, 180)
+    _LED_SPEAKING  = (0, 180, 50)
+    _LED_ERROR     = (150, 0,  0)
+
+    def _go_ready():
+        _set_face("ready")
+        board.set_rgb(*_LED_READY)
+
+    def _go_idle():
+        _set_face("idle")
+        board.set_rgb(*_LED_IDLE)
+        _busy.clear()
+
+    def _start_recording():
+        nonlocal _rec_proc
+        board.set_rgb(*_LED_RECORDING)
+        _set_face("listening")
+        _rec_file.unlink(missing_ok=True)
+        try:
+            _rec_proc = subprocess.Popen(
+                ["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", str(_rec_file)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            print(f"arecord error: {e}", flush=True)
+            _set_face("error", "Mic error")
+            board.set_rgb(*_LED_ERROR)
+            _go_idle()
+
+    def _on_press():
+        nonlocal _rec_proc
+        with _state_lock:
+            current = _face_state
+            if current in ("idle", "ready"):
+                if not _busy.is_set():
+                    _busy.set()
+                _start_recording()
+            elif current == "speaking":
+                _interrupt_tts()         # _process will call _go_ready() when TTS exits
+            elif current == "listening":
+                # Cancel this turn and end the session
+                proc, _rec_proc = _rec_proc, None
+                if proc:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                _go_idle()
+            # thinking: ignore
+
+    def _on_release():
+        nonlocal _rec_proc, session
+        if _face_state != "listening":
+            return
+
+        proc, _rec_proc = _rec_proc, None
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        board.set_rgb(*_LED_THINKING)
+        _set_face("thinking")
+
+        def _process():
+            nonlocal session
+            t0 = time.perf_counter()
+
+            try:
+                wav = _rec_file.read_bytes() if _rec_file.exists() else b""
+            except Exception:
+                wav = b""
+
+            if len(wav) < 1000:
+                _set_face("error", "No audio captured")
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+
+            print(f"[+{time.perf_counter()-t0:.1f}s] STT…", flush=True)
+            transcript = groq_stt(wav)
+            print(f"[+{time.perf_counter()-t0:.1f}s] STT: {transcript!r}", flush=True)
+
+            if not transcript:
+                _set_face("error", "Didn't catch that")
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+
+            print(f"You: {transcript}")
+            _set_face("thinking", transcript)
+
+            session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+
+            model_id = route_model(transcript)
+            short    = _MODEL_SHORT.get(model_id, "?")
+
+            print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
+            sys_prompt   = _build_system_prompt(transcript)
+            payload_msgs = [{"role": "system", "content": sys_prompt}] + session
+            resp, err    = _groq_post(payload_msgs, model_id, stream=False)
+            print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
+
+            if err or not resp or resp.status_code != 200:
+                detail = err or (resp.text[:80] if resp else "no response")
+                print(f"LLM error: {detail}", flush=True)
+                _set_face("error", "LLM error")
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+
+            reply = resp.json()["choices"][0]["message"]["content"].strip()
+            print(f"Zeev [{short}]: {reply}\n")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+
+            if len(session) > 60:
+                session = session[-60:]
+
+            board.set_rgb(*_LED_SPEAKING)
+            _set_face("speaking", reply[:120])
+            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
+            _speak_device(reply)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+
+            # After speaking (normally or interrupted): go ready if still in session
+            _go_ready() if _busy.is_set() else _go_idle()
+
+        threading.Thread(target=_process, daemon=True).start()
+
+    board.on_button_press(_on_press)
+    board.on_button_release(_on_release)
+    board.set_backlight(100)
+    board.set_rgb(*_LED_IDLE)
+    _set_face("idle")
+
+    turns = len(session) // 2
+    print(f"\n{BOLD}Zeev Device Mode{RESET} — Whisplay HAT", flush=True)
+    if turns:
+        print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", flush=True)
+    print(f"{DIM}Hold button to speak, release to send. Press during speaking to interrupt.")
+    print(f"Press while recording to cancel & exit.{RESET}\n", flush=True)
+
+    def _shutdown(sig=None, frame=None):
+        board.cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    while True:
+        time.sleep(1)
+
+
 def main():
     init_learning()
 
@@ -1854,6 +2552,7 @@ def main():
 
     init_tts()
     init_camera()
+    init_thermal()
 
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
     print(f"{DIM}  /clear        wipe session context")
@@ -1868,6 +2567,7 @@ def main():
     print(f"  /tts          toggle speech output")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
+    print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
@@ -2042,6 +2742,44 @@ def main():
                     speak_terminal(full_reply)
             continue
 
+        if user_input.lower().startswith("/thermal"):
+            if not THERMAL_AVAILABLE:
+                print(f"{DIM}Thermal camera not available.{RESET}\n")
+                continue
+            question = user_input[8:].strip()
+            print(f"{DIM}[reading thermal frame...]{RESET}", flush=True)
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                import mlx90640 as _t
+                frame = _t.capture_frame()
+                summary = _t.frame_summary(frame)
+            except Exception as e:
+                print(f"{DIM}Thermal read failed: {e}{RESET}\n")
+                continue
+            print(_t.ascii_map(frame))
+            print(f"{DIM}Min: {summary['min']}°C  Max: {summary['max']}°C  "
+                  f"Center: {summary['center']}°C  "
+                  f"Hotspot: row {summary['hotspot_row']}, col {summary['hotspot_col']}{RESET}\n")
+            if question:
+                ctx = (f"[thermal camera] Min {summary['min']}°C, Max {summary['max']}°C, "
+                       f"Center {summary['center']}°C, hotspot at row {summary['hotspot_row']} "
+                       f"col {summary['hotspot_col']} (32×24 grid). {question}")
+                model_id = locked_model if locked_model else route_model(question)
+                if locked_model is None:
+                    print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
+                session.append({"role": "user", "content": ctx})
+                append_message("user", ctx)
+                reply = stream_reply(session, model_id)
+                if reply:
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if tts_on:
+                        speak_terminal(reply)
+                if len(session) > 60:
+                    session = session[-60:]
+            continue
+
         if user_input.lower().startswith("/bt"):
             parts = user_input.split()
             devices = bt_list()
@@ -2106,5 +2844,7 @@ if __name__ == "__main__":
         run_web_server(port=5443, use_https=True)
     elif "--web" in sys.argv or "-web" in sys.argv:
         run_web_server()
+    elif "--device" in sys.argv or "-device" in sys.argv:
+        run_device_mode()
     else:
         main()

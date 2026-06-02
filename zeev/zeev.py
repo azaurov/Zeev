@@ -71,6 +71,17 @@ _SEARCH_RE = re.compile(
 def needs_search(text):
     return bool(_SEARCH_RE.search(text))
 
+_MUSIC_RE = re.compile(
+    r"^(start playing|can you play|put on|play me|i want to hear|i want to listen to|"
+    r"throw on|blast|queue|play)\s+(?P<query>.+)",
+    re.IGNORECASE,
+)
+
+def extract_music_query(text):
+    """Return the song/artist query if text is a play request, else None."""
+    m = _MUSIC_RE.match(text.strip())
+    return m.group("query").strip() if m else None
+
 # Model auto-routing heuristics
 _REASONING_RE = re.compile(
     r"\b(prove|proof|calculate|solve|equation|formula|math|"
@@ -104,6 +115,7 @@ CAMERA_AVAILABLE  = False   # set by init_camera()
 THERMAL_AVAILABLE = False   # set by init_thermal()
 CAMERA_FLIP       = False   # set by load_settings()
 FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
+_MUSIC_PROC       = None    # active mpg123 playback process
 
 
 def route_model(text):
@@ -295,6 +307,76 @@ def _gtts_speak(text, lang, adev=None):
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# YouTube / music playback
+# ---------------------------------------------------------------------------
+
+YT_COOKIES = BASE_DIR / "data" / "yt-cookies.txt"
+
+
+def music_stop():
+    """Kill the active music playback process, if any."""
+    global _MUSIC_PROC
+    if _MUSIC_PROC and _MUSIC_PROC.poll() is None:
+        _MUSIC_PROC.terminate()
+        _MUSIC_PROC = None
+        return True
+    _MUSIC_PROC = None
+    return False
+
+
+def youtube_play(query, adev=None):
+    """Search YouTube for query and stream audio via yt-dlp + mpg123 in background."""
+    global _MUSIC_PROC
+
+    music_stop()  # stop any current track
+
+    if not shutil.which("yt-dlp"):
+        return None, "yt-dlp not installed (sudo apt install yt-dlp)"
+    if not shutil.which("mpg123"):
+        return None, "mpg123 not installed (sudo apt install mpg123)"
+
+    cookies_args = ["--cookies", str(YT_COOKIES)] if YT_COOKIES.exists() else []
+    if not YT_COOKIES.exists():
+        return None, (
+            "YouTube cookies not found. Export your cookies to "
+            f"{YT_COOKIES} using a browser extension (e.g. 'Get cookies.txt LOCALLY'), "
+            "then try again."
+        )
+
+    def _run():
+        global _MUSIC_PROC
+        try:
+            # Resolve the audio stream URL
+            url_proc = subprocess.run(
+                ["yt-dlp", f"ytsearch1:{query}", "--get-url", "--get-title",
+                 "-f", "bestaudio/best", "--no-playlist", "-q"] + cookies_args,
+                capture_output=True, text=True, timeout=30,
+            )
+            lines = url_proc.stdout.strip().splitlines()
+            if len(lines) < 2:
+                print(f"\n{DIM}[music] No results for: {query}{RESET}")
+                return
+            title = lines[0]
+            stream_url = lines[-1]
+            print(f"\n{DIM}[playing: {title}]{RESET}", flush=True)
+
+            cmd = ["mpg123", "-q"]
+            if adev:
+                cmd += ["-a", adev]
+            cmd.append(stream_url)
+            _MUSIC_PROC = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _MUSIC_PROC.wait()
+            _MUSIC_PROC = None
+        except subprocess.TimeoutExpired:
+            print(f"\n{DIM}[music] Search timed out.{RESET}")
+        except Exception as e:
+            print(f"\n{DIM}[music] Error: {e}{RESET}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return query, None
 
 
 def speak_terminal(text):
@@ -2882,6 +2964,7 @@ def main():
     print(f"  /forget-note  remove a note by number")
     print(f"  /lang         set response language (auto/en/he/es/ru)")
     print(f"  /tts          toggle speech output")
+    print(f"  /stop         stop music playback")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
     print(f"  /flip         toggle camera 180° rotation (persistent)")
@@ -3027,6 +3110,13 @@ def main():
                 print(f"{DIM}No note #{parts[1]}.{RESET}\n")
             continue
 
+        if user_input.lower() == "/stop":
+            if music_stop():
+                print(f"{DIM}Music stopped.{RESET}\n")
+            else:
+                print(f"{DIM}Nothing playing.{RESET}\n")
+            continue
+
         if user_input.lower() == "/tts":
             if not TTS_AVAILABLE:
                 print(f"{DIM}No TTS engine found. Install Piper (recommended) or espeak-ng.")
@@ -3161,6 +3251,13 @@ def main():
         batt_level, batt_charging = get_battery()
         if batt_level is not None and batt_level < 20 and not batt_charging:
             print(f"\033[33m⚠ Battery low: {batt_level:.0f}%{RESET}", flush=True)
+
+        music_query = extract_music_query(user_input)
+        if music_query:
+            _, err = youtube_play(music_query)
+            if err:
+                print(f"{DIM}[music] {err}{RESET}\n")
+            continue
 
         model_id = locked_model if locked_model else route_model(user_input)
         if locked_model is None:

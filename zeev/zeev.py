@@ -2596,7 +2596,7 @@ def run_device_mode():
         print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", flush=True)
     print(f"{DIM}Hold button to speak, release to send. Press during speaking to interrupt.")
     print(f"Press while recording to cancel & exit.")
-    print(f"Keyboard: [LCtrl] hold to speak  [q] quit{RESET}\n", flush=True)
+    print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
     def _keyboard_listener():
         import tty, termios
@@ -2606,7 +2606,12 @@ def run_device_mode():
             tty.setraw(fd)
             while True:
                 ch = sys.stdin.read(1)
-                if ch in ('q', 'Q', '\x03'):  # q or Ctrl-C
+                if ch == '\x00':  # Ctrl+Space — toggle record / send
+                    if _face_state == "listening":
+                        _on_release()
+                    else:
+                        _on_press()
+                elif ch in ('q', 'Q', '\x03'):  # q or Ctrl-C
                     break
         except Exception:
             pass

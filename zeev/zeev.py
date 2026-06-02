@@ -843,7 +843,12 @@ _TORAH_RE = re.compile(
     r"rosh.hashanah|taanit|megillah|hagigah|"
     r"yevamot|ketubot|nedarim|nazir|sotah|gittin|kiddushin|"
     r"bava.kamma|bava.metzia|bava.batra|sanhedrin|makkot|"
-    r"shevuot|avodah.zarah|avot|pirkei"
+    r"shevuot|avodah.zarah|avot|pirkei|"
+    r"apocrypha|deuterocanonical|"
+    r"ben.sira|sirach|ecclesiasticus|tobit|judith|maccabees|maccabean|"
+    r"wisdom.of.solomon|baruch|manasseh|"
+    r"shema|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
+    r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat"
     r")\b",
     re.I,
 )

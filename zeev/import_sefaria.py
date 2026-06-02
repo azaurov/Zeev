@@ -4,23 +4,24 @@ import_sefaria.py — Download Tanakh, Mishna, and Gemara from Sefaria's public 
 into a local SQLite FTS5 database at zeev/data/torah.db.
 
 Usage:
-    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara]
+    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha]
 
 Options:
-    --corpus    Comma-separated list of corpora to import (default: tanakh,mishna,gemara)
-                Use 'tanakh,mishna' to skip Gemara (saves ~200MB and ~2hrs download time).
+    --corpus    Comma-separated list of corpora to import (default: tanakh,mishna,gemara,apocrypha)
+                Use 'tanakh,mishna' to skip Gemara and Apocrypha.
 
 Resume-safe: already-imported refs are skipped. Re-run freely after interruption.
 
 Estimated download time (3 parallel workers):
-    Tanakh:  ~929 chapters  → ~5 min
-    Mishna:  ~525 chapters  → ~3 min
-    Gemara: ~7400 daf-sides → ~45 min
-    Total:                  → ~53 min (Tanakh+Mishna only: ~8 min)
+    Tanakh:    ~929 chapters   → ~5 min
+    Mishna:    ~525 chapters   → ~3 min
+    Gemara:   ~7400 daf-sides  → ~45 min
+    Apocrypha: ~141 chapters   → ~2 min
+    Total:                     → ~55 min (Tanakh+Mishna+Apocrypha only: ~10 min)
 
 Estimated DB size:
-    Tanakh+Mishna: ~30 MB
-    + Gemara:      ~250 MB
+    Tanakh+Mishna+Apocrypha: ~35 MB
+    + Gemara:                ~250 MB
 """
 
 import json
@@ -96,6 +97,21 @@ GEMARA = [
     ("Zevachim", 120), ("Menachot", 110), ("Hullin", 142), ("Bekhorot", 61),
     ("Arakhin", 34), ("Temurah", 34), ("Keritot", 28), ("Meilah", 22),
     ("Tamid", 33), ("Niddah", 73),
+]
+
+# Apocrypha / Deuterocanonical books available on Sefaria with English text.
+# Psalm 151 has no chapter structure — fetched as a bare ref.
+# (3 Maccabees, 4 Maccabees, Baruch, Letter of Jeremiah not available in English on Sefaria.)
+APOCRYPHA = [
+    # (display_name, sefaria_ref_base, chapters)  chapters=0 → single bare ref
+    ("Ben Sira",            "Ben_Sira",                   51),
+    ("Tobit",               "Tobit",                      13),
+    ("Judith",              "Judith",                     16),
+    ("1 Maccabees",         "First_Maccabees",            16),
+    ("2 Maccabees",         "The_Book_of_Maccabees_II",   10),
+    ("Wisdom of Solomon",   "Wisdom_of_Solomon",          18),
+    ("Prayer of Manasseh",  "Prayer_of_Manasseh",          1),
+    ("Psalm 151",           "Psalm_151",                   0),  # bare ref, no chapter
 ]
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -186,6 +202,16 @@ def build_gemara_refs():
                 yield ("Gemara", f"{tractate} {folio}{side}", sref)
 
 
+def build_apocrypha_refs():
+    """Yield (source, human_ref, sefaria_ref) for every Apocrypha chapter."""
+    for display, sref_base, chapters in APOCRYPHA:
+        if chapters == 0:
+            yield ("Apocrypha", display, sref_base)
+        else:
+            for ch in range(1, chapters + 1):
+                yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
+
+
 def import_corpus(refs, db_path, workers=3, rate_limit=4):
     """
     Download and insert refs into the DB.
@@ -248,7 +274,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    corpora = {"tanakh", "mishna", "gemara"}
+    corpora = {"tanakh", "mishna", "gemara", "apocrypha"}
     for arg in sys.argv[1:]:
         if arg.startswith("--corpus"):
             val = arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
@@ -269,6 +295,11 @@ def main():
         print(f"\n=== Babylonian Talmud (~{total_daf} daf-sides) ===")
         print("  This will take ~45 minutes. Ctrl-C to pause; re-run to resume.")
         import_corpus(build_gemara_refs(), DB_PATH)
+
+    if "apocrypha" in corpora:
+        total_apo = sum(ch if ch > 0 else 1 for _, _, ch in APOCRYPHA)
+        print(f"\n=== Apocrypha / Deuterocanonical ({total_apo} chapters) ===")
+        import_corpus(build_apocrypha_refs(), DB_PATH)
 
     # Report final DB size
     size_mb = DB_PATH.stat().st_size / 1_048_576

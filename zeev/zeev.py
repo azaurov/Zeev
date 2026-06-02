@@ -843,6 +843,22 @@ def _build_vision_msgs(image_b64, question=""):
     ]
 
 
+def _rtl_print(text):
+    """Print text in correct RTL visual order via fribidi, falling back to plain print."""
+    if not text:
+        return
+    try:
+        result = subprocess.run(
+            ["fribidi", "--nopad"],
+            input=text.encode(),
+            capture_output=True,
+            timeout=5,
+        )
+        print(result.stdout.decode().rstrip())
+    except Exception:
+        print(text)
+
+
 def stream_reply(messages, model):
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
@@ -860,7 +876,12 @@ def stream_reply(messages, model):
         print(f"\nConnection error: {err}")
         return ""
 
-    print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
+    # Hebrew streams LTR token-by-token which breaks RTL layout — buffer and print at once.
+    rtl = (FORCED_LANG == "he")
+    print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="" if not rtl else "\n", flush=True)
+    if rtl:
+        print(f"{DIM}...{RESET}", end="", flush=True)
+
     full = ""
     for line in resp.iter_lines():
         if not line or not line.startswith(b"data: "):
@@ -870,11 +891,17 @@ def stream_reply(messages, model):
             break
         try:
             delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-            print(delta, end="", flush=True)
             full += delta
+            if not rtl:
+                print(delta, end="", flush=True)
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
-    print()
+
+    if rtl:
+        print(f"\r{' ' * 3}\r", end="")  # erase the "..."
+        _rtl_print(full)
+    else:
+        print()
     return full
 
 

@@ -79,18 +79,32 @@ Hebrew, Spanish, and Russian use Google Translate TTS (no install needed). Requi
 
 ## Torah RAG (Sefaria)
 
-Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud. When a query matches Torah keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
+Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, and Apocrypha. When a query matches Torah/Apocrypha keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
 
-**Building the database** (~53 min total, resume-safe):
+**Corpora:**
+
+| Corpus | Content | Size | Time |
+|--------|---------|------|------|
+| Tanakh | 929 chapters (Torah, Nevi'im, Ketuvim) | ~10 MB | ~5 min |
+| Mishna | 525 chapters | ~8 MB | ~3 min |
+| Gemara | ~5400 daf-sides (Babylonian Talmud) | ~240 MB | ~45 min |
+| Apocrypha | Ben Sira, Tobit, Judith, 1–2 Maccabees, Wisdom of Solomon, Prayer of Manasseh, Psalm 151 | ~2 MB | ~2 min |
+
+**Building the database** (resume-safe — re-run freely after interruption):
 ```bash
-# Full corpus (Tanakh + Mishna + Gemara, ~250 MB)
+# Full corpus (~55 min, ~260 MB)
 python3 zeev/import_sefaria.py
 
-# Tanakh + Mishna only (~30 MB, ~8 min)
-python3 zeev/import_sefaria.py --corpus tanakh,mishna
+# Skip Gemara (~10 min, ~20 MB)
+python3 zeev/import_sefaria.py --corpus tanakh,mishna,apocrypha
+
+# Single corpus
+python3 zeev/import_sefaria.py --corpus apocrypha
 ```
 
-The importer fetches from the [Sefaria public API](https://www.sefaria.org/api/) in parallel and stores results in `zeev/data/torah.db`. Re-running skips already-imported refs.
+The importer fetches from the [Sefaria public API](https://www.sefaria.org/api/) with 3 parallel workers and stores results in `zeev/data/torah.db`. Already-imported refs are skipped.
+
+**Note:** 3 Maccabees, 4 Maccabees, Baruch, and Letter of Jeremiah are not available in English on Sefaria. Several Ben Sira chapters (17, 22–24, 29, 36) are split into `a`–`g` sub-refs on Sefaria and are handled automatically by the importer.
 
 ## Music playback
 

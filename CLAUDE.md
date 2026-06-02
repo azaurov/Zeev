@@ -109,12 +109,14 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 
 ### Torah RAG (Sefaria)
 
-Local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud. Populated by `zeev/import_sefaria.py` (resume-safe, ~53 min for the full corpus).
+Local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, and Apocrypha. Populated by `zeev/import_sefaria.py` (resume-safe, ~55 min for the full corpus).
 
-- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, Shema, halacha keywords, tractate names, etc.).
+- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, Shema, halacha keywords, tractate names, Apocrypha book names, etc.).
 - **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`.
 - `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
-- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara), `ref` (human ref e.g. `Berakhot 2a`), `en`, `he`. `done` table tracks imported refs for resume safety.
+- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha), `ref` (human ref e.g. `Berakhot 2a`, `Ben Sira 3`), `en`, `he`. `done` table tracks imported refs for resume safety.
+- **Apocrypha corpora**: Ben Sira (51 ch), Tobit (13), Judith (16), 1 Maccabees (16), 2 Maccabees (10), Wisdom of Solomon (18), Prayer of Manasseh (1), Psalm 151. 3/4 Maccabees, Baruch, and Letter of Jeremiah not available in English on Sefaria.
+- **Ben Sira quirk**: chapters 17, 22–24, 29, 36 have no content at the plain chapter ref; the importer yields `a`–`g` sub-refs for these (`_BEN_SIRA_SPLIT` set).
 
 ### Music playback
 

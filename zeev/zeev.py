@@ -859,6 +859,23 @@ def _rtl_print(text):
         print(text)
 
 
+def _screen_rows(text, first_line_prefix=0):
+    """Count terminal screen rows occupied by text, accounting for line wrapping."""
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    import unicodedata
+    def vlen(s):
+        # Exclude zero-width combining characters (e.g. Hebrew nikud)
+        return sum(1 for c in s if unicodedata.category(c) != 'Mn')
+    segments = text.split('\n')
+    rows = max(1, (first_line_prefix + vlen(segments[0]) + cols - 1) // cols)
+    for seg in segments[1:]:
+        rows += max(1, (vlen(seg) + cols - 1) // cols) if seg else 1
+    return rows
+
+
 def stream_reply(messages, model):
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
@@ -876,12 +893,7 @@ def stream_reply(messages, model):
         print(f"\nConnection error: {err}")
         return ""
 
-    # Hebrew streams LTR token-by-token which breaks RTL layout — buffer and print at once.
-    rtl = (FORCED_LANG == "he")
-    print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="" if not rtl else "\n", flush=True)
-    if rtl:
-        print(f"{DIM}...{RESET}", end="", flush=True)
-
+    print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
     full = ""
     for line in resp.iter_lines():
         if not line or not line.startswith(b"data: "):
@@ -892,13 +904,16 @@ def stream_reply(messages, model):
         try:
             delta = json.loads(data)["choices"][0]["delta"].get("content", "")
             full += delta
-            if not rtl:
-                print(delta, end="", flush=True)
+            print(delta, end="", flush=True)
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
 
-    if rtl:
-        print(f"\r{' ' * 3}\r", end="")  # erase the "..."
+    has_hebrew = any('֐' <= c <= '׿' for c in full)
+    if has_hebrew and shutil.which("fribidi"):
+        # Streaming placed Hebrew LTR — move cursor back up, clear, reprint via fribidi.
+        n = _screen_rows(full, first_line_prefix=len("Zeev: "))
+        print(f"\n\033[{n}A\033[0J", end="", flush=True)
+        print(f"{CYAN}{BOLD}Zeev:{RESET}")
         _rtl_print(full)
     else:
         print()

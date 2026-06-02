@@ -328,52 +328,79 @@ def music_stop():
 
 
 def youtube_play(query, adev=None):
-    """Search YouTube for query and stream audio via yt-dlp + mpg123 in background."""
+    """Search YouTube for query, download audio, and play via ffmpeg+aplay in background."""
     global _MUSIC_PROC
 
     music_stop()  # stop any current track
 
     if not shutil.which("yt-dlp"):
         return None, "yt-dlp not installed (sudo apt install yt-dlp)"
-    if not shutil.which("mpg123"):
-        return None, "mpg123 not installed (sudo apt install mpg123)"
-
-    cookies_args = ["--cookies", str(YT_COOKIES)] if YT_COOKIES.exists() else []
-    if not YT_COOKIES.exists():
-        return None, (
-            "YouTube cookies not found. Export your cookies to "
-            f"{YT_COOKIES} using a browser extension (e.g. 'Get cookies.txt LOCALLY'), "
-            "then try again."
-        )
+    if not shutil.which("ffmpeg"):
+        return None, "ffmpeg not installed (sudo apt install ffmpeg)"
 
     def _run():
         global _MUSIC_PROC
+        tmp = f"/tmp/zeev_music_{os.getpid()}.%(ext)s"
+        tmp_glob = f"/tmp/zeev_music_{os.getpid()}.*"
         try:
-            # Resolve the audio stream URL
-            url_proc = subprocess.run(
-                ["yt-dlp", f"ytsearch1:{query}", "--get-url", "--get-title",
-                 "-f", "bestaudio/best", "--no-playlist", "-q"] + cookies_args,
-                capture_output=True, text=True, timeout=30,
+            print(f"\n{DIM}[music] Searching: {query}...{RESET}", flush=True)
+
+            # Build command: use cookies if available, otherwise try without
+            cookies_args = ["--cookies", str(YT_COOKIES)] if YT_COOKIES.exists() else []
+            dl = subprocess.run(
+                ["yt-dlp", f"ytsearch1:{query}",
+                 "-o", tmp, "-f", "bestaudio", "--no-playlist", "-q",
+                 "--print", "before_dl:%(title)s",
+                 "--extractor-args", "youtube:player_client=ios,mweb"]
+                + cookies_args,
+                capture_output=True, text=True,
             )
-            lines = url_proc.stdout.strip().splitlines()
-            if len(lines) < 2:
-                print(f"\n{DIM}[music] No results for: {query}{RESET}")
+
+            import glob as _glob
+            files = _glob.glob(tmp_glob)
+            if not files:
+                stderr = dl.stderr
+                if "no longer valid" in stderr or "cookies" in stderr.lower():
+                    print(f"\n{DIM}[music] YouTube cookies expired. Re-export from your browser "
+                          f"and save to {YT_COOKIES}{RESET}", flush=True)
+                elif "Sign in" in stderr or "bot" in stderr:
+                    print(f"\n{DIM}[music] YouTube requires login. Save cookies to "
+                          f"{YT_COOKIES} using 'Get cookies.txt LOCALLY' browser extension.{RESET}",
+                          flush=True)
+                else:
+                    print(f"\n{DIM}[music] Could not download: {query}{RESET}", flush=True)
                 return
-            title = lines[0]
-            stream_url = lines[-1]
+
+            title = dl.stdout.strip().splitlines()[0] if dl.stdout.strip() else query
+            audio_file = files[0]
             print(f"\n{DIM}[playing: {title}]{RESET}", flush=True)
 
-            cmd = ["mpg123", "-q"]
+            aplay_cmd = ["aplay", "-r", "44100", "-f", "S16_LE", "-c", "2", "-q", "-"]
             if adev:
-                cmd += ["-a", adev]
-            cmd.append(stream_url)
-            _MUSIC_PROC = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            _MUSIC_PROC.wait()
-            _MUSIC_PROC = None
-        except subprocess.TimeoutExpired:
-            print(f"\n{DIM}[music] Search timed out.{RESET}")
+                aplay_cmd = ["aplay", "-D", adev, "-r", "44100", "-f", "S16_LE", "-c", "2", "-q", "-"]
+
+            ffmpeg_p = subprocess.Popen(
+                ["ffmpeg", "-i", audio_file, "-f", "s16le", "-ar", "44100", "-ac", "2", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            aplay_p = subprocess.Popen(
+                aplay_cmd, stdin=ffmpeg_p.stdout,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            ffmpeg_p.stdout.close()
+            _MUSIC_PROC = aplay_p
+            aplay_p.wait()
+            ffmpeg_p.wait()
         except Exception as e:
             print(f"\n{DIM}[music] Error: {e}{RESET}")
+        finally:
+            import glob as _glob
+            for f in _glob.glob(tmp_glob):
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+            _MUSIC_PROC = None
 
     threading.Thread(target=_run, daemon=True).start()
     return query, None

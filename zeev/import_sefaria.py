@@ -102,6 +102,11 @@ GEMARA = [
 # Apocrypha / Deuterocanonical books available on Sefaria with English text.
 # Psalm 151 has no chapter structure — fetched as a bare ref.
 # (3 Maccabees, 4 Maccabees, Baruch, Letter of Jeremiah not available in English on Sefaria.)
+#
+# Ben Sira chapters 17, 22-24, 29, 36 only exist as sub-part refs (Ben_Sira.17a/b/c…).
+# All other chapters work as plain refs (Ben_Sira.1 etc.).
+_BEN_SIRA_SPLIT = {17, 22, 23, 24, 29, 36}
+
 APOCRYPHA = [
     # (display_name, sefaria_ref_base, chapters)  chapters=0 → single bare ref
     ("Ben Sira",            "Ben_Sira",                   51),
@@ -209,7 +214,11 @@ def build_apocrypha_refs():
             yield ("Apocrypha", display, sref_base)
         else:
             for ch in range(1, chapters + 1):
-                yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
+                if sref_base == "Ben_Sira" and ch in _BEN_SIRA_SPLIT:
+                    for side in "abcdefg":
+                        yield ("Apocrypha", f"{display} {ch}{side}", f"{sref_base}.{ch}{side}")
+                else:
+                    yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
 
 
 def import_corpus(refs, db_path, workers=3, rate_limit=4):

@@ -847,6 +847,11 @@ _TORAH_RE = re.compile(
     r"apocrypha|deuterocanonical|"
     r"ben.sira|sirach|ecclesiasticus|tobit|judith|maccabees|maccabean|"
     r"wisdom.of.solomon|baruch|manasseh|"
+    r"siddur|haggadah|haggada|machzor|piyyut|liturgy|"
+    r"shacharit|mincha|maariv|musaf|neilah|"
+    r"amidah|shmoneh.esrei|shemoneh.esreh|aleinu|kaddish|kedushah|"
+    r"modeh.ani|ashrei|hallel|adon.olam|yigdal|birkat.hamazon|bentching|"
+    r"seder|maggid|dayenu|afikomen|maror|matzah|matza|"
     r"shema|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
     r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat"
     r")\b",

@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-import_sefaria.py — Download Tanakh, Mishna, and Gemara from Sefaria's public API
-into a local SQLite FTS5 database at zeev/data/torah.db.
+import_sefaria.py — Download Tanakh, Mishna, Gemara, Apocrypha, and Liturgy
+from Sefaria's public API into a local SQLite FTS5 database at zeev/data/torah.db.
 
 Usage:
-    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha]
+    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy]
 
 Options:
-    --corpus    Comma-separated list of corpora to import (default: tanakh,mishna,gemara,apocrypha)
-                Use 'tanakh,mishna' to skip Gemara and Apocrypha.
+    --corpus    Comma-separated list of corpora to import
+                Default: tanakh,mishna,gemara,apocrypha,liturgy
+                Use 'tanakh,mishna' to skip Gemara, Apocrypha, and Liturgy.
 
 Resume-safe: already-imported refs are skipped. Re-run freely after interruption.
 
 Estimated download time (3 parallel workers):
-    Tanakh:    ~929 chapters   → ~5 min
-    Mishna:    ~525 chapters   → ~3 min
-    Gemara:   ~7400 daf-sides  → ~45 min
-    Apocrypha: ~141 chapters   → ~2 min
-    Total:                     → ~55 min (Tanakh+Mishna+Apocrypha only: ~10 min)
+    Tanakh:    ~929 chapters    → ~5 min
+    Mishna:    ~525 chapters    → ~3 min
+    Gemara:   ~5400 daf-sides   → ~45 min
+    Apocrypha: ~141 chapters    → ~2 min
+    Liturgy:   ~490 sections    → ~5 min
+    Total:                      → ~60 min (without Gemara: ~15 min)
 
 Estimated DB size:
-    Tanakh+Mishna+Apocrypha: ~35 MB
-    + Gemara:                ~250 MB
+    Tanakh+Mishna+Apocrypha+Liturgy: ~40 MB
+    + Gemara:                        ~250 MB
 """
 
 import json
@@ -117,6 +119,14 @@ APOCRYPHA = [
     ("Wisdom of Solomon",   "Wisdom_of_Solomon",          18),
     ("Prayer of Manasseh",  "Prayer_of_Manasseh",          1),
     ("Psalm 151",           "Psalm_151",                   0),  # bare ref, no chapter
+]
+
+# Liturgy books — each is a complex nested text fetched as whole sections.
+# Sections are discovered dynamically by walking the index tree.
+LITURGY = [
+    ("Siddur",    "Siddur Ashkenaz"),
+    ("Haggadah",  "Pesach Haggadah"),
+    ("Haggadah",  "The Jonathan Sacks Haggadah"),
 ]
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -221,6 +231,41 @@ def build_apocrypha_refs():
                     yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
 
 
+def _fetch_index(book_title):
+    """Fetch the Sefaria index schema for a book."""
+    url = f"{API_BASE.rsplit('/', 1)[0]}/index/{urllib.parse.quote(book_title)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Zeev/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def _walk_leaf_sections(nodes, path=""):
+    """Recursively yield full section paths for leaf nodes in an index tree."""
+    for n in nodes:
+        title = n.get("title", "")
+        sub   = n.get("nodes", [])
+        full  = f"{path}, {title}" if path else title
+        if sub:
+            yield from _walk_leaf_sections(sub, full)
+        else:
+            yield full
+
+
+def build_liturgy_refs():
+    """Yield (source, human_ref, sefaria_ref) for every section of every liturgy book."""
+    for source, book in LITURGY:
+        try:
+            idx    = _fetch_index(book)
+            leaves = list(_walk_leaf_sections(idx["schema"]["nodes"]))
+        except Exception as e:
+            print(f"  WARNING: could not fetch index for {book!r}: {e}")
+            continue
+        for section_path in leaves:
+            sref     = f"{book}, {section_path}"
+            human    = sref
+            yield (source, human, sref)
+
+
 def import_corpus(refs, db_path, workers=3, rate_limit=4):
     """
     Download and insert refs into the DB.
@@ -283,7 +328,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    corpora = {"tanakh", "mishna", "gemara", "apocrypha"}
+    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy"}
     for arg in sys.argv[1:]:
         if arg.startswith("--corpus"):
             val = arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
@@ -309,6 +354,11 @@ def main():
         total_apo = sum(ch if ch > 0 else 1 for _, _, ch in APOCRYPHA)
         print(f"\n=== Apocrypha / Deuterocanonical ({total_apo} chapters) ===")
         import_corpus(build_apocrypha_refs(), DB_PATH)
+
+    if "liturgy" in corpora:
+        books = ", ".join(b for _, b in LITURGY)
+        print(f"\n=== Liturgy ({books}) ===")
+        import_corpus(build_liturgy_refs(), DB_PATH)
 
     # Report final DB size
     size_mb = DB_PATH.stat().st_size / 1_048_576

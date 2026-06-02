@@ -2595,7 +2595,34 @@ def run_device_mode():
     if turns:
         print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", flush=True)
     print(f"{DIM}Hold button to speak, release to send. Press during speaking to interrupt.")
-    print(f"Press while recording to cancel & exit.{RESET}\n", flush=True)
+    print(f"Press while recording to cancel & exit.")
+    print(f"Keyboard: [Space] start/send  [i] interrupt  [q] quit{RESET}\n", flush=True)
+
+    def _keyboard_listener():
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == ' ':
+                    if _face_state == "listening":
+                        _on_release()
+                    else:
+                        _on_press()
+                elif ch in ('i', 'I'):
+                    _on_press()   # interrupt TTS or cancel recording
+                elif ch in ('q', 'Q', '\x03'):  # q or Ctrl-C
+                    break
+        except Exception:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        board.cleanup()
+        sys.exit(0)
+
+    threading.Thread(target=_keyboard_listener, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
         board.cleanup()

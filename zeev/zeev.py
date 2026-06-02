@@ -719,6 +719,20 @@ def init_thermal():
     except Exception:
         THERMAL_AVAILABLE = False
 
+def init_mic():
+    """Set WM8960 mic capture gain to levels tuned for clean recording."""
+    try:
+        subprocess.run(
+            ["amixer", "-c", "wm8960soundcard", "sset", "Capture", "40"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["amixer", "-c", "wm8960soundcard", "sset", "ADC PCM", "220"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
 
 def capture_image(width=1280, height=720):
     """Capture a JPEG via picamera2. Returns base64 string or None."""
@@ -2168,6 +2182,7 @@ def run_device_mode():
         )
     except Exception:
         pass
+    init_mic()
 
     board  = WhisplayBoard()
     session = load_prior()
@@ -2616,6 +2631,7 @@ def main():
     init_tts()
     init_camera()
     init_thermal()
+    init_mic()
 
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
     print(f"{DIM}  /clear        wipe session context")

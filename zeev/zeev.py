@@ -7,6 +7,7 @@ import json
 import os
 import re
 import readline
+import select
 import shutil
 import signal
 import socket
@@ -2346,18 +2347,56 @@ def run_device_mode():
 
     _tts_p1 = None
     _tts_p2 = None
+    _piper_dev_proc = None   # persistent piper process — kept alive between utterances
+
+    def _collect_piper_audio(p, timeout=0.3):
+        """Read raw PCM from a live piper process until it goes quiet (line done)."""
+        audio = bytearray()
+        fd = p.stdout.fileno()
+        while True:
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 16384)
+            except OSError:
+                break
+            if not chunk:
+                break
+            audio.extend(chunk)
+        return bytes(audio)
+
+    def _drain_piper(p):
+        """Discard any buffered piper output (e.g. after an interrupt)."""
+        fd = p.stdout.fileno()
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                break
+            try:
+                if not os.read(fd, 16384):
+                    break
+            except OSError:
+                break
 
     def _interrupt_tts():
-        nonlocal _tts_p1, _tts_p2
+        nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         for p in (_tts_p2, _tts_p1):
             if p:
                 try:
                     p.terminate()
                 except Exception:
                     pass
+        # If piper was killed (p1 == _piper_dev_proc), mark it dead so next
+        # call restarts it cleanly rather than writing to a dead process.
+        if _tts_p1 is not None and _tts_p1 is _piper_dev_proc:
+            _piper_dev_proc = None
+        elif _piper_dev_proc and _piper_dev_proc.poll() is None:
+            # piper survived (wasn't tracked as p1 this call) — drain its buffer
+            _drain_piper(_piper_dev_proc)
 
     def _speak_device(text):
-        nonlocal _tts_p1, _tts_p2
+        nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         clean = _clean_for_tts(text)
         if not clean:
             return
@@ -2385,24 +2424,37 @@ def run_device_mode():
             finally:
                 _tts_p1 = _tts_p2 = None
 
-        # 2. Piper — local neural TTS fallback
+        # 2. Piper — persistent local neural TTS (model stays loaded between calls)
         model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
         try:
             if model:
-                p1 = subprocess.Popen(
-                    [PIPER_BIN, "--model", model, "--output_raw"],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
-                p2 = subprocess.Popen(
-                    ["aplay", "-D", "plughw:wm8960soundcard,0",
-                     "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
-                    stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                p1.stdout.close()
-                _tts_p1, _tts_p2 = p1, p2
-                p1.stdin.write(clean.encode())
-                p1.stdin.close()
+                # Reuse or (re)start the persistent piper process.
+                if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
+                    _piper_dev_proc = subprocess.Popen(
+                        [PIPER_BIN, "--model", model, "--output_raw"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    )
+                p1 = _piper_dev_proc
+                _tts_p1, _tts_p2 = p1, None
+                # Write one line — piper synthesises, then waits for the next line.
+                p1.stdin.write(clean.encode() + b"\n")
+                p1.stdin.flush()
+                audio = _collect_piper_audio(p1)
+                if audio:
+                    p2 = subprocess.Popen(
+                        ["aplay", "-D", "plughw:wm8960soundcard,0",
+                         "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    _tts_p2 = p2
+                    try:
+                        p2.stdin.write(audio)
+                        p2.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    p2.wait()
             else:
                 # 3. espeak-ng — last resort
                 espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
@@ -2417,8 +2469,8 @@ def run_device_mode():
                 )
                 p1.stdout.close()
                 _tts_p1, _tts_p2 = p1, p2
-            p2.wait()
-            p1.wait()
+                p2.wait()
+                p1.wait()
         except Exception as e:
             print(f"TTS error: {e}")
         finally:

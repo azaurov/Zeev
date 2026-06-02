@@ -311,9 +311,11 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
                         "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
                         (source, human_ref, en[:4000], he[:4000]),
                     )
-                    con.execute("INSERT OR IGNORE INTO done(ref) VALUES (?)", (sref,))
                 else:
                     errors[0] += 1
+                # Always mark done — empty refs have no content on Sefaria
+                # and should not be retried on subsequent runs.
+                con.execute("INSERT OR IGNORE INTO done(ref) VALUES (?)", (sref,))
                 con.commit()
                 print(
                     f"\r  [{bar}] {pct:3d}% {completed[0]}/{total}  "

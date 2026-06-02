@@ -227,10 +227,16 @@ def init_tts():
     )
 
 
-def _clean_for_tts(text):
+_YHWH_RE = re.compile(r"י[ְ-ׇ]*ה[ְ-ׇ]*ו[ְ-ׇ]*ה[ְ-ׇ]*|ה[ְ-ׇ]*ו[ְ-ׇ]*י[ְ-ׇ]*|הוהיְ")
+
+def _clean_for_tts(text, lang=None):
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"[*_`#~]", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    # Replace the Tetragrammaton (with or without vowel points) reverently
+    replacement = "אֲדֹנָי" if lang == "he" else "Adonai"
+    text = _YHWH_RE.sub(replacement, text)
+    return text
 
 
 def _piper_speak(clean, model):
@@ -252,33 +258,31 @@ def _piper_speak(clean, model):
                 p = _piper_term_proc
                 p.stdin.write(clean.encode() + b"\n")
                 p.stdin.flush()
-                # Read PCM until piper goes quiet after finishing the line
-                audio = bytearray()
+                # Stream PCM from Piper → aplay as it arrives so playback
+                # starts immediately rather than waiting for full synthesis.
+                aplay = subprocess.Popen(
+                    ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 fd = p.stdout.fileno()
-                while True:
-                    ready, _, _ = select.select([fd], [], [], 0.3)
-                    if not ready:
-                        break
-                    try:
-                        chunk = os.read(fd, 16384)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    audio.extend(chunk)
-                if audio:
-                    aplay = subprocess.Popen(
-                        ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    try:
-                        aplay.stdin.write(bytes(audio))
-                        aplay.stdin.close()
-                    except BrokenPipeError:
-                        pass
-                    aplay.wait()
+                try:
+                    while True:
+                        ready, _, _ = select.select([fd], [], [], 0.3)
+                        if not ready:
+                            break
+                        try:
+                            chunk = os.read(fd, 4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        aplay.stdin.write(chunk)
+                    aplay.stdin.close()
+                except BrokenPipeError:
+                    pass
+                aplay.wait()
             except Exception:
                 _piper_term_proc = None
 
@@ -457,14 +461,14 @@ def youtube_play(query, adev=None):
     return query, None
 
 
-def speak_terminal(text):
+def speak_terminal(text, lang=None):
     """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
     if not TTS_AVAILABLE:
         return
-    clean = _clean_for_tts(text)
+    lang = lang or detect_lang(text)
+    clean = _clean_for_tts(text, lang)
     if not clean:
         return
-    lang = detect_lang(clean)
 
     _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
     if lang in _GTTS_LANGS and shutil.which("mpg123"):
@@ -487,7 +491,7 @@ def groq_tts(text):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
     if not GROQ_API_KEY or not text.strip():
         return None
-    clean = _clean_for_tts(text)
+    clean = _clean_for_tts(text, "en")
     if not clean or detect_lang(clean) != "en":
         return None
     try:
@@ -2067,7 +2071,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.end_headers()
                     return
                 text = data.get("text", "")
-                lang = detect_lang(_clean_for_tts(text))
+                lang = detect_lang(text)
+                clean = _clean_for_tts(text, lang)
                 audio = groq_tts(text)
                 if audio:
                     self.send_response(200)
@@ -2076,13 +2081,25 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.end_headers()
                     self.wfile.write(audio)
                 else:
-                    # Tell the browser the detected language so it can use speechSynthesis
-                    body = json.dumps({"lang": lang}).encode()
-                    self.send_response(503)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    # Try Google Translate TTS for non-English (and English fallback)
+                    gtts_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
+                    mp3_parts = [_gtts_fetch_chunk(c, gtts_lang) for c in _gtts_chunks(clean)]
+                    mp3_parts = [p for p in mp3_parts if p]
+                    if mp3_parts:
+                        mp3 = b"".join(mp3_parts)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "audio/mpeg")
+                        self.send_header("Content-Length", str(len(mp3)))
+                        self.end_headers()
+                        self.wfile.write(mp3)
+                    else:
+                        # Last resort: tell the browser to use speechSynthesis
+                        body = json.dumps({"lang": lang}).encode()
+                        self.send_response(503)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
                 return
 
             if self.path == "/note":
@@ -2726,10 +2743,10 @@ def run_device_mode():
 
     def _speak_device(text):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
-        clean = _clean_for_tts(text)
+        lang = detect_lang(text)
+        clean = _clean_for_tts(text, lang)
         if not clean:
             return
-        lang = detect_lang(clean)
 
         # 1. Groq Orpheus — fast cloud TTS, English only
         wav = groq_tts(clean) if lang == "en" else None
@@ -3114,7 +3131,7 @@ def main():
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
-    tts_on       = False
+    tts_on       = True
     session      = load_prior()
 
     if session:
@@ -3413,7 +3430,8 @@ def main():
             session.append({"role": "assistant", "content": reply})
             append_message("assistant", reply)
             if tts_on:
-                speak_terminal(reply)
+                tts_lang = "he" if needs_torah(user_input) else None
+                speak_terminal(reply, lang=tts_lang)
 
         if len(session) > 60:
             session = session[-60:]

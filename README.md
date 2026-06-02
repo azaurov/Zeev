@@ -79,7 +79,7 @@ Hebrew, Spanish, and Russian use Google Translate TTS (no install needed). Requi
 
 ## Torah RAG (Sefaria)
 
-Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, and Apocrypha. When a query matches Torah/Apocrypha keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
+Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, Apocrypha, and Liturgy. When a query matches Torah/liturgy keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
 
 **Corpora:**
 
@@ -89,22 +89,26 @@ Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, 
 | Mishna | 525 chapters | ~8 MB | ~3 min |
 | Gemara | ~5400 daf-sides (Babylonian Talmud) | ~240 MB | ~45 min |
 | Apocrypha | Ben Sira, Tobit, Judith, 1–2 Maccabees, Wisdom of Solomon, Prayer of Manasseh, Psalm 151 | ~2 MB | ~2 min |
+| Liturgy | Siddur Ashkenaz (456 sections), Pesach Haggadah, The Jonathan Sacks Haggadah | ~3 MB | ~5 min |
 
 **Building the database** (resume-safe — re-run freely after interruption):
 ```bash
-# Full corpus (~55 min, ~260 MB)
+# Full corpus (~60 min, ~265 MB)
 python3 zeev/import_sefaria.py
 
-# Skip Gemara (~10 min, ~20 MB)
-python3 zeev/import_sefaria.py --corpus tanakh,mishna,apocrypha
+# Skip Gemara (~15 min, ~25 MB)
+python3 zeev/import_sefaria.py --corpus tanakh,mishna,apocrypha,liturgy
 
 # Single corpus
-python3 zeev/import_sefaria.py --corpus apocrypha
+python3 zeev/import_sefaria.py --corpus liturgy
 ```
 
 The importer fetches from the [Sefaria public API](https://www.sefaria.org/api/) with 3 parallel workers and stores results in `zeev/data/torah.db`. Already-imported refs are skipped.
 
-**Note:** 3 Maccabees, 4 Maccabees, Baruch, and Letter of Jeremiah are not available in English on Sefaria. Several Ben Sira chapters (17, 22–24, 29, 36) are split into `a`–`g` sub-refs on Sefaria and are handled automatically by the importer.
+**Notes:**
+- 3 Maccabees, 4 Maccabees, Baruch, and Letter of Jeremiah are not available in English on Sefaria.
+- Several Ben Sira chapters (17, 22–24, 29, 36) are split into `a`–`g` sub-refs and handled automatically.
+- Liturgy sections are fetched as complete units (all paragraphs in one API call) via the Sefaria index tree.
 
 ## Music playback
 

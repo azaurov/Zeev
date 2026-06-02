@@ -257,12 +257,12 @@ def _gtts_chunks(text, limit=200):
         yield chunk
 
 
-def _gtts_fetch_chunk(chunk):
+def _gtts_fetch_chunk(chunk, lang):
     """Fetch one chunk from Google Translate TTS. Returns MP3 bytes or None."""
     try:
         resp = requests.get(
             "https://translate.googleapis.com/translate_tts",
-            params={"ie": "UTF-8", "q": chunk, "tl": "he", "client": "gtx"},
+            params={"ie": "UTF-8", "q": chunk, "tl": lang, "client": "gtx"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
@@ -271,12 +271,12 @@ def _gtts_fetch_chunk(chunk):
         return None
 
 
-def _gtts_speak_he(text, adev=None):
-    """Speak Hebrew text via Google Translate TTS + mpg123 in a background thread."""
+def _gtts_speak(text, lang, adev=None):
+    """Speak text via Google Translate TTS + mpg123 in a background thread."""
     def _run():
         try:
             for chunk in _gtts_chunks(text):
-                mp3 = _gtts_fetch_chunk(chunk)
+                mp3 = _gtts_fetch_chunk(chunk, lang)
                 if mp3:
                     cmd = ["mpg123", "-q"]
                     if adev:
@@ -305,12 +305,10 @@ def speak_terminal(text):
         return
     lang = detect_lang(clean)
 
-    if lang == "he" and shutil.which("mpg123"):
-        _gtts_speak_he(clean)
-    elif PIPER_BIN and PIPER_MODELS.get(lang):
-        _piper_speak(clean, PIPER_MODELS[lang])
-    elif PIPER_BIN and PIPER_MODELS.get("en") and lang != "he":
-        # no lang-specific Piper model, fall back to English Piper
+    _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
+    if lang in _GTTS_LANGS and shutil.which("mpg123"):
+        _gtts_speak(clean, _GTTS_LANGS[lang])
+    elif PIPER_BIN and PIPER_MODELS.get("en"):
         _piper_speak(clean, PIPER_MODELS["en"])
     else:
         espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
@@ -2480,10 +2478,11 @@ def run_device_mode():
             finally:
                 _tts_p1 = _tts_p2 = None
 
-        # 2. Google Translate TTS — Hebrew (espeak-ng can't handle unvocalized Hebrew)
-        if lang == "he" and shutil.which("mpg123"):
+        # 2. Google Translate TTS — non-English (fast cloud, no model load lag)
+        _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
+        if lang in _GTTS_LANGS and shutil.which("mpg123"):
             for chunk in _gtts_chunks(clean):
-                mp3 = _gtts_fetch_chunk(chunk)
+                mp3 = _gtts_fetch_chunk(chunk, _GTTS_LANGS[lang])
                 if mp3:
                     p1 = subprocess.Popen(
                         ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],

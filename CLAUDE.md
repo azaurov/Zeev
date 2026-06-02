@@ -40,8 +40,11 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
 - **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
 - **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
-- **`speak_terminal(text)`** — detects language, routes to the appropriate Piper model (en/es/ru) or espeak-ng (he, or fallback). Runs in a background thread.
-- **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`, `es`, `ru`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
+- **`speak_terminal(text)`** — detects language, routes to Google Translate TTS + mpg123 (he/es/ru) or Piper (en). Runs in a background thread.
+- **`_gtts_chunks(text)`** — splits text at sentence boundaries into ≤200-char chunks for Google Translate TTS.
+- **`_gtts_fetch_chunk(chunk, lang)`** — fetches one MP3 chunk from `translate.googleapis.com/translate_tts`. No API key needed.
+- **`_gtts_speak(text, lang, adev=None)`** — plays Google Translate TTS via `mpg123` in a background thread; `adev` selects the ALSA device (used in device mode).
+- **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`.
@@ -120,14 +123,16 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 
 `detect_lang()` inspects each reply before speaking:
 
-| Language | Detection | Terminal engine | Web UI engine |
+| Language | Detection | Terminal/device engine | Web UI engine |
 |---|---|---|---|
 | English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Spanish | ñ, ¿, ¡, accented vowels | Piper `es_MX-ald-medium` | `speechSynthesis` `es-MX` |
-| Hebrew | Hebrew Unicode block (U+0590–U+05FF) | espeak-ng `-v he` | `speechSynthesis` `he-IL` |
-| Russian | Cyrillic block (U+0400–U+04FF) | Piper `ru_RU-dmitri-medium` | `speechSynthesis` `ru-RU` |
+| Spanish | ñ, ¿, ¡, accented vowels | Google Translate TTS + mpg123 | `speechSynthesis` `es-MX` |
+| Hebrew | Hebrew Unicode block (U+0590–U+05FF) | Google Translate TTS + mpg123 | `speechSynthesis` `he-IL` |
+| Russian | Cyrillic block (U+0400–U+04FF) | Google Translate TTS + mpg123 | `speechSynthesis` `ru-RU` |
 
 Groq Orpheus only supports English; non-English replies return `None` from `groq_tts()` and the web UI falls back to `speechSynthesis` with the correct BCP-47 language tag. Hebrew chat bubbles and the input field use `dir="auto"` for automatic RTL layout.
+
+Google Translate TTS (`translate.googleapis.com/translate_tts`) requires no API key and handles unvocalized Hebrew and all three non-English languages correctly. Requires `mpg123` (`sudo apt install mpg123`). Text is split into ≤200-char chunks at sentence boundaries to stay within the URL length limit.
 
 ### Web UI SSE events
 
@@ -182,7 +187,7 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 
 `python3 zeev/zeev.py --device` runs a push-to-talk voice companion on the PiSugar Whisplay HAT (1.96" ST7789 LCD 240×280, WM8960 audio codec, RGB LED, KEY button on GPIO17).
 
-- **TTS priority**: Groq Orpheus (cloud, fast, English) → Piper (local neural) → espeak-ng (fallback)
+- **TTS priority**: Groq Orpheus (cloud, English) → Google Translate TTS + mpg123 (he/es/ru) → Piper (en fallback) → espeak-ng (last resort)
 - **Speaker volume**: set to 75% via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control)
 - **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
 - **STT**: Groq Whisper `whisper-large-v3-turbo`
@@ -190,4 +195,4 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for low latency; terminal TTS uses local Piper (model load ~7s, then a few seconds per response); web UI TTS is also Groq Orpheus.
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (~7s model load per call). Web UI TTS is Groq Orpheus (English) or `speechSynthesis` (other languages).

@@ -26,6 +26,7 @@ MEMORY_FILE   = BASE_DIR / "data" / "user_memory.json"
 NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
 SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
+TORAH_DB      = BASE_DIR / "data" / "torah.db"
 
 # Load .env from repo root if present (supplements environment variables)
 _ENV_FILE = BASE_DIR.parent / ".env"
@@ -768,6 +769,61 @@ def retrieve_relevant(query, k=2, min_score=2):
     return pairs
 
 
+# ---------------------------------------------------------------------------
+# Torah RAG (Tanakh / Mishna / Gemara via local SQLite FTS5)
+# ---------------------------------------------------------------------------
+
+_TORAH_RE = re.compile(
+    r"\b("
+    r"torah|tanakh|talmud|gemara|gemorah|mishna|mishnah|chumash|"
+    r"bible|biblical|verse|pasuk|passuk|parasha|parashat|"
+    r"halacha|halakha|midrash|rashi|rambam|maimonides|"
+    r"daf|folio|tractate|masechet|seder|sefer|"
+    r"genesis|bereshit|beresheet|exodus|shemot|leviticus|vayikra|"
+    r"numbers|bamidbar|deuteronomy|devarim|"
+    r"psalms|tehillim|proverbs|mishlei|isaiah|yeshayahu|"
+    r"jeremiah|yirmiyahu|ezekiel|yechezkel|"
+    r"ruth|esther|job|iyov|ecclesiastes|kohelet|"
+    r"song.of.songs|shir.hashirim|lamentations|eichah|"
+    r"berakhot|shabbat|eruvin|pesachim|yoma|sukkah|"
+    r"rosh.hashanah|taanit|megillah|hagigah|"
+    r"yevamot|ketubot|nedarim|nazir|sotah|gittin|kiddushin|"
+    r"bava.kamma|bava.metzia|bava.batra|sanhedrin|makkot|"
+    r"shevuot|avodah.zarah|avot|pirkei"
+    r")\b",
+    re.I,
+)
+
+
+def needs_torah(text):
+    return TORAH_DB.exists() and bool(_TORAH_RE.search(text))
+
+
+def torah_search(query, k=3):
+    """Return up to k (ref, en_text) pairs from the local Torah FTS5 database."""
+    if not TORAH_DB.exists():
+        return []
+    try:
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(f"file:{TORAH_DB}?mode=ro", uri=True)
+        words = re.findall(r"\b\w{3,}\b", query.lower())
+        # FTS5 query: OR over content words, skip common stop words
+        skip = {"the", "and", "for", "what", "does", "how", "who", "was",
+                "are", "this", "that", "with", "from", "have"}
+        fts_words = [w for w in words if w not in skip][:12]
+        if not fts_words:
+            return []
+        fts_q = " OR ".join(fts_words)
+        rows = con.execute(
+            "SELECT ref, en FROM passages WHERE passages MATCH ? ORDER BY rank LIMIT ?",
+            (fts_q, k),
+        ).fetchall()
+        con.close()
+        return rows
+    except Exception:
+        return []
+
+
 def init_learning():
     """Load memory facts, notes, settings, and build RAG index. Call once at startup."""
     global USER_FACTS, USER_NOTES
@@ -844,6 +900,14 @@ def _build_system_prompt(user_text, on_search=None):
         for u, a in hits:
             rag_lines.append(f"User: {u[:300]}\nZeev: {a[:300]}")
         parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
+
+    if needs_torah(user_text):
+        torah_hits = torah_search(user_text)
+        if torah_hits:
+            torah_lines = "\n".join(
+                f"{ref}: {en[:500]}" for ref, en in torah_hits
+            )
+            parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:

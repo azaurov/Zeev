@@ -39,8 +39,8 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
 - **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
-- **`_clean_for_tts(text)`** — strips markdown before passing text to any TTS engine.
-- **`speak_terminal(text)`** — detects language, routes to Google Translate TTS + mpg123 (he/es/ru) or Piper (en). Runs in a background thread.
+- **`_clean_for_tts(text, lang=None)`** — strips markdown; replaces the Tetragrammaton with `אֲדֹנָי` (Hebrew) or `Adonai` (English) depending on `lang`.
+- **`speak_terminal(text, lang=None)`** — optional `lang` override skips `detect_lang`; routes to Google Translate TTS + mpg123 (he/es/ru) or Piper (en). Runs in a background thread. Torah queries force `lang='he'`.
 - **`_gtts_chunks(text)`** — splits text at sentence boundaries into ≤200-char chunks for Google Translate TTS.
 - **`_gtts_fetch_chunk(chunk, lang)`** — fetches one MP3 chunk from `translate.googleapis.com/translate_tts`. No API key needed.
 - **`_gtts_speak(text, lang, adev=None)`** — plays Google Translate TTS via `mpg123` in a background thread; `adev` selects the ALSA device (used in device mode).
@@ -107,12 +107,27 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 - **`retrieve_relevant(query, k=2, min_score=2)`** — scores past entries by word overlap with the current query, returns up to `k` `(user_msg, assistant_reply)` pairs above `min_score`. Injected as `## Relevant past exchanges:`.
 - **`init_learning()`** — called once at startup by both `main()` and `run_web_server()`; loads memory and builds RAG index.
 
+### Torah RAG (Sefaria)
+
+Local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud. Populated by `zeev/import_sefaria.py` (resume-safe, ~53 min for the full corpus).
+
+- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, Shema, halacha keywords, tractate names, etc.).
+- **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`.
+- `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
+- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara), `ref` (human ref e.g. `Berakhot 2a`), `en`, `he`. `done` table tracks imported refs for resume safety.
+
+### Music playback
+
+- **`youtube_play(query, adev=None)`** — searches YouTube via `yt-dlp --default-search ytsearch1`, downloads best audio, pipes through `ffmpeg` → `mpg123`. Returns `(title, error)`.
+- Terminal: `play <query>` keyword detected before model routing. `/stop` kills the playback process.
+- The user can say natural language like `play some jazz` or `stop the music`.
+
 ### Web UI features
 
 - Dark mobile-first chat interface
 - Model selector (Auto / 8B / 70B / DeepSeek R1) — Auto is default; model tag shown on each bubble
 - 🧠 memory panel — view stored facts, trigger memorization
-- TTS: Groq Orpheus (`daniel`) for English; browser `speechSynthesis` fallback for Spanish (`es-MX`), Hebrew (`he-IL`), Russian (`ru-RU`)
+- TTS: Groq Orpheus (`daniel`) for English; Google Translate TTS (served as MP3 from `/tts`) for he/es/ru; browser `speechSynthesis` as last resort if gTTS fails
 - Chat bubbles and input field use `dir="auto"` for automatic RTL layout with Hebrew
 - Voice input: tap-to-speak (Web Speech Recognition, auto-sends on silence) via 🎤 button
 - Continuous recording: tap ⏺ to start, tap again to stop → audio sent to `/transcribe` (Groq `whisper-large-v3-turbo`) → transcript auto-sent as message
@@ -126,13 +141,13 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 | Language | Detection | Terminal/device engine | Web UI engine |
 |---|---|---|---|
 | English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Spanish | ñ, ¿, ¡, accented vowels | Google Translate TTS + mpg123 | `speechSynthesis` `es-MX` |
-| Hebrew | Hebrew Unicode block (U+0590–U+05FF) | Google Translate TTS + mpg123 | `speechSynthesis` `he-IL` |
-| Russian | Cyrillic block (U+0400–U+04FF) | Google Translate TTS + mpg123 | `speechSynthesis` `ru-RU` |
+| Spanish | ñ, ¿, ¡, accented vowels | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `es-MX` |
+| Hebrew | any Hebrew Unicode character | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `he-IL` |
+| Russian | Cyrillic block (U+0400–U+04FF) | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `ru-RU` |
 
-Groq Orpheus only supports English; non-English replies return `None` from `groq_tts()` and the web UI falls back to `speechSynthesis` with the correct BCP-47 language tag. Hebrew chat bubbles and the input field use `dir="auto"` for automatic RTL layout.
+`detect_lang()` uses `.search()` — a single Hebrew character in the response is enough to trigger Hebrew gTTS. Torah/Sefaria query replies also force `lang='he'` regardless of reply script.
 
-Google Translate TTS (`translate.googleapis.com/translate_tts`) requires no API key and handles unvocalized Hebrew and all three non-English languages correctly. Requires `mpg123` (`sudo apt install mpg123`). Text is split into ≤200-char chunks at sentence boundaries to stay within the URL length limit.
+Groq Orpheus only supports English; non-English replies return `None` from `groq_tts()`. The `/tts` endpoint then tries Google Translate TTS (returned as `audio/mpeg`) before falling back to a `503 {"lang": ...}` response that tells the browser to use `speechSynthesis`. Text is split into ≤200-char chunks at sentence boundaries.
 
 ### Web UI SSE events
 
@@ -151,19 +166,19 @@ Google Translate TTS (`translate.googleapis.com/translate_tts`) requires no API 
 zeev/
   zeev.py                        # entire application
   mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
+  import_sefaria.py              # populate data/torah.db from Sefaria API
   setup.sh                       # one-time setup script (legacy llama.cpp)
   data/                          # runtime files (git-ignored)
     history.jsonl                # conversation history (JSONL)
     user_memory.json             # persistent user facts
+    torah.db                     # Sefaria FTS5 database (Tanakh/Mishna/Gemara)
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)
     piper_voice.onnx             # optional: drop a Piper model here for auto-detection
 ~/piper/                         # Piper TTS install (outside repo)
   piper                          # binary (symlinked to ~/.local/bin/piper)
   en_US-lessac-medium.onnx       # English voice (auto-detected by init_tts)
-  es_MX-ald-medium.onnx          # Spanish voice
-  ru_RU-dmitri-medium.onnx       # Russian voice
-  *.onnx.json                    # voice configs (one per model)
+  *.onnx.json                    # voice config
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 
@@ -195,4 +210,4 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (~7s model load per call). Web UI TTS is Groq Orpheus (English) or `speechSynthesis` (other languages).
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (persistent process, no reload delay after first call). Web UI TTS is Groq Orpheus (English) or Google Translate TTS (he/es/ru, returned as MP3), with browser `speechSynthesis` as last resort.

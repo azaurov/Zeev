@@ -8,7 +8,9 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Web search** — keyword heuristic triggers [Tavily](https://tavily.com) search and injects results into the reply
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
-- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices
+- **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud (via Sefaria); relevant passages injected into context automatically on Torah/halacha queries
+- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; Hebrew gTTS used whenever Hebrew characters appear in a response
+- **Music playback** — natural language YouTube search via yt-dlp + ffmpeg (`play some jazz`, `stop`)
 - **Voice input** — Web Speech Recognition in the browser; Groq Whisper STT in device mode
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
@@ -54,11 +56,11 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 | Language | Detection | Terminal | Web UI | Device mode |
 |----------|-----------|----------|--------|-------------|
 | English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
-| Spanish | ñ ¿ ¡ accented vowels | Piper `es_MX-ald-medium` | Browser `speechSynthesis` | Piper `es_MX-ald-medium` |
-| Russian | Cyrillic characters | Piper `ru_RU-dmitri-medium` | Browser `speechSynthesis` | Piper `ru_RU-dmitri-medium` |
-| Hebrew | Hebrew Unicode block | espeak-ng `-v he` | Browser `speechSynthesis` | espeak-ng `-v he` |
+| Spanish | ñ ¿ ¡ accented vowels | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Russian | Cyrillic characters | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Hebrew | any Hebrew Unicode character | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 
-Device mode tries Groq Orpheus first (fast cloud synthesis, ~200ms), falls back to Piper, then espeak-ng.
+Hebrew gTTS is also forced for Torah/Sefaria query responses even when the reply contains no Hebrew characters. Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper, then espeak-ng.
 
 ### Installing Piper (terminal TTS)
 
@@ -71,17 +73,39 @@ ln -sf ~/piper/piper ~/.local/bin/piper
 # English voice
 wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
 wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-
-# Spanish voice
-wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/ald/medium/es_MX-ald-medium.onnx
-wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json
-
-# Russian voice
-wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx
-wget -P ~/piper https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json
 ```
 
-Hebrew uses `espeak-ng`: `sudo apt install espeak-ng`
+Hebrew, Spanish, and Russian use Google Translate TTS (no install needed). Requires `mpg123`: `sudo apt install mpg123`
+
+## Torah RAG (Sefaria)
+
+Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud. When a query matches Torah keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
+
+**Building the database** (~53 min total, resume-safe):
+```bash
+# Full corpus (Tanakh + Mishna + Gemara, ~250 MB)
+python3 zeev/import_sefaria.py
+
+# Tanakh + Mishna only (~30 MB, ~8 min)
+python3 zeev/import_sefaria.py --corpus tanakh,mishna
+```
+
+The importer fetches from the [Sefaria public API](https://www.sefaria.org/api/) in parallel and stores results in `zeev/data/torah.db`. Re-running skips already-imported refs.
+
+## Music playback
+
+Say `play <query>` or `play some <genre>` to search YouTube and stream audio via yt-dlp + ffmpeg + mpg123. Say `stop` to stop playback.
+
+```
+You: play some Coltrane
+[playing: john coltrane a love supreme]
+```
+
+Requires `yt-dlp`, `ffmpeg`, and `mpg123`:
+```bash
+sudo apt install ffmpeg mpg123
+pip3 install yt-dlp
+```
 
 ## Thermal camera (MLX90640)
 
@@ -98,23 +122,80 @@ pip3 install adafruit-circuitpython-mlx90640 smbus2
 
 Zeev auto-detects the sensor at startup. In the terminal use `/thermal` for a colored ASCII heatmap, or `/thermal <question>` to ask Zeev about what it sees. The web UI shows a 🌡 button that renders a live canvas heatmap.
 
+## Raspberry Pi Camera Module V2 NoIR
+
+Zeev uses the **Camera Module V2 NoIR** (IMX219 sensor, no IR filter) connected via the CSI ribbon cable.
+
+**Enable the camera:**
+```bash
+# Add to /boot/firmware/config.txt
+dtoverlay=imx219
+```
+
+**Install picamera2:**
+```bash
+sudo apt install -y python3-picamera2
+```
+
+Zeev auto-detects the camera at startup via `picamera2`. In the terminal use `/look [question]` to take a photo and ask Zeev about it. The web UI shows a 📷 button (with optional flip toggle). Use `/flip` or the ↕ button to rotate the image 180° (saved persistently).
+
+---
+
+## Thermal camera (MLX90640)
+
+Connect the MLX90640 to the **software I2C bus** on GPIO5 (SDA) / GPIO6 (SCL). Add to `/boot/firmware/config.txt`:
+
+```
+dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10
+```
+
+The hardware I2C bus (`/dev/i2c-1`) is reserved for the WM8960 audio codec; the MLX90640 uses software I2C on bus 3 (`/dev/i2c-3`, address `0x33`).
+
+**Install dependencies:**
+```bash
+pip3 install adafruit-circuitpython-mlx90640 smbus2
+```
+
+Zeev auto-detects the sensor at startup. In the terminal use `/thermal` for a colored ASCII heatmap, or `/thermal <question>` to ask Zeev about what it sees. The web UI shows a 🌡 button that renders a live 32×24 canvas heatmap (blue→red gradient, white crosshair on hotspot).
+
+---
+
 ## Whisplay HAT device mode
 
-Install the driver once:
+The [PiSugar Whisplay HAT](https://github.com/PiSugar/Whisplay) adds a 1.96" ST7789 LCD (240×280), WM8960 audio codec (mic + speaker), RGB LED, and a push button on GPIO17.
+
+**Install the driver (once, requires reboot):**
 ```bash
 git clone https://github.com/PiSugar/Whisplay.git ~/Whisplay
 cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot
-sudo apt install -y espeak-ng python3-pillow
 ```
 
-Hold the button to speak, release to send. Press again while Zeev is speaking to interrupt. The LCD shows an animated face that reflects the current state (idle / listening / thinking / speaking).
+**Install Python dependencies:**
+```bash
+sudo apt install -y python3-pillow
+```
+
+**Run device mode:**
+```bash
+python3 zeev/zeev.py --device
+```
+
+Hold the KEY button to record, release to send. Press again while Zeev is speaking to interrupt. The LCD shows an animated face that reflects the current state (idle / listening / thinking / speaking). Speaker volume is set to 75% via `amixer` at startup.
+
+**Audio device:** WM8960 appears as `hw:wm8960soundcard`. Recording uses `arecord -f S16_LE -r 16000 -c 1 plughw:wm8960soundcard,0`; playback uses `aplay` or `mpg123 -a plughw:wm8960soundcard,0`.
+
+**TTS priority in device mode:**
+1. Groq Orpheus (cloud, English only, ~200ms)
+2. Google Translate TTS + mpg123 (he/es/ru, ~500ms)
+3. Piper local (English fallback)
+4. espeak-ng (last resort)
 
 ## Terminal commands
 
 | Command | Action |
 |---------|--------|
 | `/model [0-3]` | Lock model or return to auto |
-| `/tts` | Toggle speech output |
+| `/tts` | Toggle speech output (on by default) |
 | `/look [question]` | Take a photo and ask Zeev about it |
 | `/thermal [question]` | Capture thermal frame; optionally ask Zeev |
 | `/memory` | Show stored facts |
@@ -125,6 +206,8 @@ Hold the button to speak, release to send. Press again while Zeev is speaking to
 | `/forget-note N` | Remove note #N |
 | `/clear` | Clear session context |
 | `/forget` | Clear session + history |
+| `play <query>` | Play YouTube audio |
+| `/stop` | Stop music playback |
 | `/bt` | Manage Bluetooth audio devices |
 | `quit` | Exit (auto-memorizes session) |
 

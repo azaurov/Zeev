@@ -2596,7 +2596,7 @@ def run_device_mode():
         print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", flush=True)
     print(f"{DIM}Hold button to speak, release to send. Press during speaking to interrupt.")
     print(f"Press while recording to cancel & exit.")
-    print(f"Keyboard: [Space] start/send  [i] interrupt  [q] quit{RESET}\n", flush=True)
+    print(f"Keyboard: [LCtrl] hold to speak  [q] quit{RESET}\n", flush=True)
 
     def _keyboard_listener():
         import tty, termios
@@ -2606,14 +2606,7 @@ def run_device_mode():
             tty.setraw(fd)
             while True:
                 ch = sys.stdin.read(1)
-                if ch == ' ':
-                    if _face_state == "listening":
-                        _on_release()
-                    else:
-                        _on_press()
-                elif ch in ('i', 'I'):
-                    _on_press()   # interrupt TTS or cancel recording
-                elif ch in ('q', 'Q', '\x03'):  # q or Ctrl-C
+                if ch in ('q', 'Q', '\x03'):  # q or Ctrl-C
                     break
         except Exception:
             pass
@@ -2622,7 +2615,41 @@ def run_device_mode():
         board.cleanup()
         sys.exit(0)
 
+    def _evdev_listener():
+        try:
+            import evdev
+            from evdev import ecodes
+        except ImportError:
+            return
+
+        def _find_keyboard():
+            for path in evdev.list_devices():
+                try:
+                    dev = evdev.InputDevice(path)
+                    caps = dev.capabilities()
+                    if ecodes.EV_KEY in caps and ecodes.KEY_LEFTCTRL in caps[ecodes.EV_KEY]:
+                        return dev
+                except Exception:
+                    pass
+            return None
+
+        while True:
+            dev = _find_keyboard()
+            if dev is None:
+                time.sleep(2)
+                continue
+            try:
+                for event in dev.read_loop():
+                    if event.type == ecodes.EV_KEY and event.code == ecodes.KEY_LEFTCTRL:
+                        if event.value == 1:    # key down
+                            _on_press()
+                        elif event.value == 0:  # key up
+                            _on_release()
+            except Exception:
+                time.sleep(1)   # device disconnected — retry
+
     threading.Thread(target=_keyboard_listener, daemon=True).start()
+    threading.Thread(target=_evdev_listener, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
         board.cleanup()

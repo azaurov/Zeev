@@ -2177,7 +2177,7 @@ def run_device_mode():
     # Lower speaker volume to 75%
     try:
         subprocess.run(
-            ["amixer", "-D", "hw:wm8960soundcard", "sset", "Speaker", "75%"],
+            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", "120"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:

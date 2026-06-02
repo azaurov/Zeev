@@ -169,9 +169,11 @@ def get_battery():
 # Bluetooth device management + terminal TTS
 # ---------------------------------------------------------------------------
 
-TTS_AVAILABLE = False   # set by init_tts()
-PIPER_BIN     = ""
-PIPER_MODELS  = {}      # lang -> model path, populated by init_tts()
+TTS_AVAILABLE    = False   # set by init_tts()
+PIPER_BIN        = ""
+PIPER_MODELS     = {}      # lang -> model path, populated by init_tts()
+_piper_term_proc = None    # persistent Piper process for terminal mode
+_piper_term_lock = threading.Lock()
 
 # Hebrew Unicode block: U+0590–U+05FF
 _HE_RE = re.compile(r"[֐-׿]")
@@ -232,28 +234,76 @@ def _clean_for_tts(text):
 
 
 def _piper_speak(clean, model):
-    """Run Piper in a background thread, piping output to aplay."""
+    """Speak via a persistent Piper process → aplay, in a background thread.
+    The process stays alive between calls so the model is only loaded once."""
+    global _piper_term_proc
+
     def _run():
-        try:
-            piper_proc = subprocess.Popen(
-                [PIPER_BIN, "--model", model, "--output_raw"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            aplay_proc = subprocess.Popen(
-                ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
-                stdin=piper_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            piper_proc.stdout.close()
-            piper_proc.stdin.write(clean.encode())
-            piper_proc.stdin.close()
-            aplay_proc.wait()
-        except Exception:
-            pass
+        global _piper_term_proc
+        with _piper_term_lock:
+            try:
+                if _piper_term_proc is None or _piper_term_proc.poll() is not None:
+                    _piper_term_proc = subprocess.Popen(
+                        [PIPER_BIN, "--model", model, "--output_raw"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    )
+                p = _piper_term_proc
+                p.stdin.write(clean.encode() + b"\n")
+                p.stdin.flush()
+                # Read PCM until piper goes quiet after finishing the line
+                audio = bytearray()
+                fd = p.stdout.fileno()
+                while True:
+                    ready, _, _ = select.select([fd], [], [], 0.3)
+                    if not ready:
+                        break
+                    try:
+                        chunk = os.read(fd, 16384)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    audio.extend(chunk)
+                if audio:
+                    aplay = subprocess.Popen(
+                        ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    try:
+                        aplay.stdin.write(bytes(audio))
+                        aplay.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    aplay.wait()
+            except Exception:
+                _piper_term_proc = None
+
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _piper_warmup():
+    """Start the persistent Piper process in the background at launch so the
+    model is loaded before the first TTS call."""
+    if not (PIPER_BIN and PIPER_MODELS.get("en")):
+        return
+    global _piper_term_proc
+
+    def _start():
+        global _piper_term_proc
+        with _piper_term_lock:
+            if _piper_term_proc is None or _piper_term_proc.poll() is not None:
+                _piper_term_proc = subprocess.Popen(
+                    [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+
+    threading.Thread(target=_start, daemon=True).start()
 
 
 def _gtts_chunks(text, limit=200):
@@ -3039,6 +3089,7 @@ def main():
     readline.set_history_length(200)
 
     init_tts()
+    _piper_warmup()
     init_camera()
     init_thermal()
     init_mic()

@@ -103,6 +103,7 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CAMERA_AVAILABLE  = False   # set by init_camera()
 THERMAL_AVAILABLE = False   # set by init_thermal()
 CAMERA_FLIP       = False   # set by load_settings()
+FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
 
 
 def route_model(text):
@@ -740,6 +741,15 @@ def _build_system_prompt(user_text, on_search=None):
             on_search(user_text)
         results = tavily_search(user_text)
         parts.append(f"\n\n[Web search results for '{user_text}']\n{results}")
+
+    _LANG_INSTRUCTIONS = {
+        "en": "Reply in English only.",
+        "he": "Reply in Hebrew (עברית) only.",
+        "es": "Reply in Spanish (Español) only.",
+        "ru": "Reply in Russian (Русский) only.",
+    }
+    if FORCED_LANG and FORCED_LANG in _LANG_INSTRUCTIONS:
+        parts.append(f"\n\n{_LANG_INSTRUCTIONS[FORCED_LANG]}")
 
     return "".join(parts)
 
@@ -2828,6 +2838,7 @@ def main():
     print(f"  /note <text>  save a persistent note")
     print(f"  /notes        list all notes")
     print(f"  /forget-note  remove a note by number")
+    print(f"  /lang         set response language (auto/en/he/es/ru)")
     print(f"  /tts          toggle speech output")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
@@ -2850,7 +2861,7 @@ def main():
         print(f"  {DIM}{batt_icon} {batt_level:.0f}%{RESET}", end="")
     if session or USER_FACTS or batt_level is not None:
         print()
-    print(f"{DIM}Model: auto-routing  (/model to change){RESET}\n")
+    print(f"{DIM}Model: auto-routing  (/model to change)  |  Language: auto  (/lang to change){RESET}\n")
 
     while True:
         try:
@@ -2886,6 +2897,24 @@ def main():
 
         if user_input.lower() == "/model":
             locked_model = pick_model(locked_model)
+            continue
+
+        if user_input.lower().startswith("/lang"):
+            global FORCED_LANG
+            parts = user_input.split()
+            _LANG_OPTS = {"auto": None, "en": "en", "he": "he", "es": "es", "ru": "ru"}
+            if len(parts) == 2 and parts[1].lower() in _LANG_OPTS:
+                FORCED_LANG = _LANG_OPTS[parts[1].lower()]
+                label = parts[1].lower() if FORCED_LANG else "auto"
+                print(f"{DIM}Language set to {label}.{RESET}\n")
+            else:
+                current = FORCED_LANG or "auto"
+                print(f"{DIM}Current language: {current}")
+                print(f"  /lang auto   auto-detect from your input")
+                print(f"  /lang en     English")
+                print(f"  /lang he     Hebrew (עברית)")
+                print(f"  /lang es     Spanish (Español)")
+                print(f"  /lang ru     Russian (Русский){RESET}\n")
             continue
 
         if user_input.lower() == "/memory":

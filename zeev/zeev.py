@@ -242,6 +242,60 @@ def _piper_speak(clean, model):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _gtts_chunks(text, limit=200):
+    """Split text into chunks ≤ limit chars, breaking at sentence boundaries."""
+    parts = re.split(r'(?<=[.!?״,])\s+', text)
+    chunk = ""
+    for p in parts:
+        if len(chunk) + len(p) + 1 <= limit:
+            chunk = (chunk + " " + p).strip()
+        else:
+            if chunk:
+                yield chunk
+            chunk = p
+    if chunk:
+        yield chunk
+
+
+def _gtts_fetch_chunk(chunk):
+    """Fetch one chunk from Google Translate TTS. Returns MP3 bytes or None."""
+    try:
+        resp = requests.get(
+            "https://translate.googleapis.com/translate_tts",
+            params={"ie": "UTF-8", "q": chunk, "tl": "he", "client": "gtx"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _gtts_speak_he(text, adev=None):
+    """Speak Hebrew text via Google Translate TTS + mpg123 in a background thread."""
+    def _run():
+        try:
+            for chunk in _gtts_chunks(text):
+                mp3 = _gtts_fetch_chunk(chunk)
+                if mp3:
+                    cmd = ["mpg123", "-q"]
+                    if adev:
+                        cmd += ["-a", adev]
+                    cmd.append("-")
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    proc.stdin.write(mp3)
+                    proc.stdin.close()
+                    proc.wait()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def speak_terminal(text):
     """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
     if not TTS_AVAILABLE:
@@ -251,7 +305,9 @@ def speak_terminal(text):
         return
     lang = detect_lang(clean)
 
-    if PIPER_BIN and PIPER_MODELS.get(lang):
+    if lang == "he" and shutil.which("mpg123"):
+        _gtts_speak_he(clean)
+    elif PIPER_BIN and PIPER_MODELS.get(lang):
         _piper_speak(clean, PIPER_MODELS[lang])
     elif PIPER_BIN and PIPER_MODELS.get("en") and lang != "he":
         # no lang-specific Piper model, fall back to English Piper
@@ -2424,7 +2480,26 @@ def run_device_mode():
             finally:
                 _tts_p1 = _tts_p2 = None
 
-        # 2. Piper — persistent local neural TTS (model stays loaded between calls)
+        # 2. Google Translate TTS — Hebrew (espeak-ng can't handle unvocalized Hebrew)
+        if lang == "he" and shutil.which("mpg123"):
+            for chunk in _gtts_chunks(clean):
+                mp3 = _gtts_fetch_chunk(chunk)
+                if mp3:
+                    p1 = subprocess.Popen(
+                        ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    _tts_p1 = p1
+                    try:
+                        p1.stdin.write(mp3)
+                        p1.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    p1.wait()
+            return
+
+        # 3. Piper — persistent local neural TTS (model stays loaded between calls)
         model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
         try:
             if model:
@@ -2456,7 +2531,7 @@ def run_device_mode():
                         pass
                     p2.wait()
             else:
-                # 3. espeak-ng — last resort
+                # 4. espeak-ng — last resort
                 espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
                 p1 = subprocess.Popen(
                     ["espeak-ng", "-s", "145", "-v", espeak_lang, "--stdout", clean],

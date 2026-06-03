@@ -2631,7 +2631,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 # Terminal keyword listener
 # ---------------------------------------------------------------------------
 
-_WAKE_WORDS = {"zeev", "ziv", "zev", "hey zeev", "hey zev"}  # common mishearings included
+_WAKE_WORDS = {"zeyev", "hey zeyev"}
 
 def _rms(wav_bytes):
     """Return RMS amplitude of raw 16-bit LE PCM (skipping the 44-byte WAV header)."""
@@ -3497,7 +3497,7 @@ def main():
 
     if _has_mic:
         start_keyword_listener(_input_q, _stop_listen, _mic_device)
-        print(f"{DIM}Listening for wake word \"Zeev\" — just speak to interrupt at any time.{RESET}\n")
+        print(f"{DIM}Listening for wake word \"Zeyev\" — just speak to interrupt at any time.{RESET}\n")
     else:
         print()
 

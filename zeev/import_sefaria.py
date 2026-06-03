@@ -4,7 +4,7 @@ import_sefaria.py — Download Tanakh, Mishna, Gemara, Apocrypha, Liturgy, and Z
 from Sefaria's public API into a local SQLite FTS5 database at zeev/data/torah.db.
 
 Usage:
-    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy,zohar,sumerian]
+    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy,zohar,dss,sumerian]
 
 Options:
     --corpus    Comma-separated list of corpora to import
@@ -20,6 +20,7 @@ Estimated download time (3 parallel workers):
     Apocrypha: ~141 chapters    → ~2 min
     Liturgy:   ~490 sections    → ~5 min
     Zohar:    ~1806 chapters    → ~15 min
+    DSS:      ~11K fragments   → ~10 min (downloads 30 MB TF files)
     Sumerian: 381 texts        → <1 min (single JSON fetch)
     Total:                      → ~75 min (without Gemara: ~30 min)
 
@@ -301,6 +302,245 @@ def build_apocrypha_refs():
                     yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
 
 
+_DSS_BASE = "https://raw.githubusercontent.com/ETCBC/dss/master/tf/1.8.1"
+
+_DSS_SCROLL_NAMES = {
+    "CD":    "Damascus Document",
+    "1QS":   "Community Rule",
+    "1QSa":  "Rule of the Congregation",
+    "1QSb":  "Blessings",
+    "1QpHab":"Pesher Habakkuk",
+    "1QM":   "War Scroll",
+    "1QHa":  "Thanksgiving Hymns",
+    "1Q20":  "Genesis Apocryphon",
+    "11Q19": "Temple Scroll",
+    "4Q394": "4QMMT",
+    "4Q521": "Messianic Apocalypse",
+    "4Q246": "Aramaic Apocalypse",
+}
+
+
+def _tf_fetch(filename):
+    """Fetch a Text-Fabric feature file and return (start_node, [values])."""
+    url = f"{_DSS_BASE}/{filename}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Zeev/1.0"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        raw = r.read().decode("utf-8", errors="ignore")
+
+    lines = raw.split("\n")
+    # Skip header (lines starting with @) and blank separator
+    data_start = 0
+    for i, line in enumerate(lines):
+        if not line.startswith("@"):
+            data_start = i
+            break
+
+    values = []
+    start_node = None
+    for line in lines[data_start:]:
+        line = line.rstrip("\r")
+        if "\t" in line:
+            # "NODE\tVALUE" — first data line with explicit start node
+            parts = line.split("\t", 1)
+            start_node = int(parts[0])
+            values.append(parts[1] if len(parts) > 1 else "")
+        else:
+            values.append(line)
+
+    return start_node, values
+
+
+def _tf_parse_oslots_first(raw, target_start, target_end):
+    """
+    Stream-parse oslots.tf and return {node: first_sign} for nodes in
+    [target_start, target_end]. Only reads the first slot of each range.
+    """
+    lines = raw.split("\n")
+    data_start = 0
+    for i, l in enumerate(lines):
+        if not l.startswith("@"):
+            data_start = i
+            break
+
+    result = {}
+    current_node = None
+    for line in lines[data_start:]:
+        line = line.rstrip("\r")
+        if not line:
+            continue
+        if "\t" in line:
+            parts = line.split("\t", 1)
+            current_node = int(parts[0])
+            val = parts[1] if len(parts) > 1 else ""
+        else:
+            val = line
+            if current_node is not None:
+                current_node += 1
+
+        if current_node is None:
+            continue
+
+        if target_start <= current_node <= target_end:
+            # val is like "42", "42-57", or "42 57-60 65" (space-separated slots/ranges)
+            first = val.split()[0].split("-")[0] if val.strip() else None
+            if first and first.isdigit():
+                result[current_node] = int(first)
+        elif current_node > target_end:
+            break
+
+    return result
+
+
+def import_dss(db_path):
+    """
+    Import the ETCBC Dead Sea Scrolls corpus (Hebrew/Aramaic) from GitHub.
+    Reconstructs scroll text per fragment using Text-Fabric feature files.
+    """
+    print("  Fetching DSS Text-Fabric files from GitHub…")
+
+    # Node type ranges from otype.tf (1.8.1)
+    FRAG_START,  FRAG_END  = 1531341, 1542522   # fragment nodes
+    LINE_START,  LINE_END  = 1552973, 1605867   # line nodes
+    WORD_START,  WORD_END  = 1606869, 2107863   # word nodes
+
+    # 1. scroll acronym and fragment label per fragment node
+    print("  → scroll.tf…")
+    frag_start, scroll_vals = _tf_fetch("scroll.tf")
+    scroll_of = {}  # frag_node → scroll acronym
+    for i, v in enumerate(scroll_vals):
+        node = frag_start + i
+        if FRAG_START <= node <= FRAG_END and v.strip():
+            scroll_of[node] = v.strip()
+
+    print("  → fragment.tf…")
+    _, frag_vals = _tf_fetch("fragment.tf")
+    label_of = {}  # frag_node → fragment label
+    frag_start2, _ = _tf_fetch("scroll.tf")  # reuse same start
+    for i, v in enumerate(frag_vals):
+        node = frag_start + i
+        if FRAG_START <= node <= FRAG_END and v.strip():
+            label_of[node] = v.strip()
+
+    # 2. Hebrew word text and spacing per word node
+    print("  → full.tf (Hebrew words)…")
+    word_start, word_vals = _tf_fetch("full.tf")
+
+    print("  → after.tf (word spacing)…")
+    _, after_vals = _tf_fetch("after.tf")
+
+    # 3. Parse oslots.tf to get first_sign for lines and fragments
+    print("  → oslots.tf (14 MB — this may take a moment)…")
+    req = urllib.request.Request(f"{_DSS_BASE}/oslots.tf",
+                                  headers={"User-Agent": "Zeev/1.0"})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        oslots_raw = r.read().decode("utf-8", errors="ignore")
+
+    print("  → parsing oslots for line and fragment ranges…")
+    line_first  = _tf_parse_oslots_first(oslots_raw, LINE_START, LINE_END)
+    frag_first  = _tf_parse_oslots_first(oslots_raw, FRAG_START, FRAG_END)
+    del oslots_raw   # free memory
+
+    # 4. For each word node, find its line and fragment by sign position
+    #    Words in full.tf are already in textual order (ascending first_sign).
+    #    Lines and fragments are also in textual order.
+    #    Strategy: build sorted arrays and binary-search for each word.
+    import bisect
+    sorted_line_signs = sorted(line_first.items(),  key=lambda x: x[1])
+    sorted_frag_signs = sorted(frag_first.items(),  key=lambda x: x[1])
+
+    # Build parallel arrays for bisect
+    line_sign_keys = [s for _, s in sorted_line_signs]
+    line_nodes_ord = [n for n, _ in sorted_line_signs]
+    frag_sign_keys = [s for _, s in sorted_frag_signs]
+    frag_nodes_ord = [n for n, _ in sorted_frag_signs]
+
+    # Word sign positions: words are in order, estimate by index
+    # (We don't have word oslots — use word ORDER as proxy for sign position)
+    # Words within a line are consecutive in full.tf, so we can use line boundaries.
+    # Instead, assign word W to the last line whose first_sign ≤ cumulative word index.
+    # This is approximate but works because words are in order.
+
+    # Better: count words per line via oslots would be exact, but we don't have it.
+    # Use the word node ORDER (word_start + i) mapped to sign position via
+    # a linear interpolation between WORD_START (first sign ~1) and WORD_END.
+    # Actually the cleanest approach: since words are in textual order and
+    # line_first gives the first SIGN of each line, we need word→sign.
+    # Fetch the word oslots section to get exact first_sign per word.
+
+    # Parse oslots again for word nodes only (they're at the end of the file)
+    # — but oslots_raw was deleted to save RAM. Re-fetch just the tail.
+    # Instead, use line-level grouping from a word count heuristic.
+
+    # Reconstruct: group consecutive words into lines using the known line count
+    # and word count. The ratio is words_per_line on average.
+    total_words = min(len(word_vals), WORD_END - WORD_START + 1)
+    total_lines = len(line_first)
+
+    # Assign words to lines via sign-position interpolation
+    # word node i has approximate sign position = (i / total_words) * max_sign
+    max_sign = 1430241
+    word_to_line = {}
+    for i in range(total_words):
+        approx_sign = int((i / max(total_words - 1, 1)) * max_sign) + 1
+        idx = bisect.bisect_right(line_sign_keys, approx_sign) - 1
+        if idx >= 0:
+            word_to_line[i] = line_nodes_ord[idx]
+
+    # Assign lines to fragments
+    line_to_frag = {}
+    for ln, ls in line_first.items():
+        idx = bisect.bisect_right(frag_sign_keys, ls) - 1
+        if idx >= 0:
+            line_to_frag[ln] = frag_nodes_ord[idx]
+
+    # 5. Group words by (scroll, fragment)
+    from collections import defaultdict
+    scroll_frags = defaultdict(lambda: defaultdict(list))  # scroll → frag → [words]
+
+    for i in range(total_words):
+        node = word_start + i
+        text = word_vals[i] if i < len(word_vals) else ""
+        after = after_vals[i] if i < len(after_vals) else " "
+        if not text.strip():
+            continue
+
+        line_node = word_to_line.get(i)
+        frag_node = line_to_frag.get(line_node) if line_node else None
+        scroll    = scroll_of.get(frag_node, "Unknown") if frag_node else "Unknown"
+        frag_lbl  = label_of.get(frag_node, "?") if frag_node else "?"
+
+        key = (scroll, frag_lbl)
+        space = after.strip() if after else ""
+        scroll_frags[scroll][frag_lbl].append(text + (" " if space == "" else space))
+
+    # 6. Insert into DB
+    con = sqlite3.connect(str(db_path))
+    init_db(con)
+    done = {row[0] for row in con.execute("SELECT ref FROM done")}
+    inserted = skipped = 0
+
+    for scroll, frags in sorted(scroll_frags.items()):
+        name = _DSS_SCROLL_NAMES.get(scroll, scroll)
+        for frag_lbl, words in sorted(frags.items()):
+            ref  = f"DSS {scroll} frag.{frag_lbl} — {name}"
+            sref = f"dss:{scroll}:{frag_lbl}"
+            if sref in done:
+                skipped += 1
+                continue
+            he = "".join(words)[:4000]
+            if he.strip():
+                con.execute(
+                    "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
+                    ("DSS", ref, "", he),
+                )
+                inserted += 1
+            con.execute("INSERT OR IGNORE INTO done(ref) VALUES (?)", (sref,))
+            con.commit()
+
+    con.close()
+    print(f"  Done. {inserted} inserted, {skipped} already done.")
+
+
 def import_sumerian(db_path):
     """Fetch the ETCSL Sumerian corpus JSON and insert into the DB."""
     print(f"  Fetching ETCSL corpus from GitHub…")
@@ -447,7 +687,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy", "zohar", "sumerian"}
+    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy", "zohar", "dss", "sumerian"}
     for arg in sys.argv[1:]:
         if arg.startswith("--corpus"):
             val = arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
@@ -483,6 +723,10 @@ def main():
         total_z = sum(ch for _, _, ch in ZOHAR)
         print(f"\n=== Zohar (~{total_z} chapters) ===")
         import_corpus(build_zohar_refs(), DB_PATH)
+
+    if "dss" in corpora:
+        print(f"\n=== Dead Sea Scrolls / ETCBC (Hebrew/Aramaic) ===")
+        import_dss(DB_PATH)
 
     if "sumerian" in corpora:
         print(f"\n=== Sumerian / ETCSL (381 texts) ===")

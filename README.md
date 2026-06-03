@@ -79,7 +79,7 @@ Hebrew, Spanish, and Russian use Google Translate TTS (no install needed). Requi
 
 ## Torah RAG (Sefaria)
 
-Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, Apocrypha, and Liturgy. When a query matches Torah/liturgy keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
+Zeev can retrieve passages from a local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. When a query matches known keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
 
 **Corpora:**
 
@@ -90,25 +90,32 @@ Zeev can retrieve passages from a local SQLite FTS5 database of Tanakh, Mishna, 
 | Gemara | ~5400 daf-sides (Babylonian Talmud) | ~240 MB | ~45 min |
 | Apocrypha | Ben Sira, Tobit, Judith, 1–2 Maccabees, Wisdom of Solomon, Prayer of Manasseh, Psalm 151 | ~2 MB | ~2 min |
 | Liturgy | Siddur Ashkenaz (456 sections), Pesach Haggadah, The Jonathan Sacks Haggadah | ~3 MB | ~5 min |
+| Zohar | ~1806 chapters (all parshiyot + Idra Rabba/Zuta, Sifra DiTzniuta, Addenda) | ~5 MB | ~15 min |
+| DSS | ~11,000 fragments of the Dead Sea Scrolls in Hebrew/Aramaic (ETCBC corpus) | ~5 MB | ~10 min |
+| Sumerian | 381 texts from ETCSL (myths, hymns, Gilgamesh, royal praise, lamentations) | ~3 MB | <1 min |
 
 **Building the database** (resume-safe — re-run freely after interruption):
 ```bash
-# Full corpus (~60 min, ~265 MB)
+# Full corpus (~75 min, ~275 MB)
 python3 zeev/import_sefaria.py
 
-# Skip Gemara (~15 min, ~25 MB)
-python3 zeev/import_sefaria.py --corpus tanakh,mishna,apocrypha,liturgy
+# Skip Gemara (~30 min, ~35 MB)
+python3 zeev/import_sefaria.py --corpus tanakh,mishna,apocrypha,liturgy,zohar,dss,sumerian
 
 # Single corpus
-python3 zeev/import_sefaria.py --corpus liturgy
+python3 zeev/import_sefaria.py --corpus dss
+python3 zeev/import_sefaria.py --corpus sumerian
 ```
 
-The importer fetches from the [Sefaria public API](https://www.sefaria.org/api/) with 3 parallel workers and stores results in `zeev/data/torah.db`. Already-imported refs are skipped.
+Sefaria corpora are fetched via the [Sefaria public API](https://www.sefaria.org/api/). DSS uses [ETCBC/dss](https://github.com/ETCBC/dss) Text-Fabric files. Sumerian uses [ETCSL](https://etcsl.orinst.ox.ac.uk/) via a GitHub mirror. Already-imported refs are always skipped.
 
 **Notes:**
 - 3 Maccabees, 4 Maccabees, Baruch, and Letter of Jeremiah are not available in English on Sefaria.
 - Several Ben Sira chapters (17, 22–24, 29, 36) are split into `a`–`g` sub-refs and handled automatically.
-- Liturgy sections are fetched as complete units (all paragraphs in one API call) via the Sefaria index tree.
+- Liturgy sections are fetched as complete units via the Sefaria index tree.
+- Zohar chapters with no English translation are marked done and silently skipped.
+- DSS is in Hebrew/Aramaic only (no free English translation available). The ETCBC corpus covers ~1,001 scroll sigla with ~11,000 fragments.
+- Sumerian is English translation from ETCSL (Oxford), fetched as a single JSON.
 
 ## Music playback
 

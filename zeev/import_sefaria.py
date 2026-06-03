@@ -399,6 +399,10 @@ def import_dss(db_path):
     """
     Import the ETCBC Dead Sea Scrolls corpus (Hebrew/Aramaic) from GitHub.
     Reconstructs scroll text per fragment using Text-Fabric feature files.
+
+    scroll.tf and fragment.tf are annotated per LINE node (1552973-1605867),
+    not per fragment node. Each line knows its own scroll acronym and fragment
+    label. Words are assigned to lines via oslots first-sign bisect.
     """
     import bisect
     from collections import defaultdict
@@ -406,7 +410,6 @@ def import_dss(db_path):
     print("  Fetching DSS Text-Fabric files from GitHub…")
 
     # Node type ranges (from otype.tf, version 1.8.1)
-    FRAG_START, FRAG_END = 1531341, 1542522
     LINE_START, LINE_END = 1552973, 1605867
     WORD_START, WORD_END = 1606869, 2107863
 
@@ -416,7 +419,8 @@ def import_dss(db_path):
         with urllib.request.urlopen(req, timeout=120) as r:
             raw = r.read().decode("utf-8", errors="ignore")
         lines = raw.split("\n")
-        di = next(i for i, l in enumerate(lines) if not l.startswith("@") and l.strip())
+        di = next(i for i, l in enumerate(lines)
+                  if not l.startswith("@") and l.strip())
         start_node, vals = None, []
         for l in lines[di:]:
             l = l.rstrip("\r")
@@ -428,70 +432,56 @@ def import_dss(db_path):
                 vals.append(l)
         return start_node, vals
 
+    # scroll.tf and fragment.tf are keyed by LINE nodes
     print("  → scroll.tf, fragment.tf…")
-    frag_start, scroll_vals = fetch_feature("scroll.tf")
-    _, frag_vals            = fetch_feature("fragment.tf")
+    line_start, scroll_vals = fetch_feature("scroll.tf")
+    _,          frag_vals   = fetch_feature("fragment.tf")
 
-    scroll_of = {}  # frag_node → scroll acronym
-    label_of  = {}  # frag_node → fragment label
+    # Build {line_node → (scroll_acronym, fragment_label)}
+    line_meta = {}
     for i, (sv, fv) in enumerate(zip(scroll_vals, frag_vals)):
-        node = frag_start + i
-        if FRAG_START <= node <= FRAG_END:
-            if sv.strip():
-                scroll_of[node] = sv.strip()
-            if fv.strip():
-                label_of[node]  = fv.strip()
+        node = line_start + i
+        if LINE_START <= node <= LINE_END:
+            line_meta[node] = (sv.strip(), fv.strip())
 
     print("  → full.tf (Hebrew words), after.tf (spacing)…")
-    word_start, word_vals = fetch_feature("full.tf")
+    word_start, word_vals  = fetch_feature("full.tf")
     _,          after_vals = fetch_feature("after.tf")
 
-    print("  → oslots.tf (14 MB — parsing frag/line/word first-sign)…")
+    print("  → oslots.tf (14 MB — parsing line/word first-sign)…")
     req = urllib.request.Request(f"{_DSS_BASE}/oslots.tf",
                                   headers={"User-Agent": "Zeev/1.0"})
     with urllib.request.urlopen(req, timeout=300) as r:
         oslots_raw = r.read().decode("utf-8", errors="ignore")
 
     first_sign = _tf_parse_oslots_multi(oslots_raw, [
-        (FRAG_START, FRAG_END),
         (LINE_START, LINE_END),
         (WORD_START, WORD_END),
     ])
     del oslots_raw
 
-    # Build sorted (first_sign, node) arrays for frag and line
-    frag_pairs = sorted((s, n) for n, s in first_sign.items()
-                        if FRAG_START <= n <= FRAG_END)
+    # Sorted (first_sign, line_node) for bisect word→line assignment
     line_pairs = sorted((s, n) for n, s in first_sign.items()
                         if LINE_START <= n <= LINE_END)
-
-    frag_signs = [s for s, _ in frag_pairs]
-    frag_nodes = [n for _, n in frag_pairs]
     line_signs = [s for s, _ in line_pairs]
     line_nodes = [n for _, n in line_pairs]
 
-    # Assign each word to its fragment via first_sign bisect
+    # Group words by (scroll, fragment)
     scroll_frags = defaultdict(lambda: defaultdict(list))
     total_words  = min(len(word_vals), WORD_END - WORD_START + 1)
 
     for i in range(total_words):
-        wn   = word_start + i
         text = word_vals[i].strip() if i < len(word_vals) else ""
         if not text:
             continue
-
-        ws = first_sign.get(wn)
+        ws = first_sign.get(word_start + i)
         if ws is None:
             continue
-
-        # Find fragment
-        fi = bisect.bisect_right(frag_signs, ws) - 1
-        if fi < 0:
+        li = bisect.bisect_right(line_signs, ws) - 1
+        if li < 0:
             continue
-        frag_node = frag_nodes[fi]
-        scroll    = scroll_of.get(frag_node, "Unknown")
-        frag_lbl  = label_of.get(frag_node, "?")
-
+        ln = line_nodes[li]
+        scroll, frag_lbl = line_meta.get(ln, ("Unknown", "?"))
         after = after_vals[i] if i < len(after_vals) else " "
         sep   = " " if not after.strip() else after
         scroll_frags[scroll][frag_lbl].append(text + sep)

@@ -109,14 +109,17 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 
 ### Torah RAG (Sefaria)
 
-Local SQLite FTS5 database of Tanakh, Mishna, Babylonian Talmud, Apocrypha, and Liturgy. Populated by `zeev/import_sefaria.py` (resume-safe, ~60 min for the full corpus).
+Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min for the full corpus).
 
-- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms: siddur, haggadah, amidah, kaddish, shacharit, dayenu, etc.).
+- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, etc.).
 - **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`.
 - `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
-- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha/Siddur/Haggadah), `ref`, `en`, `he`. `done` table tracks imported refs for resume safety.
+- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha/Siddur/Haggadah/Zohar/DSS/Sumerian), `ref`, `en`, `he`. `done` table tracks imported refs for resume safety.
 - **Apocrypha**: Ben Sira (51 ch), Tobit (13), Judith (16), 1 Maccabees (16), 2 Maccabees (10), Wisdom of Solomon (18), Prayer of Manasseh (1), Psalm 151. Ben Sira chapters 17/22–24/29/36 use `a`–`g` sub-refs (`_BEN_SIRA_SPLIT`).
 - **Liturgy**: Siddur Ashkenaz (456 sections), Pesach Haggadah, The Jonathan Sacks Haggadah. Sections discovered by walking the Sefaria index tree (`_fetch_index` + `_walk_leaf_sections`); each section fetched as one unit (all paragraphs at once).
+- **Zohar**: ~1806 chapters across all parshiyot + Idra Rabba/Zuta, Sifra DiTzniuta, Addenda. Chapter counts from `index_offsets_by_depth`. Chapters with no EN translation are marked done and skipped.
+- **Dead Sea Scrolls**: ~11,000 fragments in Hebrew/Aramaic from [ETCBC/dss](https://github.com/ETCBC/dss) (Martin Abegg's transcriptions, Text-Fabric format). `import_dss()` fetches 5 TF feature files (scroll.tf, fragment.tf, full.tf, after.tf, oslots.tf), parses oslots in a single pass to get word→line first-sign mapping, groups words by scroll+fragment via bisect. `scroll.tf`/`fragment.tf` are annotated per LINE node (not fragment node).
+- **Sumerian**: 381 ETCSL texts (myths, hymns, Gilgamesh, royal praise, lamentations, proverbs) via a single JSON fetch from GitHub. `import_sumerian()` strips HTML from paragraph content.
 
 ### Music playback
 
@@ -168,12 +171,12 @@ Groq Orpheus only supports English; non-English replies return `None` from `groq
 zeev/
   zeev.py                        # entire application
   mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
-  import_sefaria.py              # populate data/torah.db from Sefaria API
+  import_sefaria.py              # populate data/torah.db (Sefaria, ETCBC DSS, ETCSL Sumerian)
   setup.sh                       # one-time setup script (legacy llama.cpp)
   data/                          # runtime files (git-ignored)
     history.jsonl                # conversation history (JSONL)
     user_memory.json             # persistent user facts
-    torah.db                     # Sefaria FTS5 database (Tanakh/Mishna/Gemara)
+    torah.db                     # FTS5 corpus DB (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)
     piper_voice.onnx             # optional: drop a Piper model here for auto-detection

@@ -2628,6 +2628,139 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
 
 # ---------------------------------------------------------------------------
+# Terminal keyword listener
+# ---------------------------------------------------------------------------
+
+_WAKE_WORDS = {"zeev", "ziv", "zev", "hey zeev", "hey zev"}  # common mishearings included
+
+def _rms(wav_bytes):
+    """Return RMS amplitude of raw 16-bit LE PCM (skipping the 44-byte WAV header)."""
+    import struct, math
+    pcm = wav_bytes[44:]
+    if len(pcm) < 2:
+        return 0
+    samples = struct.unpack_from(f"<{len(pcm)//2}h", pcm)
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+
+def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
+    """Record `duration` seconds of audio and return WAV bytes, or None on error."""
+    try:
+        r = subprocess.run(
+            ["arecord", "-D", device, "-f", "S16_LE", "-r", "16000", "-c", "1",
+             "-t", "wav", "-d", str(int(duration)), "/dev/stdout"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        return r.stdout if r.stdout else None
+    except Exception:
+        return None
+
+
+def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8, silence_threshold=300, silence_run=12):
+    """Record until `silence_run` consecutive silent 0.25s chunks or `max_seconds` elapsed.
+    Returns WAV bytes (full utterance), or None on error."""
+    import struct, wave, io
+
+    chunks_pcm = []
+    silent = 0
+    total = 0
+    chunk_dur = 0.25
+    max_chunks = int(max_seconds / chunk_dur)
+
+    for _ in range(max_chunks):
+        wav = _record_chunk(chunk_dur, device)
+        if not wav:
+            break
+        pcm = wav[44:]
+        chunks_pcm.append(pcm)
+        total += 1
+        rms = _rms(wav)
+        if rms < silence_threshold:
+            silent += 1
+            if silent >= silence_run and total > silence_run:
+                break
+        else:
+            silent = 0
+
+    if not chunks_pcm:
+        return None
+
+    raw = b"".join(chunks_pcm)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(raw)
+    return buf.getvalue()
+
+
+def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
+    """Background thread: listens for wake word, then records utterance and puts
+    transcript in voice_queue for the REPL loop to pick up."""
+
+    RMS_GATE = 200   # ignore chunks quieter than this (background noise floor)
+
+    def _run():
+        while not stop_event.is_set():
+            wav = _record_chunk(2.0, device)
+            if not wav or stop_event.is_set():
+                continue
+
+            if _rms(wav) < RMS_GATE:
+                continue
+
+            text = groq_stt(wav)
+            if not text:
+                continue
+
+            low = text.lower().strip()
+            triggered = any(w in low for w in _WAKE_WORDS)
+            if not triggered:
+                continue
+
+            # Strip the wake word from the front to avoid re-processing it
+            utterance_after_wake = low
+            for w in sorted(_WAKE_WORDS, key=len, reverse=True):
+                if utterance_after_wake.startswith(w):
+                    utterance_after_wake = utterance_after_wake[len(w):].lstrip(" ,.")
+                    break
+
+            # Play a short acknowledgment beep via aplay
+            try:
+                import struct, math, wave as _wave, io as _io
+                sr, dur, freq = 16000, 0.12, 880
+                samples = [int(28000 * math.sin(2 * math.pi * freq * i / sr))
+                           for i in range(int(sr * dur))]
+                raw = struct.pack(f"<{len(samples)}h", *samples)
+                buf = _io.BytesIO()
+                with _wave.open(buf, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+                    wf.writeframes(raw)
+                subprocess.run(
+                    ["aplay", "-D", device, "-q", "/dev/stdin"],
+                    input=buf.getvalue(),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+            # If the utterance was already in the same chunk, use it directly
+            if len(utterance_after_wake) > 2:
+                voice_queue.put(("voice", utterance_after_wake))
+                continue
+
+            # Otherwise record the follow-up utterance
+            follow_wav = _record_utterance(device)
+            if follow_wav:
+                follow_text = groq_stt(follow_wav)
+                if follow_text and follow_text.strip():
+                    voice_queue.put(("voice", follow_text.strip()))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Terminal REPL
 # ---------------------------------------------------------------------------
 
@@ -3240,7 +3373,11 @@ def main():
     zeev_cleanup()   # clear any crash leftovers from a previous run
     init_learning()
 
+    import queue as _queue
+    _stop_listen = threading.Event()
+
     def shutdown(sig=None, frame=None):
+        _stop_listen.set()
         print(f"\n{DIM}Goodbye.{RESET}\n")
         if shutil.which("mpg123"):
             mp3 = _gtts_fetch_chunk("Goodbye, Alex.", "en")
@@ -3322,11 +3459,38 @@ def main():
     else:
         speak_terminal(_greeting)
 
+    # Start wake-word listener if mic is available
+    _input_q = _queue.Queue()   # both keyboard and voice feed here
+    _mic_device  = "plughw:wm8960soundcard,0"
+    _has_mic     = bool(shutil.which("arecord") and GROQ_API_KEY)
+
+    # Keyboard input thread — keeps readline/history working
+    def _kbd_thread():
+        while not _stop_listen.is_set():
+            try:
+                line = input(f"{BOLD}You:{RESET} ").strip()
+                _input_q.put(("kbd", line))
+            except (EOFError, KeyboardInterrupt):
+                _input_q.put(("exit", ""))
+                return
+    threading.Thread(target=_kbd_thread, daemon=True).start()
+
+    if _has_mic:
+        start_keyword_listener(_input_q, _stop_listen, _mic_device)
+        print(f"{DIM}Listening for wake word \"Zeev\" — just speak to interrupt at any time.{RESET}\n")
+    else:
+        print()
+
     while True:
         try:
-            user_input = input(f"{BOLD}You:{RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
+            source, user_input = _input_q.get(timeout=0.3)
+        except _queue.Empty:
+            continue
+
+        if source == "exit":
             break
+        if source == "voice":
+            print(f"\r{BOLD}You:{RESET} {DIM}[voice]{RESET} {user_input}")
 
         if not user_input:
             continue

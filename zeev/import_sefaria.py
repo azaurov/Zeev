@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-import_sefaria.py — Download Tanakh, Mishna, Gemara, Apocrypha, and Liturgy
+import_sefaria.py — Download Tanakh, Mishna, Gemara, Apocrypha, Liturgy, and Zohar
 from Sefaria's public API into a local SQLite FTS5 database at zeev/data/torah.db.
 
 Usage:
-    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy]
+    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy,zohar]
 
 Options:
     --corpus    Comma-separated list of corpora to import
-                Default: tanakh,mishna,gemara,apocrypha,liturgy
-                Use 'tanakh,mishna' to skip Gemara, Apocrypha, and Liturgy.
+                Default: tanakh,mishna,gemara,apocrypha,liturgy,zohar
+                Use 'tanakh,mishna' to skip Gemara, Apocrypha, Liturgy, and Zohar.
 
 Resume-safe: already-imported refs are skipped. Re-run freely after interruption.
 
@@ -19,11 +19,12 @@ Estimated download time (3 parallel workers):
     Gemara:   ~5400 daf-sides   → ~45 min
     Apocrypha: ~141 chapters    → ~2 min
     Liturgy:   ~490 sections    → ~5 min
-    Total:                      → ~60 min (without Gemara: ~15 min)
+    Zohar:    ~1806 chapters    → ~15 min
+    Total:                      → ~75 min (without Gemara: ~30 min)
 
 Estimated DB size:
-    Tanakh+Mishna+Apocrypha+Liturgy: ~40 MB
-    + Gemara:                        ~250 MB
+    Tanakh+Mishna+Apocrypha+Liturgy+Zohar: ~60 MB
+    + Gemara:                              ~250 MB
 """
 
 import json
@@ -129,6 +130,67 @@ LITURGY = [
     ("Haggadah",  "The Jonathan Sacks Haggadah"),
 ]
 
+# Zohar — (section_title, sefaria_key, chapter_count)
+# Chapter counts derived from len(index_offsets_by_depth['2']) for each node.
+# Some chapters lack English translation; they're marked done and skipped.
+ZOHAR = [
+    ("Introduction",   "Introduction",   33),
+    ("Bereshit",       "Bereshit",      102),  # ~20 chapters lack EN translation
+    ("Noach",          "Noach",          43),
+    ("Lech Lecha",     "Lech Lecha",     34),
+    ("Vayera",         "Vayera",         35),
+    ("Chayei Sara",    "Chayei Sara",    26),
+    ("Toldot",         "Toldot",         18),
+    ("Vayetzei",       "Vayetzei",       42),
+    ("Vayishlach",     "Vayishlach",     29),
+    ("Vayeshev",       "Vayeshev",       24),
+    ("Miketz",         "Miketz",         14),
+    ("Vayigash",       "Vayigash",       11),
+    ("Vayechi",        "Vayechi",        85),
+    ("Shemot",         "Shemot",         51),
+    ("Vaera",          "Vaera",          21),
+    ("Bo",             "Bo",             16),
+    ("Beshalach",      "Beshalach",      33),
+    ("Yitro",          "Yitro",          34),
+    ("Mishpatim",      "Mishpatim",      29),
+    ("Terumah",        "Terumah",        97),
+    ("Sifra DiTzniuta","Sifra DiTzniuta", 5),
+    ("Tetzaveh",       "Tetzaveh",       17),
+    ("Ki Tisa",        "Ki Tisa",        11),
+    ("Vayakhel",       "Vayakhel",       42),
+    ("Pekudei",        "Pekudei",        62),
+    ("Vayikra",        "Vayikra",        66),
+    ("Tzav",           "Tzav",           29),
+    ("Shmini",         "Shmini",         15),
+    ("Tazria",         "Tazria",         34),
+    ("Metzora",        "Metzora",        15),
+    ("Achrei Mot",     "Achrei Mot",     74),
+    ("Kedoshim",       "Kedoshim",       20),
+    ("Emor",           "Emor",           50),
+    ("Behar",          "Behar",          13),
+    ("Bechukotai",     "Bechukotai",     15),
+    ("Bamidbar",       "Bamidbar",        7),
+    ("Nasso",          "Nasso",          22),
+    ("Idra Rabba",     "Idra Rabba",     51),
+    ("Beha'alotcha",   "Beha'alotcha",   26),
+    ("Sh'lach",        "Sh'lach",        45),
+    ("Korach",         "Korach",         13),
+    ("Chukat",         "Chukat",         11),
+    ("Balak",          "Balak",          46),
+    ("Pinchas",        "Pinchas",       128),
+    ("Vaetchanan",     "Vaetchanan",     31),
+    ("Eikev",          "Eikev",           5),
+    ("Shoftim",        "Shoftim",         4),
+    ("Ki Teitzei",     "Ki Teitzei",     29),
+    ("Vayeilech",      "Vayeilech",       8),
+    ("Ha'Azinu",       "Ha'Azinu",       16),
+    ("Idra Zuta",      "Idra Zuta",      42),
+    # Addenda uses sub-sections with 'Siman' instead of 'Chapter'
+    ("Addenda Volume I",   "Addenda, Volume I",   52),
+    ("Addenda Volume II",  "Addenda, Volume II",   9),
+    ("Addenda Volume III", "Addenda, Volume III", 17),
+]
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 _FOOTNOTE_RE = re.compile(r'<i class="footnote">.*?</i>', re.DOTALL)
@@ -231,6 +293,15 @@ def build_apocrypha_refs():
                     yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
 
 
+def build_zohar_refs():
+    """Yield (source, human_ref, sefaria_ref) for every Zohar chapter."""
+    for display, skey, chapters in ZOHAR:
+        for ch in range(1, chapters + 1):
+            sref  = f"Zohar, {skey}.{ch}"
+            human = f"Zohar, {display} {ch}"
+            yield ("Zohar", human, sref)
+
+
 def _fetch_index(book_title):
     """Fetch the Sefaria index schema for a book."""
     url = f"{API_BASE.rsplit('/', 1)[0]}/index/{urllib.parse.quote(book_title)}"
@@ -330,7 +401,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy"}
+    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy", "zohar"}
     for arg in sys.argv[1:]:
         if arg.startswith("--corpus"):
             val = arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
@@ -361,6 +432,11 @@ def main():
         books = ", ".join(b for _, b in LITURGY)
         print(f"\n=== Liturgy ({books}) ===")
         import_corpus(build_liturgy_refs(), DB_PATH)
+
+    if "zohar" in corpora:
+        total_z = sum(ch for _, _, ch in ZOHAR)
+        print(f"\n=== Zohar (~{total_z} chapters) ===")
+        import_corpus(build_zohar_refs(), DB_PATH)
 
     # Report final DB size
     size_mb = DB_PATH.stat().st_size / 1_048_576

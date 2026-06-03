@@ -2648,7 +2648,7 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
     try:
         r = subprocess.run(
             ["arecord", "-D", device, "-f", "S16_LE", "-r", "16000", "-c", "1",
-             "-t", "wav", "-d", str(int(duration)), "/dev/stdout"],
+             "-t", "wav", "-d", str(int(duration)), "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         return r.stdout if r.stdout else None
@@ -2656,10 +2656,21 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
         return None
 
 
-def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8, silence_threshold=300, silence_run=12):
+def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
+                      silence_threshold=None, silence_run=8):
     """Record until `silence_run` consecutive silent 0.25s chunks or `max_seconds` elapsed.
+    silence_threshold defaults to 1.3× the measured noise floor.
     Returns WAV bytes (full utterance), or None on error."""
-    import struct, wave, io
+    import wave, io
+
+    # Measure noise floor from first 2 calibration chunks
+    if silence_threshold is None:
+        floor_vals = []
+        for _ in range(2):
+            w = _record_chunk(0.25, device)
+            if w:
+                floor_vals.append(_rms(w))
+        silence_threshold = int(max(floor_vals) * 1.3) if floor_vals else 3000
 
     chunks_pcm = []
     silent = 0
@@ -2699,7 +2710,16 @@ def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundca
     """Background thread: listens for wake word, then records utterance and puts
     transcript in voice_queue for the REPL loop to pick up."""
 
-    RMS_GATE = 200   # ignore chunks quieter than this (background noise floor)
+    # Auto-calibrate noise floor from first 3 chunks, gate at 1.5×
+    _noise_floor = []
+    def _calibrate():
+        for _ in range(3):
+            w = _record_chunk(1.0, device)
+            if w:
+                _noise_floor.append(_rms(w))
+        return int(max(_noise_floor) * 1.5) if _noise_floor else 3000
+
+    RMS_GATE = _calibrate()
 
     def _run():
         while not stop_event.is_set():
@@ -2738,7 +2758,7 @@ def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundca
                     wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
                     wf.writeframes(raw)
                 subprocess.run(
-                    ["aplay", "-D", device, "-q", "/dev/stdin"],
+                    ["aplay", "-D", device, "-q", "-"],
                     input=buf.getvalue(),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )

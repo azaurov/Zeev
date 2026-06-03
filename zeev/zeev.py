@@ -268,9 +268,13 @@ def _piper_speak(clean, model):
                     stderr=subprocess.DEVNULL,
                 )
                 fd = p.stdout.fileno()
+                got_audio = False
                 try:
                     while True:
-                        ready, _, _ = select.select([fd], [], [], 0.3)
+                        # Wait longer on the first chunk — piper loads its ONNX model,
+                        # which takes ~20s on Pi Zero 2W
+                        t = 30.0 if not got_audio else 0.3
+                        ready, _, _ = select.select([fd], [], [], t)
                         if not ready:
                             break
                         try:
@@ -279,6 +283,7 @@ def _piper_speak(clean, model):
                             break
                         if not chunk:
                             break
+                        got_audio = True
                         aplay.stdin.write(chunk)
                     aplay.stdin.close()
                 except BrokenPipeError:
@@ -363,6 +368,44 @@ def _gtts_speak(text, lang, adev=None):
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Startup / shutdown cleanup
+# ---------------------------------------------------------------------------
+
+def zeev_cleanup():
+    """Kill Zeev-owned subprocesses and temp files. Safe to call at startup and exit."""
+    import glob as _glob
+
+    # Kill tracked globals
+    global _MUSIC_PROC, _piper_term_proc
+    for proc in (_MUSIC_PROC, _piper_term_proc):
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
+        except Exception:
+            pass
+    _MUSIC_PROC = None
+    _piper_term_proc = None
+
+    # Kill any orphaned processes that were piped through zeev temp files
+    for pattern in ("zeev_music", "zeev_rec.wav"):
+        try:
+            subprocess.run(
+                ["pkill", "-f", pattern],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    # Remove leftover temp audio files from any previous run
+    for path in _glob.glob("/tmp/zeev_*"):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -772,17 +815,23 @@ def delete_note(idx):
 # Persistent settings
 # ---------------------------------------------------------------------------
 
+_SETTINGS_TTS_ON = True   # default; overwritten by load_settings()
+
 def load_settings():
-    global CAMERA_FLIP
+    global CAMERA_FLIP, _SETTINGS_TTS_ON
     try:
         data = json.loads(SETTINGS_FILE.read_text())
-        CAMERA_FLIP = bool(data.get("camera_flip", False))
+        CAMERA_FLIP      = bool(data.get("camera_flip", False))
+        _SETTINGS_TTS_ON = bool(data.get("tts_on", True))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
 def save_settings():
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps({"camera_flip": CAMERA_FLIP}))
+    SETTINGS_FILE.write_text(json.dumps({
+        "camera_flip": CAMERA_FLIP,
+        "tts_on":      _SETTINGS_TTS_ON,
+    }))
 
 # ---------------------------------------------------------------------------
 # History RAG (keyword retrieval over past conversations)
@@ -2047,6 +2096,7 @@ def _ensure_cert(cert_path, key_path, ip):
 def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    zeev_cleanup()   # clear any crash leftovers from a previous run
     init_learning()
     init_camera()
     init_thermal()
@@ -2573,6 +2623,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        zeev_cleanup()
         print(f"\n{DIM}Shutting down.{RESET}\n")
 
 
@@ -2602,6 +2653,7 @@ def pick_model(current_locked=None):
 
 def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
+    zeev_cleanup()   # clear any crash leftovers from a previous run
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
     try:
         from whisplay import WhisplayBoard
@@ -3172,6 +3224,7 @@ def run_device_mode():
     threading.Thread(target=_evdev_listener, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
+        zeev_cleanup()
         board.cleanup()
         sys.exit(0)
 
@@ -3183,14 +3236,29 @@ def run_device_mode():
 
 
 def main():
+    global _SETTINGS_TTS_ON
+    zeev_cleanup()   # clear any crash leftovers from a previous run
     init_learning()
 
     def shutdown(sig=None, frame=None):
+        print(f"\n{DIM}Goodbye.{RESET}\n")
+        if shutil.which("mpg123"):
+            mp3 = _gtts_fetch_chunk("Goodbye, Alex.", "en")
+            if mp3:
+                proc = subprocess.Popen(
+                    ["mpg123", "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                proc.stdin.write(mp3)
+                proc.stdin.close()
+                proc.wait()
+        zeev_cleanup()
         try:
             readline.write_history_file(str(RL_HISTORY))
         except Exception:
             pass
-        print(f"\n{DIM}Goodbye.{RESET}\n")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -3229,7 +3297,7 @@ def main():
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
-    tts_on       = True
+    tts_on       = _SETTINGS_TTS_ON
     session      = load_prior()
 
     if session:
@@ -3244,6 +3312,15 @@ def main():
     if session or USER_FACTS or batt_level is not None:
         print()
     print(f"{DIM}Model: auto-routing  (/model to change)  |  Language: auto  (/lang to change){RESET}\n")
+
+    _hour = time.localtime().tm_hour
+    _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+    _greeting = f"Good {_tod}, Alex. Ready when you are."
+    # Use gTTS for the greeting — much faster than Piper's ~20s cold-start on Pi Zero
+    if shutil.which("mpg123"):
+        _gtts_speak(_greeting, "en")
+    else:
+        speak_terminal(_greeting)
 
     while True:
         try:
@@ -3395,6 +3472,8 @@ def main():
                 print(f"  espeak-ng: sudo apt install espeak-ng{RESET}\n")
                 continue
             tts_on = not tts_on
+            _SETTINGS_TTS_ON = tts_on
+            save_settings()
             state = "on" if tts_on else "off"
             print(f"{DIM}Speech {state}.{RESET}\n")
             continue

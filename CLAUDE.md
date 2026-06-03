@@ -48,7 +48,8 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
-- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value.
+- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f zeev_music` and `pkill -f zeev_rec.wav` to catch orphaned ffmpeg/mpg123/arecord processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path.
+- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value. Speaks a time-of-day greeting to Alex on startup and "Goodbye, Alex." on exit via gTTS+mpg123 (blocking on exit so audio completes before the process dies).
 
 ### Models (Groq)
 
@@ -93,7 +94,7 @@ Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SS
 
 ### User memory (persistent facts)
 
-Facts about the user are extracted from conversations and stored in `data/user_memory.json`. They are injected into every system prompt under `## What I know about Ragnar:`.
+Facts about the user are extracted from conversations and stored in `data/user_memory.json`. They are injected into every system prompt under `## What I know about Alex:`.
 
 - **`load_memory()` / `save_memory()`** — read/write `data/user_memory.json` (JSON list of strings).
 - **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit.
@@ -217,4 +218,15 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 
 ## Hardware context
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (persistent process, no reload delay after first call). Web UI TTS is Groq Orpheus (English) or Google Translate TTS (he/es/ru, returned as MP3), with browser `speechSynthesis` as last resort.
+Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (persistent process, no reload delay after first call); Piper's ONNX model takes ~20s to load on cold start, so the startup greeting and shutdown farewell use gTTS+mpg123 directly for fast playback. Web UI TTS is Groq Orpheus (English) or Google Translate TTS (he/es/ru, returned as MP3), with browser `speechSynthesis` as last resort.
+
+### Startup / shutdown behaviour
+
+- `zeev_cleanup()` runs at the top of `main()`, `run_web_server()`, and `run_device_mode()` to kill stale processes and temp files from any previous crash.
+- On startup, `main()` speaks **"Good morning/afternoon/evening, Alex. Ready when you are."** via gTTS+mpg123 (background thread, plays within ~2s).
+- On exit (`quit`, Ctrl-C, or SIGTERM), `main()` speaks **"Goodbye, Alex."** synchronously before calling `sys.exit()`.
+- Journald is configured for persistent storage (`/var/log/journal/`) so logs survive reboots and `journalctl -b -1` works.
+
+### User
+
+The user's name is **Alex** (Linux username is `ragnar`). Always address them as Alex in greetings and anywhere the user's name appears in TTS or prompts.

@@ -350,20 +350,23 @@ def _tf_fetch(filename):
     return start_node, values
 
 
-def _tf_parse_oslots_first(raw, target_start, target_end):
+def _tf_parse_oslots_multi(raw, ranges):
     """
-    Stream-parse oslots.tf and return {node: first_sign} for nodes in
-    [target_start, target_end]. Only reads the first slot of each range.
+    Single-pass parse of oslots.tf, extracting first_sign for multiple node ranges.
+    ranges: list of (start, end) tuples sorted by start.
+    Returns: {node: first_sign} for all nodes in any range.
     """
     lines = raw.split("\n")
     data_start = 0
     for i, l in enumerate(lines):
-        if not l.startswith("@"):
+        if not l.startswith("@") and l.strip():
             data_start = i
             break
 
     result = {}
     current_node = None
+    max_end = max(end for _, end in ranges)
+
     for line in lines[data_start:]:
         line = line.rstrip("\r")
         if not line:
@@ -379,14 +382,15 @@ def _tf_parse_oslots_first(raw, target_start, target_end):
 
         if current_node is None:
             continue
-
-        if target_start <= current_node <= target_end:
-            # val is like "42", "42-57", or "42 57-60 65" (space-separated slots/ranges)
-            first = val.split()[0].split("-")[0] if val.strip() else None
-            if first and first.isdigit():
-                result[current_node] = int(first)
-        elif current_node > target_end:
+        if current_node > max_end:
             break
+
+        for start, end in ranges:
+            if start <= current_node <= end:
+                tok = val.split()[0].split("-")[0] if val.strip() else None
+                if tok and tok.isdigit():
+                    result[current_node] = int(tok)
+                break
 
     return result
 
@@ -396,124 +400,103 @@ def import_dss(db_path):
     Import the ETCBC Dead Sea Scrolls corpus (Hebrew/Aramaic) from GitHub.
     Reconstructs scroll text per fragment using Text-Fabric feature files.
     """
+    import bisect
+    from collections import defaultdict
+
     print("  Fetching DSS Text-Fabric files from GitHub…")
 
-    # Node type ranges from otype.tf (1.8.1)
-    FRAG_START,  FRAG_END  = 1531341, 1542522   # fragment nodes
-    LINE_START,  LINE_END  = 1552973, 1605867   # line nodes
-    WORD_START,  WORD_END  = 1606869, 2107863   # word nodes
+    # Node type ranges (from otype.tf, version 1.8.1)
+    FRAG_START, FRAG_END = 1531341, 1542522
+    LINE_START, LINE_END = 1552973, 1605867
+    WORD_START, WORD_END = 1606869, 2107863
 
-    # 1. scroll acronym and fragment label per fragment node
-    print("  → scroll.tf…")
-    frag_start, scroll_vals = _tf_fetch("scroll.tf")
+    def fetch_feature(fname):
+        req = urllib.request.Request(f"{_DSS_BASE}/{fname}",
+                                     headers={"User-Agent": "Zeev/1.0"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            raw = r.read().decode("utf-8", errors="ignore")
+        lines = raw.split("\n")
+        di = next(i for i, l in enumerate(lines) if not l.startswith("@") and l.strip())
+        start_node, vals = None, []
+        for l in lines[di:]:
+            l = l.rstrip("\r")
+            if "\t" in l:
+                parts = l.split("\t", 1)
+                start_node = int(parts[0])
+                vals.append(parts[1] if len(parts) > 1 else "")
+            else:
+                vals.append(l)
+        return start_node, vals
+
+    print("  → scroll.tf, fragment.tf…")
+    frag_start, scroll_vals = fetch_feature("scroll.tf")
+    _, frag_vals            = fetch_feature("fragment.tf")
+
     scroll_of = {}  # frag_node → scroll acronym
-    for i, v in enumerate(scroll_vals):
+    label_of  = {}  # frag_node → fragment label
+    for i, (sv, fv) in enumerate(zip(scroll_vals, frag_vals)):
         node = frag_start + i
-        if FRAG_START <= node <= FRAG_END and v.strip():
-            scroll_of[node] = v.strip()
+        if FRAG_START <= node <= FRAG_END:
+            if sv.strip():
+                scroll_of[node] = sv.strip()
+            if fv.strip():
+                label_of[node]  = fv.strip()
 
-    print("  → fragment.tf…")
-    _, frag_vals = _tf_fetch("fragment.tf")
-    label_of = {}  # frag_node → fragment label
-    frag_start2, _ = _tf_fetch("scroll.tf")  # reuse same start
-    for i, v in enumerate(frag_vals):
-        node = frag_start + i
-        if FRAG_START <= node <= FRAG_END and v.strip():
-            label_of[node] = v.strip()
+    print("  → full.tf (Hebrew words), after.tf (spacing)…")
+    word_start, word_vals = fetch_feature("full.tf")
+    _,          after_vals = fetch_feature("after.tf")
 
-    # 2. Hebrew word text and spacing per word node
-    print("  → full.tf (Hebrew words)…")
-    word_start, word_vals = _tf_fetch("full.tf")
-
-    print("  → after.tf (word spacing)…")
-    _, after_vals = _tf_fetch("after.tf")
-
-    # 3. Parse oslots.tf to get first_sign for lines and fragments
-    print("  → oslots.tf (14 MB — this may take a moment)…")
+    print("  → oslots.tf (14 MB — parsing frag/line/word first-sign)…")
     req = urllib.request.Request(f"{_DSS_BASE}/oslots.tf",
                                   headers={"User-Agent": "Zeev/1.0"})
     with urllib.request.urlopen(req, timeout=300) as r:
         oslots_raw = r.read().decode("utf-8", errors="ignore")
 
-    print("  → parsing oslots for line and fragment ranges…")
-    line_first  = _tf_parse_oslots_first(oslots_raw, LINE_START, LINE_END)
-    frag_first  = _tf_parse_oslots_first(oslots_raw, FRAG_START, FRAG_END)
-    del oslots_raw   # free memory
+    first_sign = _tf_parse_oslots_multi(oslots_raw, [
+        (FRAG_START, FRAG_END),
+        (LINE_START, LINE_END),
+        (WORD_START, WORD_END),
+    ])
+    del oslots_raw
 
-    # 4. For each word node, find its line and fragment by sign position
-    #    Words in full.tf are already in textual order (ascending first_sign).
-    #    Lines and fragments are also in textual order.
-    #    Strategy: build sorted arrays and binary-search for each word.
-    import bisect
-    sorted_line_signs = sorted(line_first.items(),  key=lambda x: x[1])
-    sorted_frag_signs = sorted(frag_first.items(),  key=lambda x: x[1])
+    # Build sorted (first_sign, node) arrays for frag and line
+    frag_pairs = sorted((s, n) for n, s in first_sign.items()
+                        if FRAG_START <= n <= FRAG_END)
+    line_pairs = sorted((s, n) for n, s in first_sign.items()
+                        if LINE_START <= n <= LINE_END)
 
-    # Build parallel arrays for bisect
-    line_sign_keys = [s for _, s in sorted_line_signs]
-    line_nodes_ord = [n for n, _ in sorted_line_signs]
-    frag_sign_keys = [s for _, s in sorted_frag_signs]
-    frag_nodes_ord = [n for n, _ in sorted_frag_signs]
+    frag_signs = [s for s, _ in frag_pairs]
+    frag_nodes = [n for _, n in frag_pairs]
+    line_signs = [s for s, _ in line_pairs]
+    line_nodes = [n for _, n in line_pairs]
 
-    # Word sign positions: words are in order, estimate by index
-    # (We don't have word oslots — use word ORDER as proxy for sign position)
-    # Words within a line are consecutive in full.tf, so we can use line boundaries.
-    # Instead, assign word W to the last line whose first_sign ≤ cumulative word index.
-    # This is approximate but works because words are in order.
-
-    # Better: count words per line via oslots would be exact, but we don't have it.
-    # Use the word node ORDER (word_start + i) mapped to sign position via
-    # a linear interpolation between WORD_START (first sign ~1) and WORD_END.
-    # Actually the cleanest approach: since words are in textual order and
-    # line_first gives the first SIGN of each line, we need word→sign.
-    # Fetch the word oslots section to get exact first_sign per word.
-
-    # Parse oslots again for word nodes only (they're at the end of the file)
-    # — but oslots_raw was deleted to save RAM. Re-fetch just the tail.
-    # Instead, use line-level grouping from a word count heuristic.
-
-    # Reconstruct: group consecutive words into lines using the known line count
-    # and word count. The ratio is words_per_line on average.
-    total_words = min(len(word_vals), WORD_END - WORD_START + 1)
-    total_lines = len(line_first)
-
-    # Assign words to lines via sign-position interpolation
-    # word node i has approximate sign position = (i / total_words) * max_sign
-    max_sign = 1430241
-    word_to_line = {}
-    for i in range(total_words):
-        approx_sign = int((i / max(total_words - 1, 1)) * max_sign) + 1
-        idx = bisect.bisect_right(line_sign_keys, approx_sign) - 1
-        if idx >= 0:
-            word_to_line[i] = line_nodes_ord[idx]
-
-    # Assign lines to fragments
-    line_to_frag = {}
-    for ln, ls in line_first.items():
-        idx = bisect.bisect_right(frag_sign_keys, ls) - 1
-        if idx >= 0:
-            line_to_frag[ln] = frag_nodes_ord[idx]
-
-    # 5. Group words by (scroll, fragment)
-    from collections import defaultdict
-    scroll_frags = defaultdict(lambda: defaultdict(list))  # scroll → frag → [words]
+    # Assign each word to its fragment via first_sign bisect
+    scroll_frags = defaultdict(lambda: defaultdict(list))
+    total_words  = min(len(word_vals), WORD_END - WORD_START + 1)
 
     for i in range(total_words):
-        node = word_start + i
-        text = word_vals[i] if i < len(word_vals) else ""
-        after = after_vals[i] if i < len(after_vals) else " "
-        if not text.strip():
+        wn   = word_start + i
+        text = word_vals[i].strip() if i < len(word_vals) else ""
+        if not text:
             continue
 
-        line_node = word_to_line.get(i)
-        frag_node = line_to_frag.get(line_node) if line_node else None
-        scroll    = scroll_of.get(frag_node, "Unknown") if frag_node else "Unknown"
-        frag_lbl  = label_of.get(frag_node, "?") if frag_node else "?"
+        ws = first_sign.get(wn)
+        if ws is None:
+            continue
 
-        key = (scroll, frag_lbl)
-        space = after.strip() if after else ""
-        scroll_frags[scroll][frag_lbl].append(text + (" " if space == "" else space))
+        # Find fragment
+        fi = bisect.bisect_right(frag_signs, ws) - 1
+        if fi < 0:
+            continue
+        frag_node = frag_nodes[fi]
+        scroll    = scroll_of.get(frag_node, "Unknown")
+        frag_lbl  = label_of.get(frag_node, "?")
 
-    # 6. Insert into DB
+        after = after_vals[i] if i < len(after_vals) else " "
+        sep   = " " if not after.strip() else after
+        scroll_frags[scroll][frag_lbl].append(text + sep)
+
+    # Insert into DB
     con = sqlite3.connect(str(db_path))
     init_db(con)
     done = {row[0] for row in con.execute("SELECT ref FROM done")}
@@ -522,13 +505,13 @@ def import_dss(db_path):
     for scroll, frags in sorted(scroll_frags.items()):
         name = _DSS_SCROLL_NAMES.get(scroll, scroll)
         for frag_lbl, words in sorted(frags.items()):
-            ref  = f"DSS {scroll} frag.{frag_lbl} — {name}"
             sref = f"dss:{scroll}:{frag_lbl}"
             if sref in done:
                 skipped += 1
                 continue
-            he = "".join(words)[:4000]
-            if he.strip():
+            he = "".join(words).strip()[:4000]
+            if he:
+                ref = f"DSS {scroll} frag.{frag_lbl} — {name}"
                 con.execute(
                     "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
                     ("DSS", ref, "", he),

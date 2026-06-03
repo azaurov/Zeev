@@ -8,8 +8,9 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Web search** — keyword heuristic triggers [Tavily](https://tavily.com) search and injects results into the reply
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
-- **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, and Babylonian Talmud (via Sefaria); relevant passages injected into context automatically on Torah/halacha queries
+- **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse
 - **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; Hebrew gTTS used whenever Hebrew characters appear in a response
+- **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
 - **Music playback** — natural language YouTube search via yt-dlp + ffmpeg (`play some jazz`, `stop`)
 - **Voice input** — Web Speech Recognition in the browser; Groq Whisper STT in device mode
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
@@ -166,25 +167,6 @@ Zeev auto-detects the camera at startup via `picamera2`. In the terminal use `/l
 
 ---
 
-## Thermal camera (MLX90640)
-
-Connect the MLX90640 to the **software I2C bus** on GPIO5 (SDA) / GPIO6 (SCL). Add to `/boot/firmware/config.txt`:
-
-```
-dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10
-```
-
-The hardware I2C bus (`/dev/i2c-1`) is reserved for the WM8960 audio codec; the MLX90640 uses software I2C on bus 3 (`/dev/i2c-3`, address `0x33`).
-
-**Install dependencies:**
-```bash
-pip3 install adafruit-circuitpython-mlx90640 smbus2
-```
-
-Zeev auto-detects the sensor at startup. In the terminal use `/thermal` for a colored ASCII heatmap, or `/thermal <question>` to ask Zeev about what it sees. The web UI shows a 🌡 button that renders a live 32×24 canvas heatmap (blue→red gradient, white crosshair on hotspot).
-
----
-
 ## Whisplay HAT device mode
 
 The [PiSugar Whisplay HAT](https://github.com/PiSugar/Whisplay) adds a 1.96" ST7789 LCD (240×280), WM8960 audio codec (mic + speaker), RGB LED, and a push button on GPIO17.
@@ -221,6 +203,10 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 |---------|--------|
 | `/model [0-3]` | Lock model or return to auto |
 | `/tts` | Toggle speech output (on by default) |
+| `/vol` | Show current volume level |
+| `/vol+` or `/vol up` | Raise volume by 10% |
+| `/vol-` or `/vol down` | Lower volume by 10% |
+| `/vol N` | Set volume to N% (0–100) |
 | `/look [question]` | Take a photo and ask Zeev about it |
 | `/thermal [question]` | Capture thermal frame; optionally ask Zeev |
 | `/memory` | Show stored facts |

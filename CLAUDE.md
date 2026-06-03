@@ -31,12 +31,13 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 
 - **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
 - **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns at startup; caps in-session context at 60 messages.
+- **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–160). State stored in `_VOLUME` global (default 75).
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
-- **`_groq_post(msgs, model, stream)`** — thin wrapper around the Groq API call.
+- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Torah queries pass `max_tokens=1200` so scripture passages are never cut off mid-verse.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
-- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`.
+- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`; `/volume` GET returns `{"volume": N}`, POST accepts `{"delta": ±N}` or `{"level": N}` and returns updated `{"volume": N}`.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
 - **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
 - **`_clean_for_tts(text, lang=None)`** — strips markdown; replaces the Tetragrammaton with `אֲדֹנָי` (Hebrew) or `Adonai` (English) depending on `lang`.
@@ -47,7 +48,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
-- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`.
+- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value.
 
 ### Models (Groq)
 
@@ -137,6 +138,7 @@ Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, 
 - Voice input: tap-to-speak (Web Speech Recognition, auto-sends on silence) via 🎤 button
 - Continuous recording: tap ⏺ to start, tap again to stop → audio sent to `/transcribe` (Groq `whisper-large-v3-turbo`) → transcript auto-sent as message
 - 🌡 thermal camera button (shown when MLX90640 detected) — renders a 32×24 canvas heatmap (blue→red gradient, white crosshair on hotspot) with min/max/center stats; optional question sent to LLM
+- Volume control — `🔉` / `🔊` buttons in the header with a live `N%` readout; calls `POST /volume {"delta": ±10}` and syncs on page load via `GET /volume`
 - HTTPS mode with auto-generated self-signed cert (accept once in browser)
 
 ### Multilingual TTS

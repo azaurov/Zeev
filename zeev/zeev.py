@@ -117,6 +117,7 @@ THERMAL_AVAILABLE = False   # set by init_thermal()
 CAMERA_FLIP       = False   # set by load_settings()
 FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
 _MUSIC_PROC       = None    # active mpg123 playback process
+_VOLUME           = 75      # 0–100; applied via amixer
 
 
 def route_model(text):
@@ -380,6 +381,30 @@ def music_stop():
         return True
     _MUSIC_PROC = None
     return False
+
+
+def set_volume(level):
+    """Set system volume (0–100). Tries amixer Master, then wm8960 Speaker."""
+    global _VOLUME
+    level = max(0, min(100, int(level)))
+    _VOLUME = level
+    # Standard ALSA Master control (works on most Pi audio configs)
+    r = subprocess.run(
+        ["amixer", "sset", "Master", f"{level}%"],
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        # WM8960 HAT: Speaker range is 0–160 (120 ≈ 75%)
+        raw = round(level * 1.6)
+        subprocess.run(
+            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(raw)],
+            capture_output=True,
+        )
+    return level
+
+
+def get_volume():
+    return _VOLUME
 
 
 def youtube_play(query, adev=None):
@@ -931,7 +956,7 @@ def tavily_search(query):
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_post(msgs, model, stream=True):
+def _groq_post(msgs, model, stream=True, max_tokens=400):
     """POST to Groq. Returns (response, error_str). Retries up to 3x on network errors."""
     last_err = ""
     for attempt in range(3):
@@ -939,7 +964,7 @@ def _groq_post(msgs, model, stream=True):
             return requests.post(
                 GROQ_URL,
                 json={"model": model, "messages": msgs,
-                      "temperature": 0.75, "max_tokens": 400, "stream": stream},
+                      "temperature": 0.75, "max_tokens": max_tokens, "stream": stream},
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 stream=stream,
                 timeout=60,
@@ -1132,7 +1157,8 @@ def stream_reply(messages, model):
     sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
-    resp, err = _groq_post(payload_msgs, model)
+    tok_limit = 1200 if needs_torah(user_text) else 400
+    resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
     if err:
         print(f"\nConnection error: {err}")
         return ""
@@ -1351,6 +1377,9 @@ footer {
     <button class="icon-btn" id="noteBtn" title="Notes">&#128221;</button>
     <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
     <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
+    <button class="icon-btn" id="volDownBtn" title="Volume down">&#128265;</button>
+    <span id="volDisplay" style="font-size:0.75rem;color:#aaa;min-width:2.5rem;text-align:center">75%</span>
+    <button class="icon-btn" id="volUpBtn" title="Volume up">&#128266;</button>
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
     <select id="modelSel">
       <option value="auto" selected>Auto</option>
@@ -1379,6 +1408,9 @@ const sendBtn = document.getElementById("sendBtn");
 const micBtn = document.getElementById("micBtn");
 const snapBtn = document.getElementById("snapBtn");
 const ttsBtn = document.getElementById("ttsBtn");
+const volDownBtn = document.getElementById("volDownBtn");
+const volUpBtn = document.getElementById("volUpBtn");
+const volDisplay = document.getElementById("volDisplay");
 const clearBtn = document.getElementById("clearBtn");
 const modelSel = document.getElementById("modelSel");
 const memBtn = document.getElementById("memBtn");
@@ -1443,6 +1475,29 @@ ttsBtn.onclick = () => {
   ttsBtn.innerHTML = ttsOn ? "&#128266;" : "&#128263;";
   if (!ttsOn) cancelSpeech();
 };
+
+// --- Volume ---
+async function fetchVolume() {
+  try {
+    const r = await fetch("/volume");
+    const d = await r.json();
+    volDisplay.textContent = d.volume + "%";
+  } catch (_) {}
+}
+async function adjustVolume(delta) {
+  try {
+    const r = await fetch("/volume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({delta}),
+    });
+    const d = await r.json();
+    volDisplay.textContent = d.volume + "%";
+  } catch (_) {}
+}
+volDownBtn.onclick = () => adjustVolume(-10);
+volUpBtn.onclick   = () => adjustVolume(10);
+fetchVolume();
 
 // --- UI helpers ---
 function addBubble(role, text) {
@@ -2046,6 +2101,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/volume":
+                body = json.dumps({"volume": _VOLUME}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif self.path == "/notes":
                 with _notes_lock:
                     notes_data = list(USER_NOTES)
@@ -2065,6 +2127,23 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     session.clear()
                 self.send_response(204)
                 self.end_headers()
+                return
+
+            if self.path == "/volume":
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length)) if length else {}
+                if "delta" in data:
+                    new_vol = set_volume(_VOLUME + int(data["delta"]))
+                elif "level" in data:
+                    new_vol = set_volume(int(data["level"]))
+                else:
+                    new_vol = _VOLUME
+                body = json.dumps({"volume": new_vol}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
 
             if self.path == "/flip":
@@ -2432,9 +2511,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             sys_prompt = _build_system_prompt(user_msg, on_search)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
+            tok_limit = 1200 if needs_torah(user_msg) else 400
             full_reply = ""
             try:
-                resp, err = _groq_post(payload_msgs, model)
+                resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
                 if err:
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -3140,6 +3220,7 @@ def main():
     print(f"  /forget-note  remove a note by number")
     print(f"  /lang         set response language (auto/en/he/es/ru)")
     print(f"  /tts          toggle speech output")
+    print(f"  /vol [+/-/N]  show or adjust volume (0–100)")
     print(f"  /stop         stop music playback")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
@@ -3284,6 +3365,20 @@ def main():
                 print(f"{DIM}Note removed.{RESET}\n")
             else:
                 print(f"{DIM}No note #{parts[1]}.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/vol"):
+            arg = user_input[4:].strip()
+            if arg in ("+", "up"):
+                new_vol = set_volume(_VOLUME + 10)
+            elif arg in ("-", "down"):
+                new_vol = set_volume(_VOLUME - 10)
+            elif arg.lstrip("-").isdigit():
+                new_vol = set_volume(int(arg))
+            else:
+                print(f"{DIM}Volume: {_VOLUME}%{RESET}\n")
+                continue
+            print(f"{DIM}Volume: {new_vol}%{RESET}\n")
             continue
 
         if user_input.lower() == "/stop":

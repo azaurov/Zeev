@@ -4,12 +4,12 @@ import_sefaria.py — Download Tanakh, Mishna, Gemara, Apocrypha, Liturgy, and Z
 from Sefaria's public API into a local SQLite FTS5 database at zeev/data/torah.db.
 
 Usage:
-    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy,zohar]
+    python3 zeev/import_sefaria.py [--corpus tanakh,mishna,gemara,apocrypha,liturgy,zohar,sumerian]
 
 Options:
     --corpus    Comma-separated list of corpora to import
-                Default: tanakh,mishna,gemara,apocrypha,liturgy,zohar
-                Use 'tanakh,mishna' to skip Gemara, Apocrypha, Liturgy, and Zohar.
+                Default: tanakh,mishna,gemara,apocrypha,liturgy,zohar,sumerian
+                Use 'tanakh,mishna' to skip Gemara, Apocrypha, Liturgy, Zohar, and Sumerian.
 
 Resume-safe: already-imported refs are skipped. Re-run freely after interruption.
 
@@ -20,11 +20,12 @@ Estimated download time (3 parallel workers):
     Apocrypha: ~141 chapters    → ~2 min
     Liturgy:   ~490 sections    → ~5 min
     Zohar:    ~1806 chapters    → ~15 min
+    Sumerian: 381 texts        → <1 min (single JSON fetch)
     Total:                      → ~75 min (without Gemara: ~30 min)
 
 Estimated DB size:
-    Tanakh+Mishna+Apocrypha+Liturgy+Zohar: ~60 MB
-    + Gemara:                              ~250 MB
+    Tanakh+Mishna+Apocrypha+Liturgy+Zohar+Sumerian: ~65 MB
+    + Gemara:                                        ~250 MB
 """
 
 import json
@@ -191,6 +192,13 @@ ZOHAR = [
     ("Addenda Volume III", "Addenda, Volume III", 17),
 ]
 
+# ETCSL Sumerian corpus — fetched as a single JSON from GitHub.
+# Source: neoenanos/electronic-sumerian-text-corpus (derived from ETCSL, Oxford)
+SUMERIAN_URL = (
+    "https://raw.githubusercontent.com/neoenanos/"
+    "electronic-sumerian-text-corpus/main/code/contents.json"
+)
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 _FOOTNOTE_RE = re.compile(r'<i class="footnote">.*?</i>', re.DOTALL)
@@ -291,6 +299,44 @@ def build_apocrypha_refs():
                         yield ("Apocrypha", f"{display} {ch}{side}", f"{sref_base}.{ch}{side}")
                 else:
                     yield ("Apocrypha", f"{display} {ch}", f"{sref_base}.{ch}")
+
+
+def import_sumerian(db_path):
+    """Fetch the ETCSL Sumerian corpus JSON and insert into the DB."""
+    print(f"  Fetching ETCSL corpus from GitHub…")
+    try:
+        req = urllib.request.Request(SUMERIAN_URL, headers={"User-Agent": "Zeev/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            texts = json.loads(r.read())
+    except Exception as e:
+        print(f"  ERROR fetching corpus: {e}")
+        return
+
+    con = sqlite3.connect(str(db_path))
+    init_db(con)
+    done = {row[0] for row in con.execute("SELECT ref FROM done")}
+
+    inserted = skipped = 0
+    for t in texts:
+        ref   = f"ETCSL {t['n']} — {t['title']}"
+        sref  = f"etcsl:{t['n']}"
+        if sref in done:
+            skipped += 1
+            continue
+        paras = t.get("content", {}).get("p", [])
+        en    = " ".join(_HTML_RE.sub("", p) for p in paras)
+        en    = re.sub(r"\s+", " ", en).strip()
+        if en:
+            con.execute(
+                "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
+                ("Sumerian", ref, en[:4000], ""),
+            )
+            inserted += 1
+        con.execute("INSERT OR IGNORE INTO done(ref) VALUES (?)", (sref,))
+        con.commit()
+
+    con.close()
+    print(f"  Done. {inserted} inserted, {skipped} already done.")
 
 
 def build_zohar_refs():
@@ -401,7 +447,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy", "zohar"}
+    corpora = {"tanakh", "mishna", "gemara", "apocrypha", "liturgy", "zohar", "sumerian"}
     for arg in sys.argv[1:]:
         if arg.startswith("--corpus"):
             val = arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
@@ -437,6 +483,10 @@ def main():
         total_z = sum(ch for _, _, ch in ZOHAR)
         print(f"\n=== Zohar (~{total_z} chapters) ===")
         import_corpus(build_zohar_refs(), DB_PATH)
+
+    if "sumerian" in corpora:
+        print(f"\n=== Sumerian / ETCSL (381 texts) ===")
+        import_sumerian(DB_PATH)
 
     # Report final DB size
     size_mb = DB_PATH.stat().st_size / 1_048_576

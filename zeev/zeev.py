@@ -844,6 +844,8 @@ _TORAH_RE = re.compile(
     r"yevamot|ketubot|nedarim|nazir|sotah|gittin|kiddushin|"
     r"bava.kamma|bava.metzia|bava.batra|sanhedrin|makkot|"
     r"shevuot|avodah.zarah|avot|pirkei|"
+    r"sumerian|akkadian|mesopotamian|babylonian.myth|gilgamesh|enkidu|"
+    r"enki|enlil|inanna|ishtar|marduk|ninhursag|etcsl|"
     r"zohar|kabbalah|kabbalistic|sefirot|sephirot|sephiroth|ein.sof|"
     r"idra|tikkunim|tikkun|sitra.achra|shekhinah|shekhina|"
     r"apocrypha|deuterocanonical|"

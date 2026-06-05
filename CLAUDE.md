@@ -35,7 +35,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
-- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Torah queries pass `max_tokens=1200` so scripture passages are never cut off mid-verse.
+- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Token limit is model-aware: Torah queries and 70B/R1 models use 1200; 8B fast uses 600.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`; `/volume` GET returns `{"volume": N}`, POST accepts `{"delta": ±N}` or `{"level": N}` and returns updated `{"volume": N}`.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
@@ -66,7 +66,7 @@ Default is **auto-routing**: the model is chosen per message by `route_model()`.
 | Constant | Value | Purpose |
 |---|---|---|
 | `PRIOR_TURNS` | 15 | Turns loaded from disk into each new session |
-| `max_tokens` | 400 | Max reply length |
+| `max_tokens` | 600 / 1200 | Max reply length — 600 for 8B, 1200 for 70B/R1 and Torah queries |
 | `temperature` | 0.75 | Sampling temperature |
 
 ### System prompt
@@ -77,8 +77,8 @@ Default is **auto-routing**: the model is chosen per message by `route_model()`.
 
 `route_model(text)` picks a model per message using two keyword regexes — no extra API call:
 
-- `_REASONING_RE` — matches math, logic, proofs, algorithms → DeepSeek R1
-- `_SMART_RE` — matches code, explanations, summaries, comparisons → 70B Smart
+- `_REASONING_RE` — matches math, logic, proofs, algorithms, calculus/algebra/geometry → DeepSeek R1
+- `_SMART_RE` — matches code, explanations, summaries, comparisons, and natural-language question patterns ("tell me about", "what is/are", "why does/is/are", "history of", "how to", "pros and cons", "recommend", etc.) → 70B Smart
 - Default → 8B Fast
 
 The terminal prints `[auto → 8B/70B/R1]` before each response. The web UI shows the model as a dim tag below the bubble. Lock/unlock with `/model`.

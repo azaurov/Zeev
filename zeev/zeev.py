@@ -88,14 +88,19 @@ _REASONING_RE = re.compile(
     r"\b(prove|proof|calculate|solve|equation|formula|math|"
     r"step.by.step|walk me through|think through|deduce|infer|"
     r"probability|logic|algorithm|complexity|optimize|"
-    r"puzzle|riddle|paradox|theorem)\b",
+    r"puzzle|riddle|paradox|theorem|derive|derivation|"
+    r"geometric|algebraic|differential|integral|calculus)\b",
     re.IGNORECASE,
 )
 _SMART_RE = re.compile(
     r"\b(write|implement|code|function|class|debug|refactor|"
     r"script|program|python|javascript|typescript|rust|golang|java|sql|"
     r"explain|summarize|compare|analyze|analyse|essay|report|draft|"
-    r"architecture|design|difference between|how does|regex)\b",
+    r"architecture|design|difference between|how does|how do|regex|"
+    r"tell me about|what is|what are|why does|why is|why are|"
+    r"history of|overview of|describe|definition|meaning of|"
+    r"pros and cons|advantages|disadvantages|recommend|suggest|"
+    r"how to|tutorial|guide|best practice|strategy|approach)\b",
     re.IGNORECASE,
 )
 
@@ -211,6 +216,8 @@ def init_tts():
     if PIPER_BIN:
         PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
             data_dir / "piper_voice.onnx",
+            piper_dir / "en_US-ryan-medium.onnx",
+            share_dir / "en_US-ryan-medium.onnx",
             piper_dir / "en_US-lessac-medium.onnx",
             share_dir / "en_US-lessac-medium.onnx",
         ])
@@ -346,25 +353,30 @@ def _gtts_fetch_chunk(chunk, lang):
 
 
 def _gtts_speak(text, lang, adev=None):
-    """Speak text via Google Translate TTS + mpg123 in a background thread."""
+    """Speak text via Google Translate TTS + mpg123 in a background thread.
+    All chunks are fetched in parallel so playback of chunk N overlaps with
+    the network fetch of chunk N+1, eliminating the inter-sentence gap."""
     def _run():
+        import concurrent.futures
+        chunks = list(_gtts_chunks(text))
+        if not chunks:
+            return
         try:
-            for chunk in _gtts_chunks(text):
-                mp3 = _gtts_fetch_chunk(chunk, lang)
-                if mp3:
-                    cmd = ["mpg123", "-q"]
-                    if adev:
-                        cmd += ["-a", adev]
-                    cmd.append("-")
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    proc.stdin.write(mp3)
-                    proc.stdin.close()
-                    proc.wait()
+            cmd = ["mpg123", "-q"] + (["-a", adev] if adev else []) + ["-"]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                futs = [ex.submit(_gtts_fetch_chunk, c, lang) for c in chunks]
+                for fut in futs:
+                    mp3 = fut.result()
+                    if mp3:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        proc.stdin.write(mp3)
+                        proc.stdin.close()
+                        proc.wait()
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -1206,7 +1218,12 @@ def stream_reply(messages, model):
     sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
-    tok_limit = 1200 if needs_torah(user_text) else 400
+    if needs_torah(user_text):
+        tok_limit = 1200
+    elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
+        tok_limit = 1200
+    else:
+        tok_limit = 600
     resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
     if err:
         print(f"\nConnection error: {err}")
@@ -2561,7 +2578,12 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             sys_prompt = _build_system_prompt(user_msg, on_search)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
-            tok_limit = 1200 if needs_torah(user_msg) else 400
+            if needs_torah(user_msg):
+                tok_limit = 1200
+            elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
+                tok_limit = 1200
+            else:
+                tok_limit = 600
             full_reply = ""
             try:
                 resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
@@ -2631,7 +2653,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 # Terminal keyword listener
 # ---------------------------------------------------------------------------
 
-_WAKE_WORDS = {"zeyev", "hey zeyev"}
+_WAKE_WORDS = {"listen", "hey listen"}
 
 def _rms(wav_bytes):
     """Return RMS amplitude of raw 16-bit LE PCM (skipping the 44-byte WAV header)."""
@@ -2710,24 +2732,21 @@ def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundca
     """Background thread: listens for wake word, then records utterance and puts
     transcript in voice_queue for the REPL loop to pick up."""
 
-    # Auto-calibrate noise floor from first 3 chunks, gate at 1.5×
-    _noise_floor = []
-    def _calibrate():
+    def _run():
+        # Calibrate inside the thread so main() isn't blocked at startup
+        _noise_floor = []
         for _ in range(3):
             w = _record_chunk(1.0, device)
             if w:
                 _noise_floor.append(_rms(w))
-        return int(max(_noise_floor) * 1.5) if _noise_floor else 3000
+        rms_gate = int(max(_noise_floor) * 1.5) if _noise_floor else 3000
 
-    RMS_GATE = _calibrate()
-
-    def _run():
         while not stop_event.is_set():
             wav = _record_chunk(2.0, device)
             if not wav or stop_event.is_set():
                 continue
 
-            if _rms(wav) < RMS_GATE:
+            if _rms(wav) < rms_gate:
                 continue
 
             text = groq_stt(wav)
@@ -3497,7 +3516,7 @@ def main():
 
     if _has_mic:
         start_keyword_listener(_input_q, _stop_listen, _mic_device)
-        print(f"{DIM}Listening for wake word \"Zeyev\" — just speak to interrupt at any time.{RESET}\n")
+        print(f"{DIM}Listening for wake word \"Listen\" — just speak to interrupt at any time.{RESET}\n")
     else:
         print()
 

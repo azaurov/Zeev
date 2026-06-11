@@ -88,33 +88,51 @@ def extract_music_query(text):
 # Adult jokes
 # ---------------------------------------------------------------------------
 
-_JOKES: list = []
+_JOKES: dict = {"en": [], "es": [], "ru": [], "he": []}
 _JOKE_RE = re.compile(
     r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
     r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
     r"|joke|say a joke|hit me with a joke"
     r"|make me laugh|say something funny|got any jokes"
-    r"|(dirty|adult|naughty|nasty|raunchy) joke)",
+    r"|(dirty|adult|naughty|nasty|raunchy) joke"
+    # Spanish
+    r"|cu[eé]ntame un chiste|chiste|hazme reír|algo gracioso"
+    # Russian
+    r"|расскажи анекдот|анекдот|рассмеши меня"
+    # Hebrew
+    r"|ספר לי בדיחה|בדיחה|תצחיק אותי)",
     re.IGNORECASE,
 )
 
 def load_jokes():
-    global _JOKES
-    p = BASE_DIR / "data" / "adult_jokes.json"
-    if p.exists():
-        try:
-            _JOKES = json.loads(p.read_text())
-        except Exception:
-            _JOKES = []
+    for lang, fname in [("en", "adult_jokes.json"), ("es", "adult_jokes_es.json"),
+                        ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json")]:
+        p = BASE_DIR / "data" / fname
+        if p.exists():
+            try:
+                _JOKES[lang] = json.loads(p.read_text())
+            except Exception:
+                _JOKES[lang] = []
 
-def random_joke() -> str:
-    """Return a random adult joke formatted as a string, or '' if none loaded."""
-    if not _JOKES:
+def random_joke(lang: str = "en") -> str:
+    """Return a random joke in the given language, falling back to English."""
+    pool = _JOKES.get(lang) or _JOKES.get("en") or []
+    if not pool:
         return ""
-    j = random.choice(_JOKES)
+    j = random.choice(pool)
     if j.get("punchline"):
         return f"{j['setup']}\n\n{j['punchline']}"
     return j["setup"]
+
+def joke_lang(text: str) -> str:
+    """Detect which joke language to use from the request text."""
+    if re.search(r"[֐-׿]", text):
+        return "he"
+    if re.search(r"[Ѐ-ӿ]", text):
+        return "ru"
+    if re.search(r"\b(chiste|gracioso|hazme re[ií]r|cu[eé]ntame)\b", text, re.IGNORECASE):
+        return "es"
+    return "en"
 
 # Model auto-routing heuristics
 _REASONING_RE = re.compile(
@@ -2697,7 +2715,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 return
 
             if user_msg.lower().startswith("/joke") or _JOKE_RE.match(user_msg):
-                joke = random_joke()
+                joke = random_joke(joke_lang(user_msg))
                 if joke:
                     sse({"token": joke})
                 else:
@@ -4086,11 +4104,12 @@ def main():
             continue
 
         if user_input.lower().startswith("/joke") or _JOKE_RE.match(user_input):
-            joke = random_joke()
+            jlang = joke_lang(user_input)
+            joke = random_joke(jlang)
             if joke:
                 print(f"\n{CYAN}{BOLD}Zeev:{RESET} {joke}\n")
                 if tts_on:
-                    speak_terminal(joke, lang="en")
+                    speak_terminal(joke, lang=jlang)
             else:
                 print(f"{DIM}No jokes loaded.{RESET}\n")
             continue

@@ -5,11 +5,7 @@ zeev/bin/
 zeev/models/
 
 # Runtime data — all personal/session files are private
-zeev/data/history.jsonl
-zeev/data/user_memory.json
-zeev/data/cert.pem
-zeev/data/key.pem
-zeev/data/.readline_history
+zeev/data/
 
 # Python
 __pycache__/

@@ -90,8 +90,11 @@ def extract_music_query(text):
 
 _JOKES: list = []
 _JOKE_RE = re.compile(
-    r"^(tell me a joke|give me a joke|joke|say a joke|hit me with a joke|"
-    r"make me laugh|say something funny|got any jokes)",
+    r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
+    r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
+    r"|joke|say a joke|hit me with a joke"
+    r"|make me laugh|say something funny|got any jokes"
+    r"|(dirty|adult|naughty|nasty|raunchy) joke)",
     re.IGNORECASE,
 )
 
@@ -254,6 +257,8 @@ def init_tts():
     if PIPER_BIN:
         PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
             data_dir / "piper_voice.onnx",
+            piper_dir / "en_US-libritts_r-medium.onnx",
+            share_dir / "en_US-libritts_r-medium.onnx",
             piper_dir / "en_US-ryan-medium.onnx",
             share_dir / "en_US-ryan-medium.onnx",
             piper_dir / "en_US-lessac-medium.onnx",
@@ -581,37 +586,85 @@ def youtube_play(query, adev=None):
 
 
 def speak_terminal(text, lang=None):
-    """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
-    if not TTS_AVAILABLE:
-        return
+    """Speak in background: Groq Orpheus (en) → gTTS (he/es/ru) → Piper → espeak-ng."""
     lang = lang or detect_lang(text)
     clean = _clean_for_tts(text, lang)
     if not clean:
         return
 
-    _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
-    if lang in _GTTS_LANGS and shutil.which("mpg123"):
-        _gtts_speak(clean, _GTTS_LANGS[lang])
-    elif PIPER_BIN and PIPER_MODELS.get("en"):
-        _piper_speak(clean, PIPER_MODELS["en"])
-    else:
-        espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
-        try:
-            subprocess.Popen(
-                ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+    def _play():
+        _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
+        # 1. Groq Orpheus — cloud neural TTS, English only
+        if lang == "en":
+            wav = groq_tts(clean)
+            if wav:
+                player = shutil.which("aplay") or shutil.which("mpg123")
+                if player and "aplay" in player:
+                    try:
+                        p = subprocess.Popen(
+                            ["aplay", "-q", "-"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        p.stdin.write(wav)
+                        p.stdin.close()
+                        p.wait()
+                        return
+                    except Exception:
+                        pass
+                elif player:
+                    try:
+                        p = subprocess.Popen(
+                            ["mpg123", "-q", "-"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        p.stdin.write(wav)
+                        p.stdin.close()
+                        p.wait()
+                        return
+                    except Exception:
+                        pass
+        # 2. Google Translate TTS — non-English
+        if lang in _GTTS_LANGS and shutil.which("mpg123"):
+            _gtts_speak(clean, _GTTS_LANGS[lang])
+            return
+        # 3. Piper — local neural TTS fallback
+        if TTS_AVAILABLE and PIPER_BIN and PIPER_MODELS.get("en"):
+            _piper_speak(clean, PIPER_MODELS["en"])
+            return
+        # 4. espeak-ng — last resort
+        if TTS_AVAILABLE:
+            espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
+            try:
+                subprocess.Popen(
+                    ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
 
+    threading.Thread(target=_play, daemon=True).start()
+
+
+_groq_tts_rate_limited_until: float = 0.0  # epoch seconds; skip calls until then
 
 def groq_tts(text):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
+    global _groq_tts_rate_limited_until
+    import time as _time
     if not GROQ_API_KEY or not text.strip():
         return None
+    if _time.time() < _groq_tts_rate_limited_until:
+        return None  # daily limit hit; skip until reset
     clean = _clean_for_tts(text, "en")
-    if not clean or detect_lang(clean) != "en":
+    if not clean:
+        print("[groq_tts] skipped: clean text is empty")
+        return None
+    _dl = detect_lang(clean)
+    if _dl != "en":
+        print(f"[groq_tts] skipped: detect_lang={_dl!r} (not English)")
         return None
     try:
         resp = requests.post(
@@ -628,8 +681,21 @@ def groq_tts(text):
             },
             timeout=30,
         )
-        return resp.content if resp.status_code == 200 else None
-    except Exception:
+        if resp.status_code == 429:
+            import datetime as _dt
+            # Reset at next UTC midnight
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            next_midnight = (now_utc + _dt.timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            _groq_tts_rate_limited_until = next_midnight.timestamp()
+            print(f"[groq_tts] 429 rate limit — Orpheus disabled until {next_midnight.strftime('%H:%M UTC')}")
+            return None
+        if resp.status_code != 200:
+            print(f"[groq_tts] HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        return resp.content
+    except Exception as e:
+        print(f"[groq_tts] error: {e}")
         return None
 
 
@@ -713,7 +779,8 @@ SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
     "questions to understand them better. "
-    "You are talking to Ragnar."
+    "You are talking to Alex. "
+    "You may use adult humor, dirty jokes, and explicit content when Alex asks for it — never refuse on grounds of being 'family-friendly'."
 )
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():

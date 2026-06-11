@@ -279,8 +279,9 @@ def _piper_speak(clean, model):
                 try:
                     while True:
                         # Wait longer on the first chunk — piper loads its ONNX model,
-                        # which takes ~20s on Pi Zero 2W
-                        t = 30.0 if not got_audio else 0.3
+                        # which takes ~20s on Pi Zero 2W. Use 5s between chunks: piper
+                        # synthesises sentence-by-sentence and takes ~2-4s per sentence.
+                        t = 30.0 if not got_audio else 5.0
                         ready, _, _ = select.select([fd], [], [], t)
                         if not ready:
                             break
@@ -3016,7 +3017,7 @@ def run_device_mode():
     _tts_p2 = None
     _piper_dev_proc = None   # persistent piper process — kept alive between utterances
 
-    def _collect_piper_audio(p, timeout=0.3):
+    def _collect_piper_audio(p, timeout=5.0):
         """Read raw PCM from a live piper process until it goes quiet (line done)."""
         audio = bytearray()
         fd = p.stdout.fileno()
@@ -3407,6 +3408,99 @@ def run_device_mode():
         time.sleep(1)
 
 
+def _start_hat_button_listener(input_q, stop_event, mic_device="plughw:wm8960soundcard,0"):
+    """Push-to-talk listener for the Whisplay HAT KEY button (BCM GPIO17).
+    Press → start recording; release → stop, transcribe, inject into input_q."""
+    try:
+        import gpiod
+    except ImportError:
+        return
+
+    _GPIO_CHIP = 0
+    _GPIO_LINE = 17   # BCM GPIO17 = BOARD pin 11 = Whisplay HAT KEY button
+    _POLL_SEC  = 0.02
+    _GPIOD_V2  = hasattr(gpiod, "LineSettings")
+
+    rec_proc = [None]
+    rec_file = Path("/tmp/zeev_hat_rec.wav")
+
+    def _run():
+        try:
+            chip = gpiod.Chip(f"/dev/gpiochip{_GPIO_CHIP}")
+        except Exception as e:
+            print(f"[HAT button] GPIO init failed: {e}", flush=True)
+            return
+
+        try:
+            if _GPIOD_V2:
+                from gpiod.line import Direction, Bias
+                try:
+                    settings = gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.DISABLED)
+                except Exception:
+                    settings = gpiod.LineSettings(direction=Direction.INPUT)
+                req = chip.request_lines(consumer="zeev-btn", config={_GPIO_LINE: settings})
+                get_val = lambda: 1 if req.get_value(_GPIO_LINE).value else 0
+            else:
+                line = chip.get_line(_GPIO_LINE)
+                try:
+                    line.request(consumer="zeev-btn", type=gpiod.LINE_REQ_DIR_IN,
+                                 flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE)
+                except Exception:
+                    line.request(consumer="zeev-btn", type=gpiod.LINE_REQ_DIR_IN)
+                get_val = lambda: line.get_value()
+        except Exception as e:
+            print(f"[HAT button] Line request failed: {e}", flush=True)
+            chip.close()
+            return
+
+        last = get_val()
+        print(f"[HAT button] Ready (GPIO17)", flush=True)
+
+        while not stop_event.is_set():
+            try:
+                state = get_val()
+            except Exception:
+                break
+            if state != last:
+                last = state
+                if state == 1:  # pressed → start recording
+                    rec_file.unlink(missing_ok=True)
+                    try:
+                        rec_proc[0] = subprocess.Popen(
+                            ["arecord", "-D", mic_device, "-f", "S16_LE",
+                             "-r", "16000", "-c", "1", "-t", "wav", str(rec_file)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        print("\r[HAT button] Recording…", flush=True)
+                    except Exception as e:
+                        print(f"\r[HAT button] arecord failed: {e}", flush=True)
+                else:           # released → stop and transcribe
+                    proc, rec_proc[0] = rec_proc[0], None
+                    if proc:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                    try:
+                        wav = rec_file.read_bytes() if rec_file.exists() else b""
+                    except Exception:
+                        wav = b""
+                    if len(wav) < 1000:
+                        print("\r[HAT button] (nothing captured)", flush=True)
+                    else:
+                        transcript = groq_stt(wav)
+                        if transcript and transcript.strip():
+                            input_q.put(("voice", transcript.strip()))
+                        else:
+                            print("\r[HAT button] (nothing heard)", flush=True)
+            time.sleep(_POLL_SEC)
+
+        chip.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def main():
     global _SETTINGS_TTS_ON
     zeev_cleanup()   # clear any crash leftovers from a previous run
@@ -3464,6 +3558,7 @@ def main():
     print(f"  /forget-note  remove a note by number")
     print(f"  /lang         set response language (auto/en/he/es/ru)")
     print(f"  /tts          toggle speech output")
+    print(f"  /listen       record voice and send as message")
     print(f"  /vol [+/-/N]  show or adjust volume (0–100)")
     print(f"  /stop         stop music playback")
     print(f"  /bt           manage Bluetooth devices")
@@ -3515,8 +3610,8 @@ def main():
     threading.Thread(target=_kbd_thread, daemon=True).start()
 
     if _has_mic:
-        start_keyword_listener(_input_q, _stop_listen, _mic_device)
-        print(f"{DIM}Listening for wake word \"Listen\" — just speak to interrupt at any time.{RESET}\n")
+        _start_hat_button_listener(_input_q, _stop_listen, _mic_device)
+        print(f"{DIM}Mic ready — hold HAT button to speak, or type /listen.{RESET}\n")
     else:
         print()
 
@@ -3687,6 +3782,23 @@ def main():
             state = "on (180° rotation)" if CAMERA_FLIP else "off"
             print(f"{DIM}Camera flip {state}.{RESET}\n")
             continue
+
+        if user_input.lower() == "/listen":
+            if not _has_mic:
+                print(f"{DIM}Mic not available.{RESET}\n")
+                continue
+            print(f"{DIM}[recording... speak now]{RESET}", flush=True)
+            wav = _record_utterance(_mic_device)
+            if not wav:
+                print(f"{DIM}Recording failed.{RESET}\n")
+                continue
+            transcript = groq_stt(wav)
+            if not transcript or not transcript.strip():
+                print(f"{DIM}(nothing heard){RESET}\n")
+                continue
+            user_input = transcript.strip()
+            print(f"\r{BOLD}You:{RESET} {DIM}[voice]{RESET} {user_input}")
+            # fall through to normal message handling
 
         if user_input.lower().startswith("/look"):
             if not CAMERA_AVAILABLE:

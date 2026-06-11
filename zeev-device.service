@@ -1,0 +1,18 @@
+[Unit]
+Description=Zeev AI Companion (Whisplay HAT device mode)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ragnar
+WorkingDirectory=/home/ragnar/Zeev
+EnvironmentFile=/home/ragnar/Zeev/.env
+ExecStart=/usr/bin/python3 zeev/zeev.py --device --no-screen
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

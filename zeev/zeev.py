@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import random
 import re
 import readline
 import select
@@ -83,6 +84,35 @@ def extract_music_query(text):
     m = _MUSIC_RE.match(text.strip())
     return m.group("query").strip() if m else None
 
+# ---------------------------------------------------------------------------
+# Adult jokes
+# ---------------------------------------------------------------------------
+
+_JOKES: list = []
+_JOKE_RE = re.compile(
+    r"^(tell me a joke|give me a joke|joke|say a joke|hit me with a joke|"
+    r"make me laugh|say something funny|got any jokes)",
+    re.IGNORECASE,
+)
+
+def load_jokes():
+    global _JOKES
+    p = BASE_DIR / "data" / "adult_jokes.json"
+    if p.exists():
+        try:
+            _JOKES = json.loads(p.read_text())
+        except Exception:
+            _JOKES = []
+
+def random_joke() -> str:
+    """Return a random adult joke formatted as a string, or '' if none loaded."""
+    if not _JOKES:
+        return ""
+    j = random.choice(_JOKES)
+    if j.get("punchline"):
+        return f"{j['setup']}\n\n{j['punchline']}"
+    return j["setup"]
+
 # Model auto-routing heuristics
 _REASONING_RE = re.compile(
     r"\b(prove|proof|calculate|solve|equation|formula|math|"
@@ -114,6 +144,14 @@ _MODEL_SHORT = {
     "llama-3.3-70b-versatile":      "70B",
     "deepseek-r1-distill-llama-70b":"R1",
 }
+_THINKING_PHRASES = [
+    "Hmm, thinking about it...",
+    "Let me think about that for a second...",
+    "This is a complex one, give me a moment...",
+    "One moment, pondering...",
+    "Let me work through that...",
+]
+
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
@@ -989,6 +1027,7 @@ def init_learning():
     USER_NOTES = load_notes()
     load_settings()
     build_rag_index()
+    load_jokes()
 
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1056,21 @@ def tavily_search(query):
 # ---------------------------------------------------------------------------
 # Groq streaming
 # ---------------------------------------------------------------------------
+
+def _start_thinking_hint(tts_fn=None, delay=3.0):
+    """Fire a thinking phrase after `delay` seconds if no response yet.
+    Returns a threading.Event — set it to cancel before it fires."""
+    cancel = threading.Event()
+    def _hint():
+        if cancel.wait(timeout=delay):
+            return
+        phrase = random.choice(_THINKING_PHRASES)
+        print(f"\n{DIM}[{phrase}]{RESET}", flush=True)
+        if tts_fn:
+            tts_fn(phrase)
+    threading.Thread(target=_hint, daemon=True).start()
+    return cancel
+
 
 def _groq_post(msgs, model, stream=True, max_tokens=400):
     """POST to Groq. Returns (response, error_str). Retries up to 3x on network errors."""
@@ -1207,7 +1261,7 @@ def _screen_rows(text, first_line_prefix=0):
     return rows
 
 
-def stream_reply(messages, model):
+def stream_reply(messages, model, tts_on=False):
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
 
@@ -1215,6 +1269,9 @@ def stream_reply(messages, model):
 
     def on_search(q):
         print(f"{DIM}[searching: {q}]{RESET}", flush=True)
+
+    tts_fn = (lambda t: speak_terminal(t, lang="en")) if tts_on else None
+    cancel_hint = _start_thinking_hint(tts_fn=tts_fn)
 
     sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
@@ -1227,11 +1284,13 @@ def stream_reply(messages, model):
         tok_limit = 600
     resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
     if err:
+        cancel_hint.set()
         print(f"\nConnection error: {err}")
         return ""
 
     print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
     full = ""
+    first_token = True
     for line in resp.iter_lines():
         if not line or not line.startswith(b"data: "):
             continue
@@ -1240,10 +1299,14 @@ def stream_reply(messages, model):
             break
         try:
             delta = json.loads(data)["choices"][0]["delta"].get("content", "")
+            if delta and first_token:
+                cancel_hint.set()
+                first_token = False
             full += delta
             print(delta, end="", flush=True)
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
+    cancel_hint.set()
 
     has_hebrew = any('֐' <= c <= '׿' for c in full)
     if has_hebrew and shutil.which("fribidi"):
@@ -2566,6 +2629,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.flush()
                 return
 
+            if user_msg.lower().startswith("/joke") or _JOKE_RE.match(user_msg):
+                joke = random_joke()
+                if joke:
+                    sse({"token": joke})
+                else:
+                    sse({"error": "No jokes loaded."})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
             with lock:
                 session.append({"role": "user", "content": user_msg})
                 append_message("user", user_msg)
@@ -2586,14 +2659,19 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             else:
                 tok_limit = 600
             full_reply = ""
+            cancel_hint = _start_thinking_hint(
+                tts_fn=lambda t: sse({"info": t})
+            )
             try:
                 resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
                 if err:
+                    cancel_hint.set()
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                     return
 
+                first_token = True
                 for line in resp.iter_lines():
                     if not line or not line.startswith(b"data: "):
                         continue
@@ -2603,6 +2681,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     try:
                         delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
                         if delta:
+                            if first_token:
+                                cancel_hint.set()
+                                first_token = False
                             full_reply += delta
                             sse({"token": delta})
                     except (json.JSONDecodeError, KeyError, IndexError):
@@ -2610,6 +2691,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             except requests.RequestException as e:
                 sse({"error": str(e)})
+            finally:
+                cancel_hint.set()
 
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -2824,7 +2907,7 @@ def pick_model(current_locked=None):
         print(f"{DIM}Enter 0, 1, 2, or 3.{RESET}")
 
 
-def run_device_mode():
+def run_device_mode(no_screen=False):
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
     zeev_cleanup()   # clear any crash leftovers from a previous run
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
@@ -2863,6 +2946,8 @@ def run_device_mode():
     # ── LCD helpers ──────────────────────────────────────────────────────────
 
     def _push_lcd(img):
+        if no_screen:
+            return
         pixels = list(img.convert("RGB").getdata())
         buf = bytearray(len(pixels) * 2)
         for i, (r, g, b) in enumerate(pixels):
@@ -3293,7 +3378,9 @@ def run_device_mode():
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
             sys_prompt   = _build_system_prompt(transcript)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + session
+            cancel_hint  = _start_thinking_hint(tts_fn=_speak_device)
             resp, err    = _groq_post(payload_msgs, model_id, stream=False)
+            cancel_hint.set()
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
             if err or not resp or resp.status_code != 200:
@@ -3326,7 +3413,7 @@ def run_device_mode():
 
     board.on_button_press(_on_press)
     board.on_button_release(_on_release)
-    board.set_backlight(100)
+    board.set_backlight(0 if no_screen else 100)
     board.set_rgb(*_LED_IDLE)
     _set_face("idle")
 
@@ -3338,10 +3425,17 @@ def run_device_mode():
     print(f"Press while recording to cancel & exit.")
     print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
+    _hour = time.localtime().tm_hour
+    _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+    threading.Thread(target=_speak_device, args=(f"Good {_tod}, Alex. Ready when you are.",), daemon=True).start()
+
     def _keyboard_listener():
         import tty, termios
         fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+        try:
+            old = termios.tcgetattr(fd)
+        except termios.error:
+            return  # no TTY (e.g. running as a systemd service)
         try:
             tty.setraw(fd)
             while True:
@@ -3868,7 +3962,7 @@ def main():
                     print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
                 session.append({"role": "user", "content": ctx})
                 append_message("user", ctx)
-                reply = stream_reply(session, model_id)
+                reply = stream_reply(session, model_id, tts_on=tts_on)
                 if reply:
                     session.append({"role": "assistant", "content": reply})
                     append_message("assistant", reply)
@@ -3924,6 +4018,16 @@ def main():
                 print(f"{DIM}[music] {err}{RESET}\n")
             continue
 
+        if user_input.lower().startswith("/joke") or _JOKE_RE.match(user_input):
+            joke = random_joke()
+            if joke:
+                print(f"\n{CYAN}{BOLD}Zeev:{RESET} {joke}\n")
+                if tts_on:
+                    speak_terminal(joke, lang="en")
+            else:
+                print(f"{DIM}No jokes loaded.{RESET}\n")
+            continue
+
         model_id = locked_model if locked_model else route_model(user_input)
         if locked_model is None:
             print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
@@ -3931,7 +4035,7 @@ def main():
         session.append({"role": "user", "content": user_input})
         append_message("user", user_input)
 
-        reply = stream_reply(session, model_id)
+        reply = stream_reply(session, model_id, tts_on=tts_on)
         if reply:
             session.append({"role": "assistant", "content": reply})
             append_message("assistant", reply)
@@ -3951,6 +4055,6 @@ if __name__ == "__main__":
     elif "--web" in sys.argv or "-web" in sys.argv:
         run_web_server()
     elif "--device" in sys.argv or "-device" in sys.argv:
-        run_device_mode()
+        run_device_mode(no_screen="--no-screen" in sys.argv)
     else:
         main()

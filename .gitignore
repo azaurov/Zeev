@@ -6,6 +6,7 @@ zeev/models/
 
 # Runtime data — all personal/session files are private
 zeev/data/
+!zeev/data/adult_jokes*.json
 
 # Python
 __pycache__/

@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import math
 import random
 import re
 import readline
@@ -28,6 +29,9 @@ NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
 SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
 TORAH_DB      = BASE_DIR / "data" / "torah.db"
+GCAL_CREDS_FILE = BASE_DIR / "data" / "gcal_credentials.json"
+GCAL_TOKEN_FILE = BASE_DIR / "data" / "gcal_token.json"
+_GCAL_SCOPES    = ["https://www.googleapis.com/auth/calendar.readonly"]
 
 # Load .env from repo root if present (supplements environment variables)
 _ENV_FILE = BASE_DIR.parent / ".env"
@@ -45,6 +49,9 @@ GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
+
+# Calendar state — populated by init_calendar() at startup
+CALENDAR_AVAILABLE = False
 
 # Learning state — populated by init_learning() at startup
 USER_FACTS       = []   # persistent facts about the user
@@ -72,6 +79,16 @@ _SEARCH_RE = re.compile(
 
 def needs_search(text):
     return bool(_SEARCH_RE.search(text))
+
+_CALENDAR_RE = re.compile(
+    r"\b(calendar|schedule|agenda|event|appointment|meeting|"
+    r"what.s on|what do i have|am i (free|busy)|my day|plans for|"
+    r"when is my|what time is|do i have anything)\b",
+    re.IGNORECASE,
+)
+
+def needs_calendar(text):
+    return CALENDAR_AVAILABLE and bool(_CALENDAR_RE.search(text))
 
 _MUSIC_RE = re.compile(
     r"^(start playing|can you play|put on|play me|i want to hear|i want to listen to|"
@@ -1113,6 +1130,7 @@ def init_learning():
     load_settings()
     build_rag_index()
     load_jokes()
+    init_calendar()
 
 
 # ---------------------------------------------------------------------------
@@ -1136,6 +1154,87 @@ def tavily_search(query):
         )
     except Exception as e:
         return f"Search error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Google Calendar
+# ---------------------------------------------------------------------------
+
+def init_calendar():
+    global CALENDAR_AVAILABLE
+    if not GCAL_CREDS_FILE.exists() and not GCAL_TOKEN_FILE.exists():
+        return
+    try:
+        import google.oauth2.credentials  # noqa: F401
+        import google_auth_oauthlib.flow  # noqa: F401
+        import googleapiclient.discovery  # noqa: F401
+        CALENDAR_AVAILABLE = True
+    except ImportError:
+        print("[calendar] google-api-python-client not installed — calendar disabled")
+
+
+def _gcal_service():
+    """Return an authenticated Calendar service, triggering console OAuth on first run."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+    except ImportError:
+        return None
+
+    creds = None
+    if GCAL_TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(GCAL_TOKEN_FILE), _GCAL_SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        elif GCAL_CREDS_FILE.exists():
+            flow = InstalledAppFlow.from_client_secrets_file(str(GCAL_CREDS_FILE), _GCAL_SCOPES)
+            creds = flow.run_console()
+        else:
+            return None
+        GCAL_TOKEN_FILE.write_text(creds.to_json())
+
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+
+def calendar_fetch(days=1):
+    """Return upcoming calendar events as a formatted string, or None on failure."""
+    svc = _gcal_service()
+    if not svc:
+        return None
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        end = now + _dt.timedelta(days=days)
+        result = svc.events().list(
+            calendarId="primary",
+            timeMin=now.isoformat(),
+            timeMax=end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=20,
+        ).execute()
+        events = result.get("items", [])
+        if not events:
+            return "No upcoming events today."
+        lines = []
+        for e in events:
+            start = e["start"].get("dateTime", e["start"].get("date", ""))
+            if "T" in start:
+                try:
+                    t = _dt.datetime.fromisoformat(start).astimezone()
+                    start_str = t.strftime("%H:%M")
+                except Exception:
+                    start_str = start
+            else:
+                start_str = "all day"
+            lines.append(f"- {start_str}: {e.get('summary', '(no title)')}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Calendar error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -1183,13 +1282,13 @@ def _build_system_prompt(user_text, on_search=None):
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
-        parts.append(f"\n\n## What I know about Ragnar:\n{facts_str}")
+        parts.append(f"\n\n## What I know about Alex:\n{facts_str}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)
     if notes_snapshot:
         notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
-        parts.append(f"\n\n## Ragnar's notes:\n{notes_str}")
+        parts.append(f"\n\n## Alex's notes:\n{notes_str}")
 
     hits = retrieve_relevant(user_text)
     if hits:
@@ -1205,6 +1304,11 @@ def _build_system_prompt(user_text, on_search=None):
                 f"{ref}: {en[:500]}" for ref, en in torah_hits
             )
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
+
+    if needs_calendar(user_text):
+        cal = calendar_fetch()
+        if cal:
+            parts.append(f"\n\n## Alex's calendar (today):\n{cal}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
@@ -3022,6 +3126,10 @@ def run_device_mode(no_screen=False):
     init_mic()
 
     board  = WhisplayBoard()
+    # 100 MHz SPI is too fast for Pi Zero 2W — reinit at a reliable speed
+    board.spi.max_speed_hz = 10_000_000
+    board._reset_lcd()
+    board._init_display()
     session = load_prior()
 
     W, H = 240, 280
@@ -3063,9 +3171,9 @@ def run_device_mode(no_screen=False):
         return lines
 
     # ── Animated face ────────────────────────────────────────────────────────
-    # Face: circle centred at (120, 118), radius 90 → leaves 52 px below for caption
+    # Face: circle centred at (120, 112), radius 88 → leaves ~68 px below for caption
 
-    _FACE_CX, _FACE_CY, _FACE_R = 120, 118, 90
+    _FACE_CX, _FACE_CY, _FACE_R = 120, 112, 88
 
     _STATE_COLORS = {
         "idle":      (50,  120, 220),
@@ -3079,44 +3187,64 @@ def run_device_mode(no_screen=False):
     _face_state   = "idle"
     _face_caption = ""          # short text shown below the face
     _mouth_open   = False
+    _blink        = False
+    _next_blink   = time.time() + random.uniform(2.5, 5.5)
     _face_lock    = threading.Lock()
 
-    def _draw_face_img(state, mouth_open, caption):
+    def _draw_face_img(state, mouth_open, caption, blink=False, breath=0.0):
         img  = Image.new("RGB", (W, H), (0, 0, 0))
         draw = ImageDraw.Draw(img)
         col  = _STATE_COLORS.get(state, (120, 120, 120))
 
-        cx, cy, r = _FACE_CX, _FACE_CY, _FACE_R
+        cx, cy = _FACE_CX, _FACE_CY
+        # Breathing: gentle ±3 px radius pulse when idle or ready
+        if state in ("idle", "ready"):
+            r = _FACE_R + int(math.sin(breath) * 3)
+        else:
+            r = _FACE_R
+
+        # Glow ring (slightly larger, dimmer) for depth
+        glow_col = tuple(max(0, c - 140) for c in col)
+        draw.ellipse([cx-r-6, cy-r-6, cx+r+6, cy+r+6], fill=glow_col)
 
         # Face circle
         draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=(22, 28, 45), outline=col, width=4)
 
         # Eyes
         for ex, ey in [(cx-30, cy-22), (cx+30, cy-22)]:
-            draw.ellipse([ex-13, ey-13, ex+13, ey+13], fill=(235, 235, 255))
-            if state == "thinking":
-                # pupils look up-right
-                draw.ellipse([ex+1, ey-8, ex+9, ey+1], fill=(18, 18, 30))
-            elif state == "listening":
-                # wide pupils, centred
-                draw.ellipse([ex-7, ey-7, ex+7, ey+7], fill=(18, 18, 30))
+            if blink:
+                # Closed: thin horizontal line
+                draw.line([ex-12, ey, ex+12, ey], fill=(235, 235, 255), width=3)
             else:
-                draw.ellipse([ex-5, ey-5, ex+5, ey+5], fill=(18, 18, 30))
+                draw.ellipse([ex-13, ey-13, ex+13, ey+13], fill=(235, 235, 255))
+                if state == "thinking":
+                    # pupils look up-right
+                    draw.ellipse([ex+1, ey-8, ex+9, ey+1], fill=(18, 18, 30))
+                elif state == "listening":
+                    # wide pupils, centred
+                    draw.ellipse([ex-7, ey-7, ex+7, ey+7], fill=(18, 18, 30))
+                else:
+                    draw.ellipse([ex-5, ey-5, ex+5, ey+5], fill=(18, 18, 30))
 
-            # Eyebrows
-            brow_y = ey - 18
-            if state == "listening":
-                draw.line([ex-13, brow_y+4, ex+13, brow_y-2], fill=col, width=3)
-            elif state == "thinking":
-                draw.line([ex-13, brow_y-2, ex+13, brow_y+4], fill=col, width=3)
-            else:
-                draw.line([ex-13, brow_y, ex+13, brow_y], fill=col, width=2)
+            # Eyebrows (skip during blink to keep it clean)
+            if not blink:
+                brow_y = ey - 18
+                if state == "listening":
+                    draw.line([ex-13, brow_y+4, ex+13, brow_y-2], fill=col, width=3)
+                elif state == "thinking":
+                    draw.line([ex-13, brow_y-2, ex+13, brow_y+4], fill=col, width=3)
+                else:
+                    draw.line([ex-13, brow_y, ex+13, brow_y], fill=col, width=2)
 
         # Mouth
         mouth_y = cy + 28
         if state == "listening":
             # small 'o'
             draw.ellipse([cx-8, mouth_y-6, cx+8, mouth_y+10], outline=(210, 150, 160), width=2)
+        elif state == "error":
+            # sad arc
+            draw.arc([cx-26, mouth_y+4, cx+26, mouth_y+28],
+                     start=195, end=345, fill=(210, 80, 80), width=3)
         elif state in ("speaking",) and mouth_open:
             # open oval
             draw.ellipse([cx-22, mouth_y-5, cx+22, mouth_y+20], fill=(160, 50, 60))
@@ -3128,15 +3256,15 @@ def run_device_mode(no_screen=False):
 
         # Caption below face
         if caption and _have_pil:
-            font_sm = _load_font(_FONT_PATH, 13)
-            lines   = _wrap_text(draw, caption, font_sm, W - 16)
-            y       = cy + r + 8
+            font_sm = _load_font(_FONT_PATH, 14)
+            lines   = _wrap_text(draw, caption, font_sm, W - 20)
+            y       = cy + r + 10
             for ln in lines[:3]:
                 bbox = draw.textbbox((0, 0), ln, font=font_sm)
                 tw   = bbox[2] - bbox[0]
                 draw.text(((W - tw) // 2, y), ln, font=font_sm, fill=(200, 200, 200))
-                y += 16
-                if y > H - 4:
+                y += 18
+                if y > H - 18:
                     break
 
         # State label at very bottom
@@ -3158,22 +3286,37 @@ def run_device_mode(no_screen=False):
             _face_caption = caption
 
     def _face_loop():
-        nonlocal _mouth_open
+        nonlocal _mouth_open, _blink, _next_blink
         last_state = ""
         while True:
+            now    = time.time()
+            breath = now * 1.2   # ~0.19 Hz breathing cycle
+
+            # Blink timer
+            if not _blink and now >= _next_blink:
+                _blink      = True
+                _next_blink = now + 0.13   # blink lasts ~130 ms
+            elif _blink and now >= _next_blink:
+                _blink      = False
+                _next_blink = now + random.uniform(2.5, 5.5)
+
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
+
             if state == "speaking":
                 _mouth_open = not _mouth_open
                 interval    = 0.18
             else:
                 _mouth_open = False
-                interval    = 0.12 if state != last_state else 0.5
+                # Breathing needs ~0.1 s ticks while idle to animate smoothly
+                interval = 0.10 if state in ("idle", "ready") else (0.12 if state != last_state else 0.5)
+
             last_state = state
             if _have_pil:
                 try:
-                    img = _draw_face_img(state, _mouth_open, caption)
+                    img = _draw_face_img(state, _mouth_open, caption,
+                                        blink=_blink, breath=breath)
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
@@ -3499,6 +3642,12 @@ def run_device_mode(no_screen=False):
     board.on_button_press(_on_press)
     board.on_button_release(_on_release)
     board.set_backlight(0 if no_screen else 100)
+    if not no_screen:
+        # Force backlight GPIO pin directly — SoftPWM at duty=0 may be slow to take effect
+        try:
+            board._gpio_lines[board.LED_PIN].set_value(0)
+        except Exception:
+            pass
     board.set_rgb(*_LED_IDLE)
     _set_face("idle")
 
@@ -3742,6 +3891,8 @@ def main():
     print(f"  /stop         stop music playback")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
+    if CALENDAR_AVAILABLE:
+        print(f"  /calendar     show today's Google Calendar events")
     print(f"  /flip         toggle camera 180° rotation (persistent)")
     print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
     print(f"  quit          exit{RESET}\n")
@@ -4090,6 +4241,18 @@ def main():
                     print(f"{DIM}No device #{parts[1]}.{RESET}\n")
             else:
                 print(f"{DIM}Usage: /bt  /bt <number>  /bt off{RESET}\n")
+            continue
+
+        if user_input.lower() == "/calendar":
+            if not CALENDAR_AVAILABLE:
+                print(f"{DIM}Calendar not available. Drop gcal_credentials.json in zeev/data/ and install google-api-python-client.{RESET}\n")
+            else:
+                print(f"{DIM}Fetching calendar...{RESET}", end=" ", flush=True)
+                cal = calendar_fetch()
+                print()
+                if cal:
+                    print(cal)
+                print()
             continue
 
         batt_level, batt_charging = get_battery()

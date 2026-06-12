@@ -3288,6 +3288,8 @@ def run_device_mode(no_screen=False):
     def _face_loop():
         nonlocal _mouth_open, _blink, _next_blink
         last_state = ""
+        _batt      = get_battery()   # (level, charging)
+        _batt_next = time.time() + 30
         while True:
             now    = time.time()
             breath = now * 1.2   # ~0.19 Hz breathing cycle
@@ -3304,19 +3306,15 @@ def run_device_mode(no_screen=False):
                 state   = _face_state
                 caption = _face_caption
 
-            if state == "speaking":
-                _mouth_open = not _mouth_open
-                interval    = 0.18
-            else:
-                _mouth_open = False
-                # Breathing needs ~0.1 s ticks while idle to animate smoothly
-                interval = 0.10 if state in ("idle", "ready") else (0.12 if state != last_state else 0.5)
-
             last_state = state
+            if now >= _batt_next:
+                _batt      = get_battery()
+                _batt_next = now + 30
+            interval = 0.08
             if _have_pil:
                 try:
-                    img = _draw_face_img(state, _mouth_open, caption,
-                                        blink=_blink, breath=breath)
+                    from face_scroll import draw_frame
+                    img = draw_frame(state, caption, now, batt=_batt)
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
@@ -3520,7 +3518,8 @@ def run_device_mode(no_screen=False):
         _rec_file.unlink(missing_ok=True)
         try:
             _rec_proc = subprocess.Popen(
-                ["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", str(_rec_file)],
+                ["arecord", "-D", "plughw:wm8960soundcard,0",
+                 "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", str(_rec_file)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except Exception as e:
@@ -3629,7 +3628,7 @@ def run_device_mode(no_screen=False):
                 session = session[-60:]
 
             board.set_rgb(*_LED_SPEAKING)
-            _set_face("speaking", reply[:120])
+            _set_face("speaking", reply)
             print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
             _speak_device(reply)
             print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)

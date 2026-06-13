@@ -26,6 +26,7 @@ scroll and icon animations.
 """
 
 import math
+import os
 import time
 from datetime import datetime
 
@@ -380,6 +381,48 @@ def _draw_text_area(img, draw, text, t):
         )
 
 
+# ── Miss Minutes idle animation ───────────────────────────────────────────────
+
+_MM_WEBP = os.path.join(os.path.dirname(__file__), "data", "miss_minutes_idle.webp")
+_mm_frames: list = []
+_mm_loaded = False
+
+def _load_mm_frames():
+    global _mm_frames, _mm_loaded
+    if _mm_loaded:
+        return bool(_mm_frames)
+    _mm_loaded = True
+    if not os.path.exists(_MM_WEBP):
+        return False
+    try:
+        src = Image.open(_MM_WEBP)
+        n = getattr(src, "n_frames", 1)
+        for i in range(n):
+            src.seek(i)
+            frame = src.convert("RGBA")
+            sw, sh = frame.size
+            # Scale to fill full height (280px), then center-crop to 240px wide
+            scale = H / sh
+            nw, nh = int(sw * scale), H
+            frame = frame.resize((nw, nh), Image.LANCZOS)
+            bg = Image.new("RGB", (W, H), (0, 0, 0))
+            x = (nw - W) // 2
+            bg.paste(frame, (-x, 0), frame)
+            _mm_frames.append(bg)
+        return bool(_mm_frames)
+    except Exception as e:
+        print(f"MM idle load error: {e}")
+        return False
+
+
+def _draw_idle_mm(t: float) -> Image.Image | None:
+    """Return a full-screen Miss Minutes animation frame, or None if unavailable."""
+    if not _load_mm_frames():
+        return None
+    idx = int(t * 10) % len(_mm_frames)
+    return _mm_frames[idx].copy()
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def draw_frame(state: str, caption: str, t: float, batt=None) -> Image.Image:
@@ -393,6 +436,11 @@ def draw_frame(state: str, caption: str, t: float, batt=None) -> Image.Image:
     t       : time.time() — drives clock, scroll, and icon animations
     batt    : (level: float|None, charging: bool) from get_battery(), or None
     """
+    if state == "idle":
+        img = _draw_idle_mm(t)
+        if img:
+            return img
+
     img  = Image.new("RGB", (W, H), (0, 0, 0))
     draw = ImageDraw.Draw(img)
     col  = _STATE_COLORS.get(state, (120, 120, 120))

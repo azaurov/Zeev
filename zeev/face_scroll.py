@@ -272,6 +272,15 @@ def _draw_header(img, draw, state, col, batt=None, t=0.0):
         batt_x = W - 22 - 3 - 3 - 8   # battery right-aligned with margin
         draw.text((batt_x - clock_w - 6, 5), clock, font=font_sm, fill=(130, 140, 170))
         _draw_battery(draw, batt_x, 5, int(level) if level is not None else None, charging)
+        if level is not None:
+            batt_col = (80, 220, 120) if charging else \
+                       (220, 60, 60) if level < 20 else \
+                       (220, 180, 40) if level < 50 else (100, 130, 170)
+            font_tiny = _font(_FONT_PATH, 10)
+            pct = f"{int(level)}%"
+            pct_w = draw.textbbox((0, 0), pct, font=font_tiny)[2]
+            draw.text((batt_x + (22 + 3 - pct_w) // 2, 18), pct,
+                      font=font_tiny, fill=batt_col)
     else:
         draw.text((W - clock_w - 8, 5), clock, font=font_sm, fill=(130, 140, 170))
 

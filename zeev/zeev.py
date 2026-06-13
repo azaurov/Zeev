@@ -266,6 +266,69 @@ def get_battery():
 
 
 # ---------------------------------------------------------------------------
+# System health monitoring (temperature + load)
+# ---------------------------------------------------------------------------
+
+_TEMP_WARN  = 75    # °C — first warning
+_TEMP_CRIT  = 82    # °C — critical (Pi throttles at ~80)
+_LOAD_WARN  = 3.0   # 1-min load avg — high (Pi Zero 2W: 4 cores)
+_LOAD_CRIT  = 3.8   # critical
+
+def get_system_health():
+    """Return dict: temp_c, load1, load5, warnings (list of str)."""
+    h = {"temp_c": None, "load1": None, "load5": None, "warnings": []}
+    try:
+        raw = Path("/sys/class/thermal/thermal_zone0/temp").read_text().strip()
+        h["temp_c"] = round(int(raw) / 1000, 1)
+    except Exception:
+        pass
+    try:
+        l1, l5, _ = os.getloadavg()
+        h["load1"] = round(l1, 2)
+        h["load5"] = round(l5, 2)
+    except Exception:
+        pass
+
+    temp = h["temp_c"]
+    load = h["load1"]
+    if temp is not None:
+        if temp >= _TEMP_CRIT:
+            h["warnings"].append(f"CPU critically hot at {temp:.0f} degrees Celsius")
+        elif temp >= _TEMP_WARN:
+            h["warnings"].append(f"CPU temperature high at {temp:.0f} degrees Celsius")
+    if load is not None:
+        if load >= _LOAD_CRIT:
+            h["warnings"].append(f"CPU critically overloaded, load average {load:.1f}")
+        elif load >= _LOAD_WARN:
+            h["warnings"].append(f"CPU load high at {load:.1f}")
+    return h
+
+
+def start_health_monitor(notify_fn, interval=60):
+    """Background thread: calls notify_fn(message) when health thresholds are exceeded.
+    Same-type notifications are suppressed for 5 minutes to avoid spam."""
+    _cooldown = 300
+    _last: dict = {}
+
+    def _run():
+        time.sleep(30)   # brief grace period at startup
+        while True:
+            h = get_system_health()
+            now = time.time()
+            for warning in h["warnings"]:
+                key = warning[:15]
+                if now - _last.get(key, 0) >= _cooldown:
+                    _last[key] = now
+                    try:
+                        notify_fn(warning)
+                    except Exception:
+                        pass
+            time.sleep(interval)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Bluetooth device management + terminal TTS
 # ---------------------------------------------------------------------------
 
@@ -1708,6 +1771,7 @@ footer {
   </div>
 </div>
 
+<div id="healthToast" style="display:none;position:fixed;top:0;left:0;right:0;z-index:999;background:#7f1d1d;color:#fca5a5;font-size:0.82rem;text-align:center;padding:6px 12px;cursor:pointer" title="Tap to dismiss">&#9888; <span id="healthMsg"></span></div>
 <header>
   <span class="brand">Zeev</span>
   <div class="controls">
@@ -2275,6 +2339,25 @@ async function updateBattery() {
 updateBattery();
 setInterval(updateBattery, 30000);
 
+// --- System health polling ---
+const healthToast = document.getElementById("healthToast");
+const healthMsg   = document.getElementById("healthMsg");
+healthToast.onclick = () => { healthToast.style.display = "none"; };
+async function checkHealth() {
+  try {
+    const res = await fetch("/health");
+    const h = await res.json();
+    if (h.warnings && h.warnings.length > 0) {
+      healthMsg.textContent = h.warnings.join(" | ");
+      healthToast.style.display = "";
+    } else {
+      healthToast.style.display = "none";
+    }
+  } catch (_) {}
+}
+checkHealth();
+setInterval(checkHealth, 60000);
+
 // --- Chat speech recognition (tap-to-speak, auto-send on silence) ---
 if (SR) {
   const rec = new SR();
@@ -2392,6 +2475,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     session = load_prior()
     lock = threading.Lock()
 
+    # Health monitor for web mode — warnings logged to console; browser polls /health
+    start_health_monitor(lambda msg: print(f"[health] ⚠  {msg}", flush=True))
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass
@@ -2451,6 +2537,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 with _notes_lock:
                     notes_data = list(USER_NOTES)
                 body = json.dumps({"notes": notes_data}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/health":
+                body = json.dumps(get_system_health()).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -3504,8 +3597,9 @@ def run_device_mode(no_screen=False):
     #   speaking   + press   → interrupt TTS → ready
     #   thinking   + press   → ignored
 
-    _rec_proc   = None
-    _busy       = threading.Event()   # set while a session is active
+    _rec_proc      = None
+    _wake_rec_proc = [None]           # wake listener's current arecord — killed on button press
+    _busy          = threading.Event()   # set while a session is active
     _state_lock = threading.Lock()
     _rec_file   = Path("/tmp/zeev_rec.wav")
 
@@ -3544,6 +3638,13 @@ def run_device_mode(no_screen=False):
 
     def _on_press():
         nonlocal _rec_proc
+        # Kill any in-progress wake word recording so the mic is free
+        if _wake_rec_proc[0]:
+            try:
+                _wake_rec_proc[0].kill()
+            except Exception:
+                pass
+            _wake_rec_proc[0] = None
         with _state_lock:
             current = _face_state
             if current in ("idle", "ready"):
@@ -3564,8 +3665,57 @@ def run_device_mode(no_screen=False):
                 _go_idle()
             # thinking: ignore
 
+    # ── Shared LLM + TTS handler ─────────────────────────────────────────────
+
+    def _handle_transcript(transcript):
+        """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
+        nonlocal session
+        t0 = time.perf_counter()
+
+        print(f"You: {transcript}")
+        _set_face("thinking", transcript)
+
+        session.append({"role": "user", "content": transcript})
+        append_message("user", transcript)
+
+        model_id = route_model(transcript)
+        short    = _MODEL_SHORT.get(model_id, "?")
+
+        print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
+        sys_prompt   = _build_system_prompt(transcript)
+        payload_msgs = [{"role": "system", "content": sys_prompt}] + session
+        cancel_hint  = _start_thinking_hint(tts_fn=_speak_device)
+        resp, err    = _groq_post(payload_msgs, model_id, stream=False)
+        cancel_hint.set()
+        print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
+
+        if err or not resp or resp.status_code != 200:
+            detail = err or (resp.text[:80] if resp else "no response")
+            print(f"LLM error: {detail}", flush=True)
+            _set_face("error", "LLM error")
+            board.set_rgb(*_LED_ERROR)
+            time.sleep(2)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        reply = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"Zeev [{short}]: {reply}\n")
+        session.append({"role": "assistant", "content": reply})
+        append_message("assistant", reply)
+
+        if len(session) > 60:
+            session = session[-60:]
+
+        board.set_rgb(*_LED_SPEAKING)
+        _set_face("speaking", reply)
+        print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
+        _speak_device(reply)
+        print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+
+        _go_ready() if _busy.is_set() else _go_idle()
+
     def _on_release():
-        nonlocal _rec_proc, session
+        nonlocal _rec_proc
         if _face_state != "listening":
             return
 
@@ -3581,9 +3731,7 @@ def run_device_mode(no_screen=False):
         _set_face("thinking")
 
         def _process():
-            nonlocal session
             t0 = time.perf_counter()
-
             try:
                 wav = _rec_file.read_bytes() if _rec_file.exists() else b""
             except Exception:
@@ -3607,50 +3755,120 @@ def run_device_mode(no_screen=False):
                 _go_ready() if _busy.is_set() else _go_idle()
                 return
 
-            print(f"You: {transcript}")
-            _set_face("thinking", transcript)
-
-            session.append({"role": "user", "content": transcript})
-            append_message("user", transcript)
-
-            model_id = route_model(transcript)
-            short    = _MODEL_SHORT.get(model_id, "?")
-
-            print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
-            sys_prompt   = _build_system_prompt(transcript)
-            payload_msgs = [{"role": "system", "content": sys_prompt}] + session
-            cancel_hint  = _start_thinking_hint(tts_fn=_speak_device)
-            resp, err    = _groq_post(payload_msgs, model_id, stream=False)
-            cancel_hint.set()
-            print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
-
-            if err or not resp or resp.status_code != 200:
-                detail = err or (resp.text[:80] if resp else "no response")
-                print(f"LLM error: {detail}", flush=True)
-                _set_face("error", "LLM error")
-                board.set_rgb(*_LED_ERROR)
-                time.sleep(2)
-                _go_ready() if _busy.is_set() else _go_idle()
-                return
-
-            reply = resp.json()["choices"][0]["message"]["content"].strip()
-            print(f"Zeev [{short}]: {reply}\n")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-
-            if len(session) > 60:
-                session = session[-60:]
-
-            board.set_rgb(*_LED_SPEAKING)
-            _set_face("speaking", reply)
-            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-            _speak_device(reply)
-            print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
-
-            # After speaking (normally or interrupted): go ready if still in session
-            _go_ready() if _busy.is_set() else _go_idle()
+            _handle_transcript(transcript)
 
         threading.Thread(target=_process, daemon=True).start()
+
+    # ── Wake word listener ("Miss Minutes") ──────────────────────────────────
+
+    _DEVICE_WAKE_WORDS = {"miss minutes", "hey miss minutes", "hey, miss minutes"}
+    _MIC_DEV = "plughw:wm8960soundcard,0"
+
+    def _wake_listener():
+        """Background thread: listen for 'Miss Minutes' when idle, then process utterance."""
+        # Calibrate noise floor
+        _floor = []
+        for _ in range(3):
+            w = _record_chunk(1.0, _MIC_DEV)
+            if w:
+                _floor.append(_rms(w))
+        rms_gate = int(max(_floor) * 1.5) if _floor else 3000
+
+        def _play_wake_beep():
+            import struct, math, wave as _wave, io as _io
+            sr, dur, freq = 16000, 0.15, 1047  # C6 tone
+            samples = [int(26000 * math.sin(2 * math.pi * freq * i / sr))
+                       for i in range(int(sr * dur))]
+            raw = struct.pack(f"<{len(samples)}h", *samples)
+            buf = _io.BytesIO()
+            with _wave.open(buf, "wb") as wf:
+                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+                wf.writeframes(raw)
+            try:
+                subprocess.run(
+                    ["aplay", "-D", _MIC_DEV, "-q", "-"],
+                    input=buf.getvalue(),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+        while True:
+            if _face_state != "idle":
+                time.sleep(0.5)
+                continue
+
+            # Record 1.5s chunk via Popen so _on_press can kill it instantly
+            try:
+                proc = subprocess.Popen(
+                    ["arecord", "-D", _MIC_DEV, "-f", "S16_LE", "-r", "16000",
+                     "-c", "1", "-t", "wav", "-d", "2", "-"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                _wake_rec_proc[0] = proc
+                wav, _ = proc.communicate()
+                _wake_rec_proc[0] = None
+            except Exception:
+                _wake_rec_proc[0] = None
+                time.sleep(0.5)
+                continue
+
+            # Discard if button press interrupted or state changed
+            if _face_state != "idle" or proc.returncode != 0:
+                continue
+            if not wav or _rms(wav) < rms_gate:
+                continue
+
+            text = groq_stt(wav)
+            if not text:
+                continue
+
+            low = text.lower().strip()
+            if not any(w in low for w in _DEVICE_WAKE_WORDS):
+                continue
+
+            print(f"[wake] heard: {low!r}", flush=True)
+
+            # Extract any words that came after the wake phrase in the same chunk
+            utterance = low
+            for w in sorted(_DEVICE_WAKE_WORDS, key=len, reverse=True):
+                if utterance.startswith(w):
+                    utterance = utterance[len(w):].lstrip(" ,.")
+                    break
+
+            # Acquire session — bail if another interaction started in the meantime
+            with _state_lock:
+                if _face_state != "idle":
+                    continue
+                _busy.set()
+
+            _play_wake_beep()
+
+            if len(utterance) > 2:
+                # Full command was in the same chunk — process immediately
+                board.set_rgb(*_LED_THINKING)
+                threading.Thread(target=_handle_transcript, args=(utterance,), daemon=True).start()
+                continue
+
+            # Record the follow-up utterance
+            _set_face("listening")
+            board.set_rgb(*_LED_RECORDING)
+            follow_wav = _record_utterance(_MIC_DEV)
+            if not follow_wav:
+                _go_idle()
+                continue
+
+            board.set_rgb(*_LED_THINKING)
+            _set_face("thinking")
+            follow_text = groq_stt(follow_wav)
+            if not follow_text or not follow_text.strip():
+                _set_face("error", "Didn't catch that")
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_idle()
+                continue
+
+            threading.Thread(target=_handle_transcript, args=(follow_text.strip(),), daemon=True).start()
 
     board.on_button_press(_on_press)
     board.on_button_release(_on_release)
@@ -3738,6 +3956,8 @@ def run_device_mode(no_screen=False):
 
     threading.Thread(target=_keyboard_listener, daemon=True).start()
     threading.Thread(target=_evdev_listener, daemon=True).start()
+    threading.Thread(target=_wake_listener, daemon=True).start()
+    start_health_monitor(lambda msg: _speak_device(f"Warning: {msg}."))
 
     def _shutdown(sig=None, frame=None):
         zeev_cleanup()
@@ -3888,6 +4108,7 @@ def main():
     init_camera()
     init_thermal()
     init_mic()
+    start_health_monitor(lambda msg: print(f"\n{BOLD}[health] ⚠  {msg}{RESET}\n", flush=True))
 
     print(f"\n{BOLD}Zeev v2.0{RESET} — AI Companion")
     print(f"{DIM}  /clear        wipe session context")

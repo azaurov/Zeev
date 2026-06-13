@@ -3574,27 +3574,8 @@ def run_device_mode():
         if not clean:
             return
 
-        # 1a. ElevenLabs — highest quality, supports Southern accent voices (MP3 → mpg123)
-        if lang == "en" and TTS_SERVER in ("auto", "elevenlabs") and shutil.which("mpg123"):
-            mp3 = elevenlabs_tts(clean)
-            if mp3:
-                p1 = subprocess.Popen(
-                    ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                _tts_p1, _tts_p2 = p1, None
-                try:
-                    p1.stdin.write(mp3)
-                    p1.stdin.close()
-                except BrokenPipeError:
-                    pass
-                p1.wait()
-                _tts_p1 = _tts_p2 = None
-                return
-
-        # 1b. Orpheus / OpenAI — WAV output via aplay
-        wav = groq_tts(clean, voice="tara") if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+        # 1. Orpheus / OpenAI — WAV output via aplay
+        wav = groq_tts(clean) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
             try:
@@ -3612,7 +3593,7 @@ def run_device_mode():
                 p2.wait()
                 return
             except Exception as e:
-                print(f"Orpheus TTS playback error: {e}")
+                print(f"Groq TTS playback error: {e}")
             finally:
                 _tts_p1 = _tts_p2 = None
 
@@ -3882,7 +3863,21 @@ def run_device_mode():
     }
     _greeting = _miss_minutes_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
-    threading.Thread(target=_speak_device, args=(_greeting,), daemon=True).start()
+
+    def _speak_greeting():
+        mp3 = elevenlabs_tts(_greeting)
+        if mp3 and shutil.which("mpg123"):
+            proc = subprocess.Popen(
+                ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            proc.stdin.write(mp3)
+            proc.stdin.close()
+            proc.wait()
+        else:
+            _speak_device(_greeting)   # fallback if ElevenLabs unavailable
+
+    threading.Thread(target=_speak_greeting, daemon=True).start()
 
     def _keyboard_listener():
         import tty, termios

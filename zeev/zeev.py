@@ -222,7 +222,7 @@ def _pisugar_query(cmd):
     """Send a command to the PiSugar server socket. Returns response or None."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(1.5)
         s.connect(("127.0.0.1", 8423))
         s.sendall((cmd + "\n").encode())
         data = s.recv(64).decode().strip()
@@ -232,19 +232,37 @@ def _pisugar_query(cmd):
         return None
 
 
+# Battery state updated by a background thread; face loop reads without blocking.
+_batt_state       = (None, None)   # (level: float|None, charging: bool|None)
+_batt_state_lock  = threading.Lock()
+
+
+def _batt_poll_loop(interval=30):
+    """Background thread: poll PiSugar every `interval` seconds."""
+    global _batt_state
+    while True:
+        level_resp = _pisugar_query("get battery")
+        if level_resp and "I2C not connected" not in level_resp:
+            charge_resp = _pisugar_query("get battery_charging")
+        else:
+            charge_resp = None
+        try:
+            level = float(level_resp.split(": ")[1])
+        except (AttributeError, IndexError, ValueError):
+            level = None
+        try:
+            charging = charge_resp.split(": ")[1].strip().lower() == "true"
+        except (AttributeError, IndexError):
+            charging = None
+        with _batt_state_lock:
+            _batt_state = (level, charging)
+        time.sleep(interval)
+
+
 def get_battery():
-    """Return (level: float, charging: bool) or (None, None) if unavailable."""
-    level_resp  = _pisugar_query("get battery")
-    charge_resp = _pisugar_query("get battery_charging")
-    try:
-        level = float(level_resp.split(": ")[1])
-    except (AttributeError, IndexError, ValueError):
-        level = None
-    try:
-        charging = charge_resp.split(": ")[1].strip().lower() == "true"
-    except (AttributeError, IndexError):
-        charging = None
-    return level, charging
+    """Return (level: float|None, charging: bool|None) from the background poller."""
+    with _batt_state_lock:
+        return _batt_state
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1149,7 @@ def init_learning():
     build_rag_index()
     load_jokes()
     init_calendar()
+    threading.Thread(target=_batt_poll_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -3288,8 +3307,6 @@ def run_device_mode(no_screen=False):
     def _face_loop():
         nonlocal _mouth_open, _blink, _next_blink
         last_state = ""
-        _batt      = get_battery()   # (level, charging)
-        _batt_next = time.time() + 30
         while True:
             now    = time.time()
             breath = now * 1.2   # ~0.19 Hz breathing cycle
@@ -3307,14 +3324,11 @@ def run_device_mode(no_screen=False):
                 caption = _face_caption
 
             last_state = state
-            if now >= _batt_next:
-                _batt      = get_battery()
-                _batt_next = now + 30
             interval = 0.08
             if _have_pil:
                 try:
                     from face_scroll import draw_frame
-                    img = draw_frame(state, caption, now, batt=_batt)
+                    img = draw_frame(state, caption, now, batt=get_battery())
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
@@ -3660,7 +3674,9 @@ def run_device_mode(no_screen=False):
 
     _hour = time.localtime().tm_hour
     _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
-    threading.Thread(target=_speak_device, args=(f"Good {_tod}, Alex. Ready when you are.",), daemon=True).start()
+    _greeting = f"Good {_tod}, Alex. Ready when you are."
+    print(f"[startup] greeting: {_greeting!r}", flush=True)
+    threading.Thread(target=_speak_device, args=(_greeting,), daemon=True).start()
 
     def _keyboard_listener():
         import tty, termios

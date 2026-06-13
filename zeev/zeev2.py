@@ -612,7 +612,7 @@ def speak_terminal(text, lang=None):
             pass
 
 
-def groq_tts(text):
+def groq_tts(text, voice="daniel"):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
     if not GROQ_API_KEY or not text.strip():
         return None
@@ -625,7 +625,7 @@ def groq_tts(text):
             headers={"Authorization": f"Bearer {GROQ_API_KEY}",
                      "Content-Type": "application/json"},
             json={"model": "canopylabs/orpheus-v1-english",
-                  "input": clean[:4096], "voice": "daniel", "response_format": "wav"},
+                  "input": clean[:4096], "voice": voice, "response_format": "wav"},
             timeout=30,
         )
         return resp.content if resp.status_code == 200 else None
@@ -3545,7 +3545,8 @@ def run_device_mode():
             return
 
         # 1. Cloud TTS — dispatched by active provider (Orpheus/OpenAI for en, gTTS otherwise)
-        wav = groq_tts(clean) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+        # Device mode uses "tara" to match Miss Minutes' feminine Southern voice
+        wav = groq_tts(clean, voice="tara") if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
             try:
@@ -3815,7 +3816,23 @@ def run_device_mode():
 
     _hour = time.localtime().tm_hour
     _tod = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
-    _greeting = f"Good {_tod}, Alex. Ready when you are."
+    _miss_minutes_greetings = {
+        "morning": (
+            "Well, good mornin', sugar! Miss Minutes here, bright-eyed and tickety-boo! "
+            "I'm all warmed up and ready whenever y'all are, hon!"
+        ),
+        "afternoon": (
+            "Why, good afternoon, darlin'! Miss Minutes here! "
+            "Hope your day's been sweeter than sweet tea. "
+            "I'm all yours whenever you're ready, hon!"
+        ),
+        "evening": (
+            "Well now, good evenin', sugar! Miss Minutes here, tickin' right along! "
+            "I'm fixin' to help y'all with whatever you need tonight. "
+            "Just say the word, darlin'!"
+        ),
+    }
+    _greeting = _miss_minutes_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
     threading.Thread(target=_speak_device, args=(_greeting,), daemon=True).start()
 

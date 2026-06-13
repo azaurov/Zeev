@@ -53,8 +53,8 @@ TAVILY_URL     = "https://api.tavily.com/search"
 LLM_SERVER  = os.environ.get("LLM_SERVER",  "groq")
 # STT_SERVER: groq | openai | vosk | faster-whisper
 STT_SERVER  = os.environ.get("STT_SERVER",  "groq")
-# TTS_SERVER: auto | orpheus | openai | piper | gtts | espeak
-#   auto = try orpheus (en) → gtts (he/es/ru) → piper → espeak
+# TTS_SERVER: auto | elevenlabs | orpheus | openai | piper | gtts | espeak
+#   auto = try elevenlabs (en) → orpheus (en) → gtts (he/es/ru) → piper → espeak
 TTS_SERVER  = os.environ.get("TTS_SERVER",  "auto")
 
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "")
@@ -65,6 +65,12 @@ OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL",       "llama3.2")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
+
+# ElevenLabs TTS — best quality, supports Southern accent voices
+# Browse https://elevenlabs.io/voice-library?accent=american&accent=southern
+# Default voice: "Matilda" (warm American female)
+ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY",  "")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "XrExE9yKIg1WjnnlVkGX")
 
 # Wake-word (openwakeword)
 WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
@@ -626,6 +632,30 @@ def groq_tts(text, voice="daniel"):
                      "Content-Type": "application/json"},
             json={"model": "canopylabs/orpheus-v1-english",
                   "input": clean[:4096], "voice": voice, "response_format": "wav"},
+            timeout=30,
+        )
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def elevenlabs_tts(text, voice_id=None):
+    """Call ElevenLabs TTS. Returns MP3 bytes or None."""
+    if not ELEVENLABS_API_KEY or not text.strip():
+        return None
+    clean = _clean_for_tts(text, "en")
+    if not clean or detect_lang(clean) != "en":
+        return None
+    vid = voice_id or ELEVENLABS_VOICE_ID
+    try:
+        resp = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{vid}",
+            headers={"xi-api-key": ELEVENLABS_API_KEY,
+                     "Content-Type": "application/json"},
+            json={"text": clean[:5000],
+                  "model_id": "eleven_turbo_v2_5",
+                  "voice_settings": {"stability": 0.45, "similarity_boost": 0.80,
+                                     "style": 0.30, "use_speaker_boost": True}},
             timeout=30,
         )
         return resp.content if resp.status_code == 200 else None
@@ -3544,8 +3574,26 @@ def run_device_mode():
         if not clean:
             return
 
-        # 1. Cloud TTS — dispatched by active provider (Orpheus/OpenAI for en, gTTS otherwise)
-        # Device mode uses "tara" to match Miss Minutes' feminine Southern voice
+        # 1a. ElevenLabs — highest quality, supports Southern accent voices (MP3 → mpg123)
+        if lang == "en" and TTS_SERVER in ("auto", "elevenlabs") and shutil.which("mpg123"):
+            mp3 = elevenlabs_tts(clean)
+            if mp3:
+                p1 = subprocess.Popen(
+                    ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                _tts_p1, _tts_p2 = p1, None
+                try:
+                    p1.stdin.write(mp3)
+                    p1.stdin.close()
+                except BrokenPipeError:
+                    pass
+                p1.wait()
+                _tts_p1 = _tts_p2 = None
+                return
+
+        # 1b. Orpheus / OpenAI — WAV output via aplay
         wav = groq_tts(clean, voice="tara") if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
@@ -3564,7 +3612,7 @@ def run_device_mode():
                 p2.wait()
                 return
             except Exception as e:
-                print(f"Groq TTS playback error: {e}")
+                print(f"Orpheus TTS playback error: {e}")
             finally:
                 _tts_p1 = _tts_p2 = None
 

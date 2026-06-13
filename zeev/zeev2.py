@@ -3313,6 +3313,10 @@ def run_device_mode():
     init_mic()
 
     board  = WhisplayBoard()
+    # 100 MHz SPI is too fast for Pi Zero 2W — reinit at a reliable speed
+    board.spi.max_speed_hz = 10_000_000
+    board._reset_lcd()
+    board._init_display()
     session = load_prior()
 
     W, H = 240, 280

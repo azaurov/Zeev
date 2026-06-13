@@ -70,7 +70,7 @@ OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 # Browse https://elevenlabs.io/voice-library?accent=american&accent=southern
 # Default voice: "Matilda" (warm American female)
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY",  "")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "XrExE9yKIg1WjnnlVkGX")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "MgqVq3OCTPeVHCEDr4HU")
 
 # Wake-word (openwakeword)
 WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"

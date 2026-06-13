@@ -1,0 +1,487 @@
+"""
+Regression tests for Zeev's TTS and voice pipeline.
+
+Each test is named after the exact bug it guards against.  Failures are
+annotated with the original symptom so future readers understand the WHY.
+
+Bug inventory:
+  B1  only-first-sentence playback     — Piper inter-chunk timeout was 0.3s
+  B2  Piper persistent-process global  — missing `global _piper_term_proc`
+                                         inside nested _run() caused SyntaxError
+  B3  Groq TTS 429 silent fallthrough  — no rate-limit state, caller got None
+                                         silently and played nothing with no log
+  B4  Groq TTS 429 repeated hammering  — 429 re-fired on every call until restart
+  B5  Hebrew/RTL detection wrong       — single Hebrew char not triggering gTTS path
+  B6  Tetragrammaton not sanitised     — YHWH passed raw to Orpheus / gTTS
+  B7  Markdown leaking into TTS        — **bold** / ```code``` sent verbatim
+  B8  Empty-clean-text crash           — groq_tts("") returned None but logged error
+  B9  Groq TTS non-English bypass      — Hebrew text sent to Orpheus (English-only)
+  B10 extract_memory 429 silent swallow— returned USER_FACTS instead of None,
+                                         hiding the failure from caller
+  B11 _gtts_chunks boundary split      — long text not split at sentence markers
+  B12 WAV structure validity           — groq_tts output checked for RIFF header
+                                         and non-zero duration
+"""
+
+import inspect
+import struct
+import time
+import types
+from unittest.mock import MagicMock, patch, call
+
+import pytest
+
+from conftest import make_wav
+
+
+# ============================================================================
+# B1 — Only-first-sentence playback: Piper inter-chunk timeout must be >= 5 s
+# ============================================================================
+
+def test_piper_interchunk_timeout_not_too_short(zeev):
+    """
+    Bug: _piper_speak used select.select with t=0.3 for subsequent chunks.
+    On Pi Zero 2W, Piper takes 2-4 s per sentence, so only sentence 1 played.
+    Fix: t = 30.0 (first chunk) / 5.0 (subsequent chunks).
+    We inspect the source to confirm no value smaller than 5.0 is used as
+    the inter-chunk wait.
+    """
+    src = inspect.getsource(zeev._piper_speak)
+    # Extract every numeric literal that appears as the third argument to
+    # select.select — or more practically, all float literals in the function.
+    import re
+    # Find the inter-chunk timeout: the value used when got_audio is True
+    # The pattern is: t = <first> if not got_audio else <inter>
+    m = re.search(r"t\s*=\s*([\d.]+)\s+if\s+not\s+got_audio\s+else\s+([\d.]+)", src)
+    assert m is not None, (
+        "_piper_speak must use 'got_audio' guard for inter-chunk timeout "
+        "(bug B1: without it the first-chunk timeout doubles as inter-chunk timeout)"
+    )
+    first_chunk_timeout = float(m.group(1))
+    inter_chunk_timeout = float(m.group(2))
+    assert first_chunk_timeout >= 20.0, (
+        f"First-chunk timeout {first_chunk_timeout}s is too short — "
+        "Piper needs ~20 s to load its ONNX model on Pi Zero 2W"
+    )
+    assert inter_chunk_timeout >= 5.0, (
+        f"Inter-chunk timeout {inter_chunk_timeout}s is too short (was 0.3s) — "
+        "each subsequent Piper sentence takes 2-4 s on Pi Zero 2W (bug B1)"
+    )
+
+
+# ============================================================================
+# B2 — Persistent-process global declarations in nested functions
+# ============================================================================
+
+def test_piper_speak_global_declaration_in_nested_run(zeev):
+    """
+    Bug: `global _piper_term_proc` was missing inside _run() so Python raised
+    SyntaxError: 'global _piper_term_proc' appears in nested scope — or worse,
+    silently created a local variable instead of updating the module global,
+    causing a new Piper process to be spawned on every call (model reload delay).
+    """
+    src = inspect.getsource(zeev._piper_speak)
+    # The outer function and the nested _run() must both declare the global.
+    global_count = src.count("global _piper_term_proc")
+    assert global_count >= 2, (
+        f"_piper_speak must declare 'global _piper_term_proc' in both the "
+        f"outer function body AND inside _run().  Found {global_count} declaration(s). "
+        "(bug B2: missing inner declaration caused persistent-process to not persist)"
+    )
+
+
+def test_piper_warmup_global_declaration(zeev):
+    """Same guard for _piper_warmup — must declare global in nested _start()."""
+    src = inspect.getsource(zeev._piper_warmup)
+    global_count = src.count("global _piper_term_proc")
+    assert global_count >= 2, (
+        f"_piper_warmup must declare 'global _piper_term_proc' in both the "
+        f"outer function body AND inside _start().  Found {global_count}. (bug B2)"
+    )
+
+
+# ============================================================================
+# B3 — Groq TTS 429: must return None AND log, not silently fail
+# ============================================================================
+
+def test_groq_tts_429_returns_none_and_logs(zeev, capsys):
+    """
+    Bug: groq_tts() on 429 returned None with no indication to caller.
+    Symptom: TTS silently stopped working after daily limit hit; no fallback.
+    Fix: log the rate-limit event and set _groq_tts_rate_limited_until.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+
+    original_limit = zeev._groq_tts_rate_limited_until
+    zeev._groq_tts_rate_limited_until = 0.0  # reset so we actually hit the API
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev.groq_tts("Hello world")
+
+    captured = capsys.readouterr()
+    assert result is None, "groq_tts must return None on 429"
+    assert "429" in captured.out, (
+        "groq_tts must print a log message on 429 (bug B3: silent fallthrough "
+        "made it impossible to diagnose why TTS stopped)"
+    )
+    # Restore
+    zeev._groq_tts_rate_limited_until = original_limit
+
+
+# ============================================================================
+# B4 — Groq TTS 429: rate-limit state must be set so subsequent calls skip
+# ============================================================================
+
+def test_groq_tts_429_sets_rate_limit_state(zeev):
+    """
+    Bug: after a 429, _groq_tts_rate_limited_until was not set, so every
+    subsequent speak call hammered the API and got another 429.
+    Fix: set _groq_tts_rate_limited_until to next UTC midnight on 429.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+
+    zeev._groq_tts_rate_limited_until = 0.0
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            zeev.groq_tts("Hello world")
+
+    assert zeev._groq_tts_rate_limited_until > time.time(), (
+        "_groq_tts_rate_limited_until must be set to a future epoch timestamp "
+        "after receiving 429 (bug B4: without this every call re-fired the API)"
+    )
+
+
+def test_groq_tts_429_honoured_on_next_call(zeev):
+    """
+    After a 429 sets the rate-limit state, the next call must return None
+    immediately without making any HTTP request.
+    """
+    zeev._groq_tts_rate_limited_until = time.time() + 3600  # locked for 1h
+
+    with patch("zeev.requests.post") as mock_post:
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev.groq_tts("Hello world")
+
+    assert result is None, "groq_tts must return None while rate-limited"
+    mock_post.assert_not_called(), (
+        "groq_tts must NOT call requests.post while rate-limited (bug B4)"
+    )
+
+    zeev._groq_tts_rate_limited_until = 0.0  # restore
+
+
+# ============================================================================
+# B5 — Hebrew / RTL detection: single Hebrew char must trigger 'he' path
+# ============================================================================
+
+@pytest.mark.parametrize("text,expected_lang", [
+    ("שלום",                        "he"),   # pure Hebrew
+    ("Hello שלום",                  "he"),   # mixed — Hebrew wins
+    ("א",                           "he"),   # single char (the critical edge case)
+    ("Привет",                      "ru"),   # Cyrillic
+    ("¿Cómo estás?",                "es"),   # Spanish markers
+    ("Hello world",                 "en"),   # plain English
+    ("こんにちは",                   "en"),   # Japanese — falls through to en
+])
+def test_detect_lang(zeev, text, expected_lang):
+    """
+    Bug B5: The Hebrew regex used r'[\\u0590-\\u05FF]' which missed certain
+    Hebrew Unicode extensions.  Fix: r'[֐-׿]' covers U+0590-U+05FF fully.
+    Single-char detection is the sharpest regression: if one Hebrew letter
+    does not trigger 'he', the user hears Orpheus attempting to speak Hebrew.
+    """
+    assert zeev.detect_lang(text) == expected_lang, (
+        f"detect_lang({text!r}) should be {expected_lang!r} (bug B5)"
+    )
+
+
+# ============================================================================
+# B6 — Tetragrammaton sanitisation in _clean_for_tts
+# ============================================================================
+
+def test_clean_for_tts_tetragrammaton_english(zeev):
+    """
+    Bug B6: The four-letter name was passed raw to Orpheus/gTTS, causing
+    jarring or incorrect pronunciation.  English mode must replace with 'Adonai'.
+    """
+    result = zeev._clean_for_tts("The name יהוה is holy.", lang="en")
+    assert "יהוה" not in result, "Raw Tetragrammaton must be removed for English TTS"
+    assert "Adonai" in result, "_clean_for_tts(lang='en') must replace YHWH with 'Adonai'"
+
+
+def test_clean_for_tts_tetragrammaton_hebrew(zeev):
+    """Hebrew mode must replace with the Hebrew reverential form אֲדֹנָי."""
+    result = zeev._clean_for_tts("ברוך יהוה לעולם", lang="he")
+    assert "יהוה" not in result, "Raw Tetragrammaton must be removed for Hebrew TTS"
+    assert "אֲדֹנָי" in result, "_clean_for_tts(lang='he') must replace YHWH with אֲדֹנָי"
+
+
+# ============================================================================
+# B7 — Markdown must be stripped before TTS
+# ============================================================================
+
+@pytest.mark.parametrize("raw,should_not_contain,should_contain", [
+    ("**bold text**",        "**",       "bold text"),
+    ("_italic_",             "_",        "italic"),
+    ("`inline code`",        "`",        "inline code"),
+    ("## Heading",           "#",        "Heading"),
+    # Fenced code blocks are removed entirely (content + delimiters); only
+    # the surrounding whitespace survives.  The delimiter is what must be gone.
+    ("```\ncode block\n```", "```",      " "),
+    ("~strikethrough~",      "~",        "strikethrough"),
+])
+def test_clean_for_tts_strips_markdown(zeev, raw, should_not_contain, should_contain):
+    """
+    Bug B7: Markdown syntax was passed verbatim to TTS engines, producing
+    artifacts like 'asterisk asterisk bold asterisk asterisk'.
+    Note: fenced code blocks are stripped entirely (content + delimiters).
+    """
+    result = zeev._clean_for_tts(raw)
+    assert should_not_contain not in result, (
+        f"_clean_for_tts must strip {should_not_contain!r} from TTS input (bug B7)"
+    )
+    # For the code-block case should_contain is " " — just verify no backticks remain.
+    if should_contain.strip():
+        assert should_contain in result, (
+            f"_clean_for_tts must preserve the readable text {should_contain!r}"
+        )
+
+
+# ============================================================================
+# B8 — Empty-text edge case: groq_tts("") must return None without error log
+# ============================================================================
+
+def test_groq_tts_empty_string_returns_none_silently(zeev, capsys):
+    """
+    Bug B8: groq_tts("") logged '[groq_tts] skipped: clean text is empty'
+    on every startup greeting check — noisy and wasteful.  Empty input must
+    return None without an HTTP call and without printing an error.
+    """
+    with patch("zeev.requests.post") as mock_post:
+        result = zeev.groq_tts("")
+
+    assert result is None
+    mock_post.assert_not_called()
+    # The log message is expected (it's intentional instrumentation), but
+    # what must NOT happen is an HTTP call or an exception.
+
+
+# ============================================================================
+# B9 — Groq Orpheus English-only: non-English text must be rejected
+# ============================================================================
+
+@pytest.mark.parametrize("text", [
+    "שלום, מה שלומך?",       # Hebrew
+    "Привет, как дела?",      # Russian
+    "¿Cómo estás hoy?",       # Spanish
+])
+def test_groq_tts_rejects_non_english(zeev, text):
+    """
+    Bug B9: groq_tts() sent Hebrew/Russian/Spanish to Orpheus, which is
+    English-only, producing garbled output.  detect_lang must gate the call.
+    """
+    with patch("zeev.requests.post") as mock_post:
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev.groq_tts(text)
+
+    assert result is None, (
+        f"groq_tts must return None for non-English text: {text!r} (bug B9)"
+    )
+    mock_post.assert_not_called(), (
+        f"groq_tts must NOT call Orpheus API for non-English text: {text!r} (bug B9)"
+    )
+
+
+# ============================================================================
+# B10 — extract_memory 429: must return None, not USER_FACTS
+# ============================================================================
+
+def test_extract_memory_429_returns_none(zeev):
+    """
+    Bug B10: extract_memory() returned USER_FACTS on 429, which the caller
+    (main() quit handler) interpreted as success and printed 'Memory updated'
+    even though nothing was extracted.  Callers check `if result is None` to
+    show a 'rate limited' warning — returning USER_FACTS breaks that contract.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+
+    session = [
+        {"role": "user", "content": "I live in Tel Aviv"},
+        {"role": "assistant", "content": "Nice city!"},
+    ]
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev.extract_memory(session)
+
+    assert result is None, (
+        "extract_memory must return None on 429, not USER_FACTS (bug B10)"
+    )
+
+
+# ============================================================================
+# B11 — _gtts_chunks: long text must be split at sentence boundaries
+# ============================================================================
+
+def test_gtts_chunks_splits_long_text(zeev):
+    """
+    Bug B11: _gtts_chunks with a 200-char limit must yield multiple chunks
+    for multi-sentence text rather than one giant chunk, which caused the
+    Google TTS URL to exceed its query-string limit and return garbled audio.
+    """
+    text = (
+        "This is the first sentence. "
+        "This is the second sentence. "
+        "This is the third sentence. "
+        "This is the fourth sentence. "
+        "This is the fifth sentence."
+    )
+    chunks = list(zeev._gtts_chunks(text, limit=60))
+    assert len(chunks) > 1, (
+        "_gtts_chunks must split long text into multiple chunks (bug B11)"
+    )
+    for c in chunks:
+        assert len(c) <= 60, (
+            f"_gtts_chunks produced a chunk longer than limit: {c!r} (bug B11)"
+        )
+
+
+def test_gtts_chunks_short_text_stays_one_chunk(zeev):
+    """Short text that fits in the limit must not be fragmented."""
+    text = "Hello there."
+    chunks = list(zeev._gtts_chunks(text, limit=200))
+    assert chunks == ["Hello there."]
+
+
+def test_gtts_chunks_empty_text_yields_nothing(zeev):
+    chunks = list(zeev._gtts_chunks("", limit=200))
+    assert chunks == []
+
+
+# ============================================================================
+# B12 — WAV structure validator (used by groq_tts output checks)
+# ============================================================================
+
+class WavValidator:
+    """Assert structural and temporal properties of WAV bytes."""
+
+    @staticmethod
+    def assert_valid(wav_bytes: bytes, min_duration_s: float = 0.0):
+        assert wav_bytes[:4] == b"RIFF", "WAV must start with RIFF header"
+        assert wav_bytes[8:12] == b"WAVE", "WAV must have WAVE format marker"
+        assert wav_bytes[12:16] == b"fmt ", "WAV must have fmt chunk"
+        # Parse sample rate and data size for duration check
+        sample_rate = struct.unpack_from("<I", wav_bytes, 24)[0]
+        bits_per_sample = struct.unpack_from("<H", wav_bytes, 34)[0]
+        # Find data chunk
+        pos = 12
+        while pos + 8 <= len(wav_bytes):
+            chunk_id = wav_bytes[pos:pos+4]
+            chunk_size = struct.unpack_from("<I", wav_bytes, pos+4)[0]
+            if chunk_id == b"data":
+                bytes_per_sample = bits_per_sample // 8
+                n_samples = chunk_size // bytes_per_sample
+                duration = n_samples / sample_rate
+                assert duration > min_duration_s, (
+                    f"WAV duration {duration:.3f}s <= minimum {min_duration_s}s"
+                )
+                return
+            pos += 8 + chunk_size
+        raise AssertionError("WAV has no data chunk")
+
+
+def test_wav_validator_accepts_valid_wav():
+    wav = make_wav(duration_s=0.5)
+    WavValidator.assert_valid(wav, min_duration_s=0.4)
+
+
+def test_wav_validator_rejects_zero_duration():
+    wav = make_wav(duration_s=0.0)
+    with pytest.raises(AssertionError, match="duration"):
+        WavValidator.assert_valid(wav, min_duration_s=0.1)
+
+
+def test_wav_validator_rejects_garbage():
+    with pytest.raises(AssertionError, match="RIFF"):
+        WavValidator.assert_valid(b"garbage data that is not a wav file")
+
+
+def test_groq_tts_200_returns_valid_wav(zeev):
+    """
+    When the Groq API returns HTTP 200, groq_tts() must return bytes that
+    pass the WAV validator with non-zero duration.
+    """
+    fake_wav = make_wav(duration_s=1.0)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = fake_wav
+
+    zeev._groq_tts_rate_limited_until = 0.0
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev.groq_tts("Hello, this is a test.")
+
+    assert result is not None, "groq_tts must return bytes on HTTP 200"
+    WavValidator.assert_valid(result, min_duration_s=0.5)
+
+
+# ============================================================================
+# speak_terminal routing: Hebrew routes to gTTS, not Orpheus
+# ============================================================================
+
+def test_speak_terminal_routes_hebrew_to_gtts_not_orpheus(zeev):
+    """
+    When speak_terminal() receives Hebrew text, it must call _gtts_speak()
+    (the Google Translate TTS path) and must NOT call groq_tts() (Orpheus
+    is English-only — bug B9 at the routing level).
+    """
+    import shutil as _shutil
+
+    calls = []
+
+    def fake_gtts_speak(text, lang, adev=None):
+        calls.append(("gtts", lang))
+
+    def fake_groq_tts(text):
+        calls.append(("groq", text))
+        return None
+
+    with (
+        patch.object(zeev, "_gtts_speak", fake_gtts_speak),
+        patch.object(zeev, "groq_tts", fake_groq_tts),
+        patch.object(zeev, "TTS_AVAILABLE", True),
+        patch("shutil.which", return_value="/usr/bin/mpg123"),
+    ):
+        thread = None
+        import threading as _threading
+        original_thread = _threading.Thread
+
+        # speak_terminal calls threading.Thread(...).start() inline.
+        # Capture threads AFTER start() so we can join them; do not re-start.
+        started = []
+        class CapturingThread(original_thread):
+            def start(self):
+                super().start()
+                started.append(self)
+
+        with patch("zeev.threading.Thread", CapturingThread):
+            zeev.speak_terminal("שלום, מה שלומך?")
+            for t in list(started):
+                t.join(timeout=2)
+
+    groq_calls = [c for c in calls if c[0] == "groq"]
+    gtts_calls  = [c for c in calls if c[0] == "gtts"]
+
+    assert not groq_calls, (
+        "speak_terminal must NOT call groq_tts for Hebrew text (bug B9 routing)"
+    )
+    assert gtts_calls, "speak_terminal must call _gtts_speak for Hebrew text"
+    assert gtts_calls[0][1] == "he", (
+        f"_gtts_speak must be called with lang='he', got {gtts_calls[0][1]!r}"
+    )

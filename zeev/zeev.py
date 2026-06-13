@@ -4149,6 +4149,19 @@ def run_device_mode():
     threading.Thread(target=_wake_listener, daemon=True).start()
     start_health_monitor(lambda msg: _speak_device(f"Warning: {msg}."))
 
+    def _battery_shutdown_monitor():
+        _triggered = False
+        while not _triggered:
+            time.sleep(30)
+            level, charging = get_battery()
+            if level is not None and level <= 2 and not charging:
+                _triggered = True
+                print("[shutdown] Battery critical — shutting down.", flush=True)
+                _speak_device("Oh no, my time's up!")
+                subprocess.run(["sudo", "shutdown", "-h", "now"])
+
+    threading.Thread(target=_battery_shutdown_monitor, daemon=True).start()
+
     def _shutdown(sig=None, frame=None):
         zeev_cleanup()
         board.cleanup()

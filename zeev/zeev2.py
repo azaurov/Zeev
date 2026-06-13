@@ -3813,6 +3813,12 @@ def run_device_mode():
     print(f"Press while recording to cancel & exit.")
     print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
+    _hour = time.localtime().tm_hour
+    _tod = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+    _greeting = f"Good {_tod}, Alex. Ready when you are."
+    print(f"[startup] greeting: {_greeting!r}", flush=True)
+    threading.Thread(target=_speak_device, args=(_greeting,), daemon=True).start()
+
     def _keyboard_listener():
         import tty, termios
         fd = sys.stdin.fileno()

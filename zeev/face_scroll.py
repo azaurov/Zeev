@@ -138,53 +138,85 @@ def _get_symb():
     return _symb_font if _symb_font else None
 
 
-def _draw_icon(img, draw, state, col):
-    """Draw the state emoji centred in the header icon area."""
-    cx, cy = W // 2, 52   # centre of icon zone
+def _draw_miss_minutes_icon(img, draw, state, t):
+    """Draw Miss Minutes — animated PIL clock face with cartoon expressions."""
+    cx, cy = W // 2, 60   # face centre (lowered to leave room for hat)
+    r = 25                  # face radius
 
-    char  = _EMOJI.get(state, "?")
-    noto  = _get_noto()
-    symb  = _get_symb()
+    # Blink: eyes closed for 0.15 s every 4 s
+    blink = (t % 4.0) < 0.15
 
-    if noto:
-        # Noto Color Emoji: render at bitmap size into a temp RGBA image,
-        # then scale down and paste onto the main image.
-        tmp_w, tmp_h = 140, 140
-        tmp = Image.new("RGBA", (tmp_w, tmp_h), (0, 0, 0, 0))
-        tmp_draw = ImageDraw.Draw(tmp)
-        tmp_draw.text((2, 2), char, font=noto, embedded_color=True)
-        # Crop to non-transparent bounding box
-        bbox = tmp.getbbox()
-        if bbox:
-            tmp = tmp.crop(bbox)
-        # Scale to target size, keeping aspect ratio
-        tw, th = tmp.size
-        scale  = _emoji_size / max(tw, th)
-        new_w  = max(1, int(tw * scale))
-        new_h  = max(1, int(th * scale))
-        tmp    = tmp.resize((new_w, new_h), Image.LANCZOS)
-        # Paste centred
-        px = cx - new_w // 2
-        py = cy - new_h // 2
-        img.paste(tmp, (px, py), tmp)
+    # ── Cowboy hat ───────────────────────────────────────────────────────────
+    hat = (48, 32, 10)
+    face_top = cy - r          # y = 35
+    # Crown: narrow rect above face, top at y≈20 (clears status-row text)
+    draw.rounded_rectangle([cx - 13, 20, cx + 13, face_top + 2],
+                            radius=4, fill=hat)
+    # Brim: wide ellipse overlapping the crown–face join
+    draw.ellipse([cx - 22, face_top - 5, cx + 22, face_top + 6], fill=hat)
 
-    elif symb:
-        # Symbola: monochrome vector font, tint with state colour
-        bb  = draw.textbbox((0, 0), char, font=symb)
-        tw  = bb[2] - bb[0]
-        th  = bb[3] - bb[1]
-        draw.text((cx - tw // 2 - bb[0], cy - th // 2 - bb[1]),
-                  char, font=symb, fill=col)
+    # ── Clock face ───────────────────────────────────────────────────────────
+    face_col = (228, 192, 40)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                 fill=face_col, outline=(148, 112, 5), width=2)
 
+    # Hour tick marks (major at 3/6/9/12, minor elsewhere)
+    for i in range(12):
+        a   = math.pi * 2 * i / 12 - math.pi / 2
+        r1  = r - 2
+        r2  = r - 7 if i % 3 == 0 else r - 5
+        w   = 2 if i % 3 == 0 else 1
+        draw.line([cx + int(r1 * math.cos(a)), cy + int(r1 * math.sin(a)),
+                   cx + int(r2 * math.cos(a)), cy + int(r2 * math.sin(a))],
+                  fill=(100, 72, 4), width=w)
+
+    # Clock hands — real current time
+    now = datetime.now()
+    ha = math.pi * 2 * (now.hour % 12 + now.minute / 60) / 12 - math.pi / 2
+    ma = math.pi * 2 * now.minute / 60 - math.pi / 2
+    hr_len = int(r * 0.48)
+    mn_len = int(r * 0.68)
+    draw.line([cx, cy,
+               cx + int(hr_len * math.cos(ha)), cy + int(hr_len * math.sin(ha))],
+              fill=(55, 36, 4), width=3)
+    draw.line([cx, cy,
+               cx + int(mn_len * math.cos(ma)), cy + int(mn_len * math.sin(ma))],
+              fill=(55, 36, 4), width=2)
+    # Centre pin
+    draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(38, 22, 4))
+
+    # ── Eyes ─────────────────────────────────────────────────────────────────
+    eye_y = cy - 4
+    ink   = (22, 14, 3)
+    for ex in (cx - 8, cx + 8):
+        if blink or state == "idle":
+            # Heavy-lidded / closed: flat line with lower arc
+            draw.line([ex - 4, eye_y, ex + 4, eye_y], fill=ink, width=2)
+            if not blink:
+                draw.arc([ex - 4, eye_y - 1, ex + 4, eye_y + 5],
+                         start=0, end=180, fill=ink, width=2)
+        elif state == "error":
+            draw.line([ex - 3, eye_y - 3, ex + 3, eye_y + 3], fill=ink, width=2)
+            draw.line([ex + 3, eye_y - 3, ex - 3, eye_y + 3], fill=ink, width=2)
+        elif state == "thinking":
+            # Squinting upward
+            draw.arc([ex - 4, eye_y - 4, ex + 4, eye_y + 2],
+                     start=200, end=340, fill=ink, width=2)
+        else:
+            # Open dot
+            draw.ellipse([ex - 3, eye_y - 3, ex + 3, eye_y + 3], fill=ink)
+
+    # ── Mouth ────────────────────────────────────────────────────────────────
+    my = cy + 13
+    speaking_open = state == "speaking" and (t % 0.5) < 0.28
+    if speaking_open:
+        draw.ellipse([cx - 6, my - 4, cx + 6, my + 6], fill=(155, 52, 52))
+    elif state == "error":
+        draw.arc([cx - 7, my - 4, cx + 7, my + 4], start=200, end=340, fill=ink, width=2)
+    elif state == "ready":
+        draw.arc([cx - 10, my - 8, cx + 10, my + 6], start=10, end=170, fill=ink, width=2)
     else:
-        # Last resort: circled letter
-        r = _emoji_size // 2
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col, width=3)
-        font_fb = _font(_FONT_BOLD, 28)
-        letter  = state[0].upper()
-        bb      = draw.textbbox((0, 0), letter, font=font_fb)
-        draw.text((cx - (bb[2] - bb[0]) // 2, cy - (bb[3] - bb[1]) // 2),
-                  letter, font=font_fb, fill=col)
+        draw.arc([cx - 8, my - 6, cx + 8, my + 4], start=15, end=165, fill=ink, width=2)
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -218,7 +250,7 @@ def _draw_battery(draw, x, y, level, charging):
         draw.line([cx - 1, y + bh // 2, cx + 2, y + bh - 3], fill=(0, 0, 0), width=1)
 
 
-def _draw_header(img, draw, state, col, batt=None):
+def _draw_header(img, draw, state, col, batt=None, t=0.0):
     """batt: (level_float_or_None, charging_bool) or None if unavailable."""
     label = _LABELS.get(state, state)
     clock = datetime.now().strftime("%H:%M")
@@ -242,8 +274,8 @@ def _draw_header(img, draw, state, col, batt=None):
     else:
         draw.text((W - clock_w - 8, 5), clock, font=font_sm, fill=(130, 140, 170))
 
-    # Emoji icon centred in remaining header space
-    _draw_icon(img, draw, state, col)
+    # Miss Minutes clock-face icon
+    _draw_miss_minutes_icon(img, draw, state, t)
 
     # Separator line
     draw.line([0, SEP_Y - 1, W, SEP_Y - 1], fill=(40, 44, 55), width=1)
@@ -365,7 +397,7 @@ def draw_frame(state: str, caption: str, t: float, batt=None) -> Image.Image:
     draw = ImageDraw.Draw(img)
     col  = _STATE_COLORS.get(state, (120, 120, 120))
 
-    _draw_header(img, draw, state, col, batt=batt)
+    _draw_header(img, draw, state, col, batt=batt, t=t)
     _draw_text_area(img, draw, caption, t)
 
     return img

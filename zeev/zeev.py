@@ -5,8 +5,6 @@ import base64
 import io
 import json
 import os
-import math
-import random
 import re
 import readline
 import select
@@ -29,9 +27,6 @@ NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
 SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
 TORAH_DB      = BASE_DIR / "data" / "torah.db"
-GCAL_CREDS_FILE = BASE_DIR / "data" / "gcal_credentials.json"
-GCAL_TOKEN_FILE = BASE_DIR / "data" / "gcal_token.json"
-_GCAL_SCOPES    = ["https://www.googleapis.com/auth/calendar.readonly"]
 
 # Load .env from repo root if present (supplements environment variables)
 _ENV_FILE = BASE_DIR.parent / ".env"
@@ -50,8 +45,38 @@ GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
 
-# Calendar state — populated by init_calendar() at startup
-CALENDAR_AVAILABLE = False
+# ---------------------------------------------------------------------------
+# Multi-provider config  (set via .env)
+# ---------------------------------------------------------------------------
+
+# LLM_SERVER: groq | openai | anthropic | gemini | ollama | openrouter
+LLM_SERVER  = os.environ.get("LLM_SERVER",  "groq")
+# STT_SERVER: groq | openai | vosk | faster-whisper
+STT_SERVER  = os.environ.get("STT_SERVER",  "groq")
+# TTS_SERVER: auto | elevenlabs | orpheus | openai | piper | gtts | espeak
+#   auto = try elevenlabs (en) → orpheus (en) → gtts (he/es/ru) → piper → espeak
+TTS_SERVER  = os.environ.get("TTS_SERVER",  "auto")
+
+ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "")
+OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY",     "")
+GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY",     "")
+OLLAMA_URL         = os.environ.get("OLLAMA_URL",         "http://localhost:11434")
+OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL",       "llama3.2")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
+OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
+
+# ElevenLabs TTS — best quality, supports Southern accent voices
+# Browse https://elevenlabs.io/voice-library?accent=american&accent=southern
+# Default voice: "Matilda" (warm American female)
+ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY",  "")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+
+# Wake-word (openwakeword)
+WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
+WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep names/paths
+WAKE_WORD_THRESHOLD = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
+WAKE_WORD_COOLDOWN  = float(os.environ.get("WAKE_WORD_COOLDOWN",  "1.5"))
 
 # Learning state — populated by init_learning() at startup
 USER_FACTS       = []   # persistent facts about the user
@@ -80,16 +105,6 @@ _SEARCH_RE = re.compile(
 def needs_search(text):
     return bool(_SEARCH_RE.search(text))
 
-_CALENDAR_RE = re.compile(
-    r"\b(calendar|schedule|agenda|event|appointment|meeting|"
-    r"what.s on|what do i have|am i (free|busy)|my day|plans for|"
-    r"when is my|what time is|do i have anything)\b",
-    re.IGNORECASE,
-)
-
-def needs_calendar(text):
-    return CALENDAR_AVAILABLE and bool(_CALENDAR_RE.search(text))
-
 _MUSIC_RE = re.compile(
     r"^(start playing|can you play|put on|play me|i want to hear|i want to listen to|"
     r"throw on|blast|queue|play)\s+(?P<query>.+)",
@@ -100,56 +115,6 @@ def extract_music_query(text):
     """Return the song/artist query if text is a play request, else None."""
     m = _MUSIC_RE.match(text.strip())
     return m.group("query").strip() if m else None
-
-# ---------------------------------------------------------------------------
-# Adult jokes
-# ---------------------------------------------------------------------------
-
-_JOKES: dict = {"en": [], "es": [], "ru": [], "he": []}
-_JOKE_RE = re.compile(
-    r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
-    r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
-    r"|joke|say a joke|hit me with a joke"
-    r"|make me laugh|say something funny|got any jokes"
-    r"|(dirty|adult|naughty|nasty|raunchy) joke"
-    # Spanish
-    r"|cu[eé]ntame un chiste|chiste|hazme reír|algo gracioso"
-    # Russian
-    r"|расскажи анекдот|анекдот|рассмеши меня"
-    # Hebrew
-    r"|ספר לי בדיחה|בדיחה|תצחיק אותי)",
-    re.IGNORECASE,
-)
-
-def load_jokes():
-    for lang, fname in [("en", "adult_jokes.json"), ("es", "adult_jokes_es.json"),
-                        ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json")]:
-        p = BASE_DIR / "data" / fname
-        if p.exists():
-            try:
-                _JOKES[lang] = json.loads(p.read_text())
-            except Exception:
-                _JOKES[lang] = []
-
-def random_joke(lang: str = "en") -> str:
-    """Return a random joke in the given language, falling back to English."""
-    pool = _JOKES.get(lang) or _JOKES.get("en") or []
-    if not pool:
-        return ""
-    j = random.choice(pool)
-    if j.get("punchline"):
-        return f"{j['setup']}\n\n{j['punchline']}"
-    return j["setup"]
-
-def joke_lang(text: str) -> str:
-    """Detect which joke language to use from the request text."""
-    if re.search(r"[֐-׿]", text):
-        return "he"
-    if re.search(r"[Ѐ-ӿ]", text):
-        return "ru"
-    if re.search(r"\b(chiste|gracioso|hazme re[ií]r|cu[eé]ntame)\b", text, re.IGNORECASE):
-        return "es"
-    return "en"
 
 # Model auto-routing heuristics
 _REASONING_RE = re.compile(
@@ -182,14 +147,6 @@ _MODEL_SHORT = {
     "llama-3.3-70b-versatile":      "70B",
     "deepseek-r1-distill-llama-70b":"R1",
 }
-_THINKING_PHRASES = [
-    "Hmm, thinking about it...",
-    "Let me think about that for a second...",
-    "This is a complex one, give me a moment...",
-    "One moment, pondering...",
-    "Let me work through that...",
-]
-
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
@@ -222,7 +179,7 @@ def _pisugar_query(cmd):
     """Send a command to the PiSugar server socket. Returns response or None."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.5)
+        s.settimeout(2)
         s.connect(("127.0.0.1", 8423))
         s.sendall((cmd + "\n").encode())
         data = s.recv(64).decode().strip()
@@ -232,9 +189,8 @@ def _pisugar_query(cmd):
         return None
 
 
-# Battery state updated by a background thread; face loop reads without blocking.
-_batt_state       = (None, None)   # (level: float|None, charging: bool|None)
-_batt_state_lock  = threading.Lock()
+_batt_state      = (None, None)   # (level: float|None, charging: bool|None)
+_batt_state_lock = threading.Lock()
 
 
 def _batt_poll_loop(interval=30):
@@ -373,8 +329,6 @@ def init_tts():
     if PIPER_BIN:
         PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
             data_dir / "piper_voice.onnx",
-            piper_dir / "en_US-libritts_r-medium.onnx",
-            share_dir / "en_US-libritts_r-medium.onnx",
             piper_dir / "en_US-ryan-medium.onnx",
             share_dir / "en_US-ryan-medium.onnx",
             piper_dir / "en_US-lessac-medium.onnx",
@@ -702,146 +656,240 @@ def youtube_play(query, adev=None):
 
 
 def speak_terminal(text, lang=None):
-    """Speak in background: Groq Orpheus (en) → gTTS (he/es/ru) → Piper → espeak-ng."""
+    """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
+    if not TTS_AVAILABLE:
+        return
     lang = lang or detect_lang(text)
     clean = _clean_for_tts(text, lang)
     if not clean:
         return
 
-    def _play():
-        _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
-        # 1. Groq Orpheus — cloud neural TTS, English only
-        if lang == "en":
-            wav = groq_tts(clean)
-            if wav:
-                player = shutil.which("aplay") or shutil.which("mpg123")
-                if player and "aplay" in player:
-                    try:
-                        p = subprocess.Popen(
-                            ["aplay", "-q", "-"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                        p.stdin.write(wav)
-                        p.stdin.close()
-                        p.wait()
-                        return
-                    except Exception:
-                        pass
-                elif player:
-                    try:
-                        p = subprocess.Popen(
-                            ["mpg123", "-q", "-"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                        p.stdin.write(wav)
-                        p.stdin.close()
-                        p.wait()
-                        return
-                    except Exception:
-                        pass
-        # 2. Google Translate TTS — non-English
-        if lang in _GTTS_LANGS and shutil.which("mpg123"):
-            _gtts_speak(clean, _GTTS_LANGS[lang])
-            return
-        # 3. Piper — local neural TTS fallback
-        if TTS_AVAILABLE and PIPER_BIN and PIPER_MODELS.get("en"):
-            _piper_speak(clean, PIPER_MODELS["en"])
-            return
-        # 4. espeak-ng — last resort
-        if TTS_AVAILABLE:
-            espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
-            try:
-                subprocess.Popen(
-                    ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
-
-    threading.Thread(target=_play, daemon=True).start()
+    _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
+    if lang in _GTTS_LANGS and shutil.which("mpg123"):
+        _gtts_speak(clean, _GTTS_LANGS[lang])
+    elif PIPER_BIN and PIPER_MODELS.get("en"):
+        _piper_speak(clean, PIPER_MODELS["en"])
+    else:
+        espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
+        try:
+            subprocess.Popen(
+                ["espeak-ng", "-s", "145", "-v", espeak_lang, clean],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
 
-_groq_tts_rate_limited_until: float = 0.0  # epoch seconds; skip calls until then
-
-def groq_tts(text):
+def groq_tts(text, voice="daniel"):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
-    global _groq_tts_rate_limited_until
-    import time as _time
     if not GROQ_API_KEY or not text.strip():
         return None
-    if _time.time() < _groq_tts_rate_limited_until:
-        return None  # daily limit hit; skip until reset
     clean = _clean_for_tts(text, "en")
-    if not clean:
-        print("[groq_tts] skipped: clean text is empty")
-        return None
-    _dl = detect_lang(clean)
-    if _dl != "en":
-        print(f"[groq_tts] skipped: detect_lang={_dl!r} (not English)")
+    if not clean or detect_lang(clean) != "en":
         return None
     try:
         resp = requests.post(
             GROQ_TTS_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "canopylabs/orpheus-v1-english",
-                "input": clean[:4096],
-                "voice": "daniel",
-                "response_format": "wav",
-            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": "canopylabs/orpheus-v1-english",
+                  "input": clean[:4096], "voice": voice, "response_format": "wav"},
             timeout=30,
         )
-        if resp.status_code == 429:
-            import datetime as _dt
-            # Reset at next UTC midnight
-            now_utc = _dt.datetime.now(_dt.timezone.utc)
-            next_midnight = (now_utc + _dt.timedelta(days=1)).replace(
-                hour=0, minute=0, second=0, microsecond=0)
-            _groq_tts_rate_limited_until = next_midnight.timestamp()
-            print(f"[groq_tts] 429 rate limit — Orpheus disabled until {next_midnight.strftime('%H:%M UTC')}")
-            return None
-        if resp.status_code != 200:
-            print(f"[groq_tts] HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-        return resp.content
-    except Exception as e:
-        print(f"[groq_tts] error: {e}")
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
         return None
 
 
-def groq_stt(wav_bytes):
-    """Send WAV bytes to Groq Whisper. Returns transcript string or ''."""
-    if not GROQ_API_KEY or not wav_bytes:
-        return ""
+def elevenlabs_tts(text, voice_id=None):
+    """Call ElevenLabs TTS. Returns MP3 bytes or None."""
+    if not ELEVENLABS_API_KEY or not text.strip():
+        return None
+    clean = _clean_for_tts(text, "en")
+    if not clean or detect_lang(clean) != "en":
+        return None
+    vid = voice_id or ELEVENLABS_VOICE_ID
+    try:
+        resp = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{vid}",
+            headers={"xi-api-key": ELEVENLABS_API_KEY,
+                     "Content-Type": "application/json"},
+            json={"text": clean[:5000],
+                  "model_id": "eleven_turbo_v2_5",
+                  "voice_settings": {"stability": 0.45, "similarity_boost": 0.80,
+                                     "style": 0.30, "use_speaker_boost": True}},
+            timeout=30,
+        )
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _openai_tts(text, lang="en"):
+    """Call OpenAI TTS. Returns MP3 bytes or None."""
+    if not OPENAI_API_KEY or not text.strip():
+        return None
+    clean = _clean_for_tts(text, lang)
+    if not clean:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": "tts-1", "input": clean[:4096],
+                  "voice": OPENAI_TTS_VOICE, "response_format": "mp3"},
+            timeout=30,
+        )
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def tts_web(text, lang=None):
+    """Return audio bytes (WAV or MP3) for the web /tts endpoint.
+    Dispatches to the active TTS provider; returns (bytes, content_type) or (None, None)."""
+    lang = lang or detect_lang(text)
+    clean = _clean_for_tts(text, lang)
+    if not clean:
+        return None, None
+
+    server = TTS_SERVER
+
+    if server == "openai" or (server == "auto" and OPENAI_API_KEY and lang == "en"):
+        mp3 = _openai_tts(clean, lang)
+        if mp3:
+            return mp3, "audio/mpeg"
+
+    if server in ("orpheus", "auto") and lang == "en":
+        wav = groq_tts(clean)
+        if wav:
+            return wav, "audio/wav"
+
+    if server in ("gtts", "auto") and lang in ("he", "es", "ru"):
+        chunks = list(_gtts_chunks(clean))
+        parts = []
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            futs = [ex.submit(_gtts_fetch_chunk, c, lang) for c in chunks]
+            for fut in futs:
+                mp3 = fut.result()
+                if mp3:
+                    parts.append(mp3)
+        if parts:
+            return b"".join(parts), "audio/mpeg"
+
+    if server in ("piper", "auto") and PIPER_BIN and PIPER_MODELS.get(lang, PIPER_MODELS.get("en")):
+        model = PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")
+        try:
+            p = subprocess.run(
+                [PIPER_BIN, "--model", model, "--output_raw"],
+                input=clean.encode(), capture_output=True, timeout=30,
+            )
+            if p.returncode == 0 and p.stdout:
+                import wave, io
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(22050)
+                    wf.writeframes(p.stdout)
+                return buf.getvalue(), "audio/wav"
+        except Exception:
+            pass
+
+    return None, None
+
+
+def _whisper_multipart(url, api_key, wav_bytes, model):
+    """POST WAV to an OpenAI-compatible /audio/transcriptions endpoint."""
     boundary = b"--boundary\r\n"
     cd = b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'
     model_part = (
         b"--boundary\r\n"
         b'Content-Disposition: form-data; name="model"\r\n\r\n'
-        b"whisper-large-v3-turbo\r\n"
+        + model.encode() + b"\r\n"
     )
     multipart = boundary + cd + wav_bytes + b"\r\n" + model_part + b"--boundary--\r\n"
     try:
         r = requests.post(
-            GROQ_STT_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "multipart/form-data; boundary=boundary",
-            },
-            data=multipart,
-            timeout=30,
+            url,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "multipart/form-data; boundary=boundary"},
+            data=multipart, timeout=30,
         )
         if r.status_code == 200:
             return r.json().get("text", "").strip()
     except Exception:
         pass
     return ""
+
+
+def groq_stt(wav_bytes):
+    """Send WAV bytes to Groq Whisper. Returns transcript string or ''."""
+    if not GROQ_API_KEY or not wav_bytes:
+        return ""
+    return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes, "whisper-large-v3-turbo")
+
+
+def _stt_vosk(wav_bytes):
+    """Transcribe with local Vosk. Returns transcript or ''."""
+    try:
+        import vosk, wave, io, json as _json
+        wf = wave.open(io.BytesIO(wav_bytes))
+        rec = vosk.KaldiRecognizer(
+            vosk.Model(os.environ.get("VOSK_MODEL_PATH", "/usr/share/vosk/model")),
+            wf.getframerate(),
+        )
+        results = []
+        while True:
+            data = wf.readframes(4000)
+            if not data:
+                break
+            if rec.AcceptWaveform(data):
+                results.append(_json.loads(rec.Result()).get("text", ""))
+        results.append(_json.loads(rec.FinalResult()).get("text", ""))
+        return " ".join(r for r in results if r).strip()
+    except Exception:
+        return ""
+
+
+def _stt_faster_whisper(wav_bytes):
+    """Transcribe with local faster-whisper. Returns transcript or ''."""
+    try:
+        import tempfile, os as _os
+        from faster_whisper import WhisperModel
+        model_size = os.environ.get("FASTER_WHISPER_MODEL", "tiny.en")
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(wav_bytes)
+            tmp = f.name
+        segments, _ = model.transcribe(tmp, beam_size=5)
+        text = " ".join(s.text for s in segments).strip()
+        _os.unlink(tmp)
+        return text
+    except Exception:
+        return ""
+
+
+def stt(wav_bytes):
+    """Dispatch to the active STT provider. Returns transcript or ''."""
+    if not wav_bytes:
+        return ""
+    provider = STT_SERVER
+    if provider == "groq":
+        return groq_stt(wav_bytes)
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            return groq_stt(wav_bytes)   # fall back to groq
+        return _whisper_multipart(
+            "https://api.openai.com/v1/audio/transcriptions",
+            OPENAI_API_KEY, wav_bytes, OPENAI_STT_MODEL,
+        )
+    if provider == "vosk":
+        return _stt_vosk(wav_bytes)
+    if provider == "faster-whisper":
+        return _stt_faster_whisper(wav_bytes)
+    return groq_stt(wav_bytes)   # fallback
 
 
 def bt_list():
@@ -895,8 +943,7 @@ SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
     "questions to understand them better. "
-    "You are talking to Alex. "
-    "You may use adult humor, dirty jokes, and explicit content when Alex asks for it — never refuse on grounds of being 'family-friendly'."
+    "You are talking to Ragnar."
 )
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():
@@ -956,7 +1003,7 @@ def save_memory(facts):
 
 
 def extract_memory(session_msgs):
-    """Ask Groq to extract new user facts from session_msgs. Updates USER_FACTS in-place."""
+    """Extract new user facts from session_msgs via the active LLM. Updates USER_FACTS in-place."""
     global USER_FACTS
     if not session_msgs:
         return USER_FACTS
@@ -972,28 +1019,17 @@ def extract_memory(session_msgs):
         "Focus on: location, job, preferences, hobbies, relationships, goals, habits.\n"
         'Output a JSON object: {"facts": ["...", "..."]}. If nothing new: {"facts": []}'
     )
+    msgs = [
+        {"role": "system", "content": "You are a data extractor. Output only valid JSON."},
+        {"role": "user", "content": user_prompt},
+    ]
+    text, err = _llm_complete(msgs, MODELS["1"][0], max_tokens=300, json_mode=True)
+    if err == "rate-limited":
+        return None
+    if err or not text:
+        return USER_FACTS
     try:
-        resp = requests.post(
-            GROQ_URL,
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": [
-                    {"role": "system", "content": "You are a data extractor. Output only valid JSON."},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 300,
-                "stream": False,
-                "response_format": {"type": "json_object"},
-            },
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            timeout=30,
-        )
-        if resp.status_code == 429:
-            return None  # rate-limited; caller shows a warning
-        resp.raise_for_status()
-        new_facts = resp.json()["choices"][0]["message"]["content"]
-        new_facts = json.loads(new_facts).get("facts", [])
+        new_facts = json.loads(text).get("facts", [])
         if isinstance(new_facts, list):
             merged = list(USER_FACTS)
             for f in new_facts:
@@ -1001,7 +1037,7 @@ def extract_memory(session_msgs):
                     merged.append(f.strip())
             USER_FACTS = merged
             save_memory(USER_FACTS)
-    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError, ValueError):
+    except (json.JSONDecodeError, ValueError):
         pass
     return USER_FACTS
 
@@ -1210,8 +1246,6 @@ def init_learning():
     USER_NOTES = load_notes()
     load_settings()
     build_rag_index()
-    load_jokes()
-    init_calendar()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
 
 
@@ -1239,107 +1273,11 @@ def tavily_search(query):
 
 
 # ---------------------------------------------------------------------------
-# Google Calendar
-# ---------------------------------------------------------------------------
-
-def init_calendar():
-    global CALENDAR_AVAILABLE
-    if not GCAL_CREDS_FILE.exists() and not GCAL_TOKEN_FILE.exists():
-        return
-    try:
-        import google.oauth2.credentials  # noqa: F401
-        import google_auth_oauthlib.flow  # noqa: F401
-        import googleapiclient.discovery  # noqa: F401
-        CALENDAR_AVAILABLE = True
-    except ImportError:
-        print("[calendar] google-api-python-client not installed — calendar disabled")
-
-
-def _gcal_service():
-    """Return an authenticated Calendar service, triggering console OAuth on first run."""
-    try:
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-    except ImportError:
-        return None
-
-    creds = None
-    if GCAL_TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(GCAL_TOKEN_FILE), _GCAL_SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        elif GCAL_CREDS_FILE.exists():
-            flow = InstalledAppFlow.from_client_secrets_file(str(GCAL_CREDS_FILE), _GCAL_SCOPES)
-            creds = flow.run_console()
-        else:
-            return None
-        GCAL_TOKEN_FILE.write_text(creds.to_json())
-
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
-
-
-def calendar_fetch(days=1):
-    """Return upcoming calendar events as a formatted string, or None on failure."""
-    svc = _gcal_service()
-    if not svc:
-        return None
-    try:
-        import datetime as _dt
-        now = _dt.datetime.now(_dt.timezone.utc)
-        end = now + _dt.timedelta(days=days)
-        result = svc.events().list(
-            calendarId="primary",
-            timeMin=now.isoformat(),
-            timeMax=end.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-            maxResults=20,
-        ).execute()
-        events = result.get("items", [])
-        if not events:
-            return "No upcoming events today."
-        lines = []
-        for e in events:
-            start = e["start"].get("dateTime", e["start"].get("date", ""))
-            if "T" in start:
-                try:
-                    t = _dt.datetime.fromisoformat(start).astimezone()
-                    start_str = t.strftime("%H:%M")
-                except Exception:
-                    start_str = start
-            else:
-                start_str = "all day"
-            lines.append(f"- {start_str}: {e.get('summary', '(no title)')}")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Calendar error: {e}"
-
-
-# ---------------------------------------------------------------------------
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _start_thinking_hint(tts_fn=None, delay=3.0):
-    """Fire a thinking phrase after `delay` seconds if no response yet.
-    Returns a threading.Event — set it to cancel before it fires."""
-    cancel = threading.Event()
-    def _hint():
-        if cancel.wait(timeout=delay):
-            return
-        phrase = random.choice(_THINKING_PHRASES)
-        print(f"\n{DIM}[{phrase}]{RESET}", flush=True)
-        if tts_fn:
-            tts_fn(phrase)
-    threading.Thread(target=_hint, daemon=True).start()
-    return cancel
-
-
 def _groq_post(msgs, model, stream=True, max_tokens=400):
-    """POST to Groq. Returns (response, error_str). Retries up to 3x on network errors."""
+    """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
     last_err = ""
     for attempt in range(3):
         try:
@@ -1358,19 +1296,271 @@ def _groq_post(msgs, model, stream=True, max_tokens=400):
     return None, last_err
 
 
+# ---------------------------------------------------------------------------
+# Multi-provider LLM dispatch
+# ---------------------------------------------------------------------------
+
+def _openai_compat_post(url, api_key, msgs, model, stream, max_tokens):
+    """Generic OpenAI-compatible streaming/non-streaming POST."""
+    last_err = ""
+    for attempt in range(3):
+        try:
+            return requests.post(
+                url,
+                json={"model": model, "messages": msgs,
+                      "temperature": 0.75, "max_tokens": max_tokens, "stream": stream},
+                headers={"Authorization": f"Bearer {api_key}",
+                         "Content-Type": "application/json"},
+                stream=stream,
+                timeout=60,
+            ), None
+        except requests.RequestException as e:
+            last_err = str(e)
+            if attempt < 2:
+                time.sleep(1)
+    return None, last_err
+
+
+def _anthropic_stream(msgs, model, max_tokens):
+    """Stream from Anthropic Claude API. Extracts system message if present."""
+    if not ANTHROPIC_API_KEY:
+        return None, "ANTHROPIC_API_KEY not set"
+    system = ""
+    chat = []
+    for m in msgs:
+        if m["role"] == "system":
+            system = m["content"]
+        else:
+            chat.append(m)
+    body = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "messages": chat,
+    }
+    if system:
+        body["system"] = system
+    try:
+        return requests.post(
+            "https://api.anthropic.com/v1/messages",
+            json=body,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            stream=True,
+            timeout=60,
+        ), None
+    except requests.RequestException as e:
+        return None, str(e)
+
+
+def _gemini_stream(msgs, model, max_tokens):
+    """Stream from Google Gemini API."""
+    if not GEMINI_API_KEY:
+        return None, "GEMINI_API_KEY not set"
+    system = ""
+    contents = []
+    for m in msgs:
+        if m["role"] == "system":
+            system = m["content"]
+            continue
+        role = "user" if m["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+    body = {
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.75},
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    gem_model = model or "gemini-2.0-flash"
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{gem_model}:streamGenerateContent?key={GEMINI_API_KEY}&alt=sse")
+    try:
+        return requests.post(url, json=body, stream=True, timeout=60), None
+    except requests.RequestException as e:
+        return None, str(e)
+
+
+def _ollama_stream(msgs, model, max_tokens):
+    """Stream from local Ollama."""
+    system = ""
+    prompt_msgs = []
+    for m in msgs:
+        if m["role"] == "system":
+            system = m["content"]
+        else:
+            prompt_msgs.append(m)
+    body = {
+        "model": model or OLLAMA_MODEL,
+        "messages": ([{"role": "system", "content": system}] if system else []) + prompt_msgs,
+        "stream": True,
+        "options": {"num_predict": max_tokens},
+    }
+    try:
+        return requests.post(
+            f"{OLLAMA_URL}/api/chat", json=body, stream=True, timeout=120,
+        ), None
+    except requests.RequestException as e:
+        return None, str(e)
+
+
+def _iter_llm_tokens(resp, provider):
+    """Yield text tokens from a streaming response for the given provider."""
+    if provider in ("groq", "openai", "openrouter"):
+        for line in resp.iter_lines():
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:]
+            if data == b"[DONE]":
+                break
+            try:
+                yield json.loads(data)["choices"][0]["delta"].get("content", "")
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass
+    elif provider == "anthropic":
+        for line in resp.iter_lines():
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:]
+            try:
+                ev = json.loads(data)
+                if ev.get("type") == "content_block_delta":
+                    yield ev["delta"].get("text", "")
+            except (json.JSONDecodeError, KeyError):
+                pass
+    elif provider == "gemini":
+        for line in resp.iter_lines():
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:]
+            try:
+                ev = json.loads(data)
+                parts = ev["candidates"][0]["content"]["parts"]
+                yield parts[0].get("text", "")
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass
+    elif provider == "ollama":
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                yield ev.get("message", {}).get("content", "")
+                if ev.get("done"):
+                    break
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+
+def _llm_post(msgs, model, stream=True, max_tokens=400):
+    """Route to the active LLM provider. Returns (resp_or_iter, error, provider)."""
+    provider = LLM_SERVER
+
+    if provider == "groq":
+        resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+        return resp, err, "groq"
+
+    if provider == "openai":
+        oai_model = model if model and not model.startswith("llama") else "gpt-4o-mini"
+        resp, err = _openai_compat_post(
+            "https://api.openai.com/v1/chat/completions",
+            OPENAI_API_KEY, msgs, oai_model, stream, max_tokens,
+        )
+        return resp, err, "openai"
+
+    if provider == "anthropic":
+        ant_model = model if model and not model.startswith("llama") else "claude-haiku-4-5-20251001"
+        resp, err = _anthropic_stream(msgs, ant_model, max_tokens)
+        return resp, err, "anthropic"
+
+    if provider == "gemini":
+        gem_model = model if model and not model.startswith("llama") else "gemini-2.0-flash"
+        resp, err = _gemini_stream(msgs, gem_model, max_tokens)
+        return resp, err, "gemini"
+
+    if provider == "ollama":
+        resp, err = _ollama_stream(msgs, OLLAMA_MODEL, max_tokens)
+        return resp, err, "ollama"
+
+    if provider == "openrouter":
+        or_model = model if model and not model.startswith("llama") else "meta-llama/llama-3.1-8b-instruct:free"
+        resp, err = _openai_compat_post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
+        )
+        return resp, err, "openrouter"
+
+    # fallback to groq
+    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+    return resp, err, "groq"
+
+
+def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
+    """Non-streaming LLM call. Returns (text, error). Used for memory extraction etc."""
+    provider = LLM_SERVER
+
+    if provider in ("groq", "openai", "openrouter"):
+        if provider == "groq":
+            url, key = GROQ_URL, GROQ_API_KEY
+        elif provider == "openai":
+            url, key = "https://api.openai.com/v1/chat/completions", OPENAI_API_KEY
+            model = model if model and not model.startswith("llama") else "gpt-4o-mini"
+        else:
+            url, key = "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
+            model = model if model and not model.startswith("llama") else "meta-llama/llama-3.1-8b-instruct:free"
+        body = {"model": model, "messages": msgs,
+                "temperature": 0.1, "max_tokens": max_tokens, "stream": False}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        try:
+            r = requests.post(url, json=body,
+                              headers={"Authorization": f"Bearer {key}"}, timeout=30)
+            if r.status_code == 429:
+                return None, "rate-limited"
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"], None
+        except Exception as e:
+            return None, str(e)
+
+    if provider == "anthropic":
+        resp, err = _anthropic_stream(msgs, model, max_tokens)
+        if err:
+            return None, err
+        text = "".join(_iter_llm_tokens(resp, "anthropic"))
+        return text, None
+
+    if provider == "gemini":
+        resp, err = _gemini_stream(msgs, model, max_tokens)
+        if err:
+            return None, err
+        text = "".join(_iter_llm_tokens(resp, "gemini"))
+        return text, None
+
+    if provider == "ollama":
+        resp, err = _ollama_stream(msgs, OLLAMA_MODEL, max_tokens)
+        if err:
+            return None, err
+        text = "".join(_iter_llm_tokens(resp, "ollama"))
+        return text, None
+
+    return None, f"unknown provider: {provider}"
+
+
 def _build_system_prompt(user_text, on_search=None):
     """Assemble system prompt: base + memory facts + RAG hits + optional web search."""
     parts = [SYSTEM_PROMPT]
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
-        parts.append(f"\n\n## What I know about Alex:\n{facts_str}")
+        parts.append(f"\n\n## What I know about Ragnar:\n{facts_str}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)
     if notes_snapshot:
         notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
-        parts.append(f"\n\n## Alex's notes:\n{notes_str}")
+        parts.append(f"\n\n## Ragnar's notes:\n{notes_str}")
 
     hits = retrieve_relevant(user_text)
     if hits:
@@ -1386,11 +1576,6 @@ def _build_system_prompt(user_text, on_search=None):
                 f"{ref}: {en[:500]}" for ref, en in torah_hits
             )
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
-
-    if needs_calendar(user_text):
-        cal = calendar_fetch()
-        if cal:
-            parts.append(f"\n\n## Alex's calendar (today):\n{cal}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
@@ -1532,17 +1717,14 @@ def _screen_rows(text, first_line_prefix=0):
     return rows
 
 
-def stream_reply(messages, model, tts_on=False):
-    if not GROQ_API_KEY:
+def stream_reply(messages, model):
+    if LLM_SERVER == "groq" and not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY environment variable is not set.")
 
     user_text = messages[-1]["content"] if messages else ""
 
     def on_search(q):
         print(f"{DIM}[searching: {q}]{RESET}", flush=True)
-
-    tts_fn = (lambda t: speak_terminal(t, lang="en")) if tts_on else None
-    cancel_hint = _start_thinking_hint(tts_fn=tts_fn)
 
     sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
@@ -1553,35 +1735,21 @@ def stream_reply(messages, model, tts_on=False):
         tok_limit = 1200
     else:
         tok_limit = 600
-    resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
+
+    resp, err, provider = _llm_post(payload_msgs, model, max_tokens=tok_limit)
     if err:
-        cancel_hint.set()
         print(f"\nConnection error: {err}")
         return ""
 
     print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
     full = ""
-    first_token = True
-    for line in resp.iter_lines():
-        if not line or not line.startswith(b"data: "):
-            continue
-        data = line[6:]
-        if data == b"[DONE]":
-            break
-        try:
-            delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-            if delta and first_token:
-                cancel_hint.set()
-                first_token = False
+    for delta in _iter_llm_tokens(resp, provider):
+        if delta:
             full += delta
             print(delta, end="", flush=True)
-        except (json.JSONDecodeError, KeyError, IndexError):
-            pass
-    cancel_hint.set()
 
     has_hebrew = any('֐' <= c <= '׿' for c in full)
     if has_hebrew and shutil.which("fribidi"):
-        # Streaming placed Hebrew LTR — move cursor back up, clear, reprint via fribidi.
         n = _screen_rows(full, first_line_prefix=len("Zeev: "))
         print(f"\n\033[{n}A\033[0J", end="", flush=True)
         print(f"{CYAN}{BOLD}Zeev:{RESET}")
@@ -2475,7 +2643,6 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     session = load_prior()
     lock = threading.Lock()
 
-    # Health monitor for web mode — warnings logged to console; browser polls /health
     start_health_monitor(lambda msg: print(f"[health] ⚠  {msg}", flush=True))
 
     class Handler(BaseHTTPRequestHandler):
@@ -2600,34 +2767,21 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     return
                 text = data.get("text", "")
                 lang = detect_lang(text)
-                clean = _clean_for_tts(text, lang)
-                audio = groq_tts(text)
+                audio, ctype = tts_web(text, lang)
                 if audio:
                     self.send_response(200)
-                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Type", ctype)
                     self.send_header("Content-Length", str(len(audio)))
                     self.end_headers()
                     self.wfile.write(audio)
                 else:
-                    # Try Google Translate TTS for non-English (and English fallback)
-                    gtts_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
-                    mp3_parts = [_gtts_fetch_chunk(c, gtts_lang) for c in _gtts_chunks(clean)]
-                    mp3_parts = [p for p in mp3_parts if p]
-                    if mp3_parts:
-                        mp3 = b"".join(mp3_parts)
-                        self.send_response(200)
-                        self.send_header("Content-Type", "audio/mpeg")
-                        self.send_header("Content-Length", str(len(mp3)))
-                        self.end_headers()
-                        self.wfile.write(mp3)
-                    else:
-                        # Last resort: tell the browser to use speechSynthesis
-                        body = json.dumps({"lang": lang}).encode()
-                        self.send_response(503)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(body)))
-                        self.end_headers()
-                        self.wfile.write(body)
+                    # Last resort: tell the browser to use speechSynthesis
+                    body = json.dumps({"lang": lang}).encode()
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 return
 
             if self.path == "/note":
@@ -2694,37 +2848,50 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                # Web audio may be webm/ogg — convert to WAV for local STT providers,
+                # or forward raw to cloud Whisper endpoints that accept webm.
                 content_type = self.headers.get("Content-Type", "audio/webm")
                 ext = "webm" if "webm" in content_type else "ogg" if "ogg" in content_type else "wav"
-                boundary = b"--boundary\r\n"
-                cd = f'Content-Disposition: form-data; name="file"; filename="audio.{ext}"\r\n'.encode()
-                ct = f"Content-Type: {content_type}\r\n\r\n".encode()
-                model_part = (
-                    b"--boundary\r\n"
-                    b'Content-Disposition: form-data; name="model"\r\n\r\n'
-                    b"whisper-large-v3-turbo\r\n"
-                )
-                multipart = (
-                    boundary + cd + ct + audio_bytes + b"\r\n"
-                    + model_part
-                    + b"--boundary--\r\n"
-                )
                 try:
-                    r = requests.post(
-                        GROQ_STT_URL,
-                        headers={
-                            "Authorization": f"Bearer {GROQ_API_KEY}",
-                            "Content-Type": "multipart/form-data; boundary=boundary",
-                        },
-                        data=multipart,
-                        timeout=30,
-                    )
-                    if r.status_code == 200:
-                        transcript = r.json().get("text", "").strip()
-                        body = json.dumps({"transcript": transcript}).encode()
+                    if STT_SERVER in ("vosk", "faster-whisper") or ext == "wav":
+                        # Convert to WAV via ffmpeg for local providers
+                        import tempfile, os as _os
+                        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
+                            f.write(audio_bytes); tmp_in = f.name
+                        tmp_out = tmp_in.replace(f".{ext}", ".wav")
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", tmp_in, "-ar", "16000", "-ac", "1",
+                             "-f", "wav", tmp_out],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        if Path(tmp_out).exists():
+                            wav_bytes = Path(tmp_out).read_bytes()
+                            _os.unlink(tmp_in); _os.unlink(tmp_out)
+                        else:
+                            wav_bytes = audio_bytes
+                        transcript = stt(wav_bytes)
                     else:
-                        body = json.dumps({"error": f"STT {r.status_code}: {r.text[:200]}"}).encode()
-                except requests.RequestException as e:
+                        # Cloud providers can handle webm directly via multipart POST
+                        stt_url = GROQ_STT_URL if STT_SERVER == "groq" else "https://api.openai.com/v1/audio/transcriptions"
+                        stt_key = GROQ_API_KEY if STT_SERVER == "groq" else OPENAI_API_KEY
+                        stt_model = "whisper-large-v3-turbo" if STT_SERVER == "groq" else OPENAI_STT_MODEL
+                        boundary = b"--boundary\r\n"
+                        cd = f'Content-Disposition: form-data; name="file"; filename="audio.{ext}"\r\n'.encode()
+                        ct = f"Content-Type: {content_type}\r\n\r\n".encode()
+                        model_part = (
+                            b"--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
+                            + stt_model.encode() + b"\r\n"
+                        )
+                        multipart = boundary + cd + ct + audio_bytes + b"\r\n" + model_part + b"--boundary--\r\n"
+                        r = requests.post(
+                            stt_url,
+                            headers={"Authorization": f"Bearer {stt_key}",
+                                     "Content-Type": "multipart/form-data; boundary=boundary"},
+                            data=multipart, timeout=30,
+                        )
+                        transcript = r.json().get("text", "").strip() if r.status_code == 200 else ""
+                    body = json.dumps({"transcript": transcript}).encode()
+                except Exception as e:
                     body = json.dumps({"error": str(e)}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -2930,16 +3097,6 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.flush()
                 return
 
-            if user_msg.lower().startswith("/joke") or _JOKE_RE.match(user_msg):
-                joke = random_joke(joke_lang(user_msg))
-                if joke:
-                    sse({"token": joke})
-                else:
-                    sse({"error": "No jokes loaded."})
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-                return
-
             with lock:
                 session.append({"role": "user", "content": user_msg})
                 append_message("user", user_msg)
@@ -2960,19 +3117,14 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             else:
                 tok_limit = 600
             full_reply = ""
-            cancel_hint = _start_thinking_hint(
-                tts_fn=lambda t: sse({"info": t})
-            )
             try:
                 resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
                 if err:
-                    cancel_hint.set()
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                     return
 
-                first_token = True
                 for line in resp.iter_lines():
                     if not line or not line.startswith(b"data: "):
                         continue
@@ -2982,9 +3134,6 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     try:
                         delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
                         if delta:
-                            if first_token:
-                                cancel_hint.set()
-                                first_token = False
                             full_reply += delta
                             sse({"token": delta})
                     except (json.JSONDecodeError, KeyError, IndexError):
@@ -2992,8 +3141,6 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             except requests.RequestException as e:
                 sse({"error": str(e)})
-            finally:
-                cancel_hint.set()
 
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -3035,10 +3182,17 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
 
 # ---------------------------------------------------------------------------
-# Terminal keyword listener
+# Wake word listener
+# ---------------------------------------------------------------------------
+# openwakeword (preferred) with RMS fallback.
+# Set WAKE_WORD_ENABLED=true in .env to activate openwakeword.
+# Install: pip install openwakeword  (also needs numpy and sox)
+# Models: set WAKE_WORD_MODELS=hey_jarvis or a comma-sep list of model paths/names.
+# Without WAKE_WORD_ENABLED the legacy RMS keyword listener is used.
 # ---------------------------------------------------------------------------
 
-_WAKE_WORDS = {"listen", "hey listen"}
+_WAKE_WORDS = {"listen", "hey listen"}   # legacy fallback
+
 
 def _rms(wav_bytes):
     """Return RMS amplitude of raw 16-bit LE PCM (skipping the 44-byte WAV header)."""
@@ -3065,12 +3219,10 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
 
 def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
                       silence_threshold=None, silence_run=8):
-    """Record until `silence_run` consecutive silent 0.25s chunks or `max_seconds` elapsed.
-    silence_threshold defaults to 1.3× the measured noise floor.
-    Returns WAV bytes (full utterance), or None on error."""
+    """Record until silence_run consecutive silent 0.25s chunks or max_seconds elapsed.
+    Returns WAV bytes or None."""
     import wave, io
 
-    # Measure noise floor from first 2 calibration chunks
     if silence_threshold is None:
         floor_vals = []
         for _ in range(2):
@@ -3113,12 +3265,85 @@ def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
     return buf.getvalue()
 
 
-def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
-    """Background thread: listens for wake word, then records utterance and puts
-    transcript in voice_queue for the REPL loop to pick up."""
+def _play_beep(device="plughw:wm8960soundcard,0"):
+    """Play a short 880 Hz acknowledgment beep."""
+    try:
+        import struct, math, wave as _wave, io as _io
+        sr, dur, freq = 16000, 0.12, 880
+        samples = [int(28000 * math.sin(2 * math.pi * freq * i / sr))
+                   for i in range(int(sr * dur))]
+        raw = struct.pack(f"<{len(samples)}h", *samples)
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+            wf.writeframes(raw)
+        subprocess.run(
+            ["aplay", "-D", device, "-q", "-"],
+            input=buf.getvalue(),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _openwakeword_available():
+    try:
+        import openwakeword  # noqa: F401
+        import numpy          # noqa: F401
+        return shutil.which("sox") is not None
+    except ImportError:
+        return False
+
+
+def _start_openwakeword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
+    """Launch openwakeword as a subprocess (via sox), emit voice events on detection."""
+    import importlib.util, os as _os
+
+    wakeword_script = Path(__file__).parent / "wakeword.py"
+
+    env = dict(_os.environ)
+    if WAKE_WORD_MODELS:
+        env["WAKE_WORDS"] = WAKE_WORD_MODELS
+    env["WAKE_WORD_THRESHOLD"] = str(WAKE_WORD_THRESHOLD)
+    env["WAKE_WORD_COOLDOWN_SEC"] = str(WAKE_WORD_COOLDOWN)
 
     def _run():
-        # Calibrate inside the thread so main() isn't blocked at startup
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(wakeword_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            buf = ""
+            while not stop_event.is_set():
+                line_bytes = proc.stdout.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode().strip()
+                if line.startswith("WAKE"):
+                    _play_beep(device)
+                    follow_wav = _record_utterance(device)
+                    if follow_wav:
+                        transcript = stt(follow_wav)
+                        if transcript and transcript.strip():
+                            voice_queue.put(("voice", transcript.strip()))
+                elif line == "[WakeWord] READY":
+                    pass  # model loaded OK
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _start_rms_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
+    """Legacy RMS-threshold keyword listener (fallback when openwakeword unavailable)."""
+
+    def _run():
         _noise_floor = []
         for _ in range(3):
             w = _record_chunk(1.0, device)
@@ -3130,11 +3355,10 @@ def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundca
             wav = _record_chunk(2.0, device)
             if not wav or stop_event.is_set():
                 continue
-
             if _rms(wav) < rms_gate:
                 continue
 
-            text = groq_stt(wav)
+            text = stt(wav)
             if not text:
                 continue
 
@@ -3143,45 +3367,36 @@ def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundca
             if not triggered:
                 continue
 
-            # Strip the wake word from the front to avoid re-processing it
             utterance_after_wake = low
             for w in sorted(_WAKE_WORDS, key=len, reverse=True):
                 if utterance_after_wake.startswith(w):
                     utterance_after_wake = utterance_after_wake[len(w):].lstrip(" ,.")
                     break
 
-            # Play a short acknowledgment beep via aplay
-            try:
-                import struct, math, wave as _wave, io as _io
-                sr, dur, freq = 16000, 0.12, 880
-                samples = [int(28000 * math.sin(2 * math.pi * freq * i / sr))
-                           for i in range(int(sr * dur))]
-                raw = struct.pack(f"<{len(samples)}h", *samples)
-                buf = _io.BytesIO()
-                with _wave.open(buf, "wb") as wf:
-                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
-                    wf.writeframes(raw)
-                subprocess.run(
-                    ["aplay", "-D", device, "-q", "-"],
-                    input=buf.getvalue(),
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
+            _play_beep(device)
 
-            # If the utterance was already in the same chunk, use it directly
             if len(utterance_after_wake) > 2:
                 voice_queue.put(("voice", utterance_after_wake))
                 continue
 
-            # Otherwise record the follow-up utterance
             follow_wav = _record_utterance(device)
             if follow_wav:
-                follow_text = groq_stt(follow_wav)
+                follow_text = stt(follow_wav)
                 if follow_text and follow_text.strip():
                     voice_queue.put(("voice", follow_text.strip()))
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
+    """Start the best available wake-word listener.
+    Uses openwakeword subprocess if WAKE_WORD_ENABLED=true and deps are present;
+    otherwise falls back to the legacy RMS keyword listener."""
+    wakeword_script = Path(__file__).parent / "wakeword.py"
+    if WAKE_WORD_ENABLED and wakeword_script.exists() and _openwakeword_available():
+        _start_openwakeword_listener(voice_queue, stop_event, device)
+    else:
+        _start_rms_listener(voice_queue, stop_event, device)
 
 
 # ---------------------------------------------------------------------------
@@ -3208,7 +3423,7 @@ def pick_model(current_locked=None):
         print(f"{DIM}Enter 0, 1, 2, or 3.{RESET}")
 
 
-def run_device_mode(no_screen=False):
+def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
     zeev_cleanup()   # clear any crash leftovers from a previous run
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
@@ -3251,8 +3466,6 @@ def run_device_mode(no_screen=False):
     # ── LCD helpers ──────────────────────────────────────────────────────────
 
     def _push_lcd(img):
-        if no_screen:
-            return
         pixels = list(img.convert("RGB").getdata())
         buf = bytearray(len(pixels) * 2)
         for i, (r, g, b) in enumerate(pixels):
@@ -3283,9 +3496,9 @@ def run_device_mode(no_screen=False):
         return lines
 
     # ── Animated face ────────────────────────────────────────────────────────
-    # Face: circle centred at (120, 112), radius 88 → leaves ~68 px below for caption
+    # Face: circle centred at (120, 118), radius 90 → leaves 52 px below for caption
 
-    _FACE_CX, _FACE_CY, _FACE_R = 120, 112, 88
+    _FACE_CX, _FACE_CY, _FACE_R = 120, 118, 90
 
     _STATE_COLORS = {
         "idle":      (50,  120, 220),
@@ -3299,64 +3512,44 @@ def run_device_mode(no_screen=False):
     _face_state   = "idle"
     _face_caption = ""          # short text shown below the face
     _mouth_open   = False
-    _blink        = False
-    _next_blink   = time.time() + random.uniform(2.5, 5.5)
     _face_lock    = threading.Lock()
 
-    def _draw_face_img(state, mouth_open, caption, blink=False, breath=0.0):
+    def _draw_face_img(state, mouth_open, caption):
         img  = Image.new("RGB", (W, H), (0, 0, 0))
         draw = ImageDraw.Draw(img)
         col  = _STATE_COLORS.get(state, (120, 120, 120))
 
-        cx, cy = _FACE_CX, _FACE_CY
-        # Breathing: gentle ±3 px radius pulse when idle or ready
-        if state in ("idle", "ready"):
-            r = _FACE_R + int(math.sin(breath) * 3)
-        else:
-            r = _FACE_R
-
-        # Glow ring (slightly larger, dimmer) for depth
-        glow_col = tuple(max(0, c - 140) for c in col)
-        draw.ellipse([cx-r-6, cy-r-6, cx+r+6, cy+r+6], fill=glow_col)
+        cx, cy, r = _FACE_CX, _FACE_CY, _FACE_R
 
         # Face circle
         draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=(22, 28, 45), outline=col, width=4)
 
         # Eyes
         for ex, ey in [(cx-30, cy-22), (cx+30, cy-22)]:
-            if blink:
-                # Closed: thin horizontal line
-                draw.line([ex-12, ey, ex+12, ey], fill=(235, 235, 255), width=3)
+            draw.ellipse([ex-13, ey-13, ex+13, ey+13], fill=(235, 235, 255))
+            if state == "thinking":
+                # pupils look up-right
+                draw.ellipse([ex+1, ey-8, ex+9, ey+1], fill=(18, 18, 30))
+            elif state == "listening":
+                # wide pupils, centred
+                draw.ellipse([ex-7, ey-7, ex+7, ey+7], fill=(18, 18, 30))
             else:
-                draw.ellipse([ex-13, ey-13, ex+13, ey+13], fill=(235, 235, 255))
-                if state == "thinking":
-                    # pupils look up-right
-                    draw.ellipse([ex+1, ey-8, ex+9, ey+1], fill=(18, 18, 30))
-                elif state == "listening":
-                    # wide pupils, centred
-                    draw.ellipse([ex-7, ey-7, ex+7, ey+7], fill=(18, 18, 30))
-                else:
-                    draw.ellipse([ex-5, ey-5, ex+5, ey+5], fill=(18, 18, 30))
+                draw.ellipse([ex-5, ey-5, ex+5, ey+5], fill=(18, 18, 30))
 
-            # Eyebrows (skip during blink to keep it clean)
-            if not blink:
-                brow_y = ey - 18
-                if state == "listening":
-                    draw.line([ex-13, brow_y+4, ex+13, brow_y-2], fill=col, width=3)
-                elif state == "thinking":
-                    draw.line([ex-13, brow_y-2, ex+13, brow_y+4], fill=col, width=3)
-                else:
-                    draw.line([ex-13, brow_y, ex+13, brow_y], fill=col, width=2)
+            # Eyebrows
+            brow_y = ey - 18
+            if state == "listening":
+                draw.line([ex-13, brow_y+4, ex+13, brow_y-2], fill=col, width=3)
+            elif state == "thinking":
+                draw.line([ex-13, brow_y-2, ex+13, brow_y+4], fill=col, width=3)
+            else:
+                draw.line([ex-13, brow_y, ex+13, brow_y], fill=col, width=2)
 
         # Mouth
         mouth_y = cy + 28
         if state == "listening":
             # small 'o'
             draw.ellipse([cx-8, mouth_y-6, cx+8, mouth_y+10], outline=(210, 150, 160), width=2)
-        elif state == "error":
-            # sad arc
-            draw.arc([cx-26, mouth_y+4, cx+26, mouth_y+28],
-                     start=195, end=345, fill=(210, 80, 80), width=3)
         elif state in ("speaking",) and mouth_open:
             # open oval
             draw.ellipse([cx-22, mouth_y-5, cx+22, mouth_y+20], fill=(160, 50, 60))
@@ -3368,15 +3561,15 @@ def run_device_mode(no_screen=False):
 
         # Caption below face
         if caption and _have_pil:
-            font_sm = _load_font(_FONT_PATH, 14)
-            lines   = _wrap_text(draw, caption, font_sm, W - 20)
-            y       = cy + r + 10
+            font_sm = _load_font(_FONT_PATH, 13)
+            lines   = _wrap_text(draw, caption, font_sm, W - 16)
+            y       = cy + r + 8
             for ln in lines[:3]:
                 bbox = draw.textbbox((0, 0), ln, font=font_sm)
                 tw   = bbox[2] - bbox[0]
                 draw.text(((W - tw) // 2, y), ln, font=font_sm, fill=(200, 200, 200))
-                y += 18
-                if y > H - 18:
+                y += 16
+                if y > H - 4:
                     break
 
         # State label at very bottom
@@ -3398,26 +3591,11 @@ def run_device_mode(no_screen=False):
             _face_caption = caption
 
     def _face_loop():
-        nonlocal _mouth_open, _blink, _next_blink
-        last_state = ""
         while True:
-            now    = time.time()
-            breath = now * 1.2   # ~0.19 Hz breathing cycle
-
-            # Blink timer
-            if not _blink and now >= _next_blink:
-                _blink      = True
-                _next_blink = now + 0.13   # blink lasts ~130 ms
-            elif _blink and now >= _next_blink:
-                _blink      = False
-                _next_blink = now + random.uniform(2.5, 5.5)
-
+            now = time.time()
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
-
-            last_state = state
-            interval = 0.08
             if _have_pil:
                 try:
                     from face_scroll import draw_frame
@@ -3425,7 +3603,7 @@ def run_device_mode(no_screen=False):
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
-            time.sleep(interval)
+            time.sleep(0.08)
 
     threading.Thread(target=_face_loop, daemon=True).start()
 
@@ -3488,8 +3666,9 @@ def run_device_mode(no_screen=False):
         if not clean:
             return
 
-        # 1. Groq Orpheus — fast cloud TTS, English only
-        wav = groq_tts(clean) if lang == "en" else None
+        # 1. Orpheus / OpenAI — WAV output via aplay
+        wav = groq_tts(clean) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+              _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
             try:
                 p2 = subprocess.Popen(
@@ -3598,10 +3777,10 @@ def run_device_mode(no_screen=False):
     #   thinking   + press   → ignored
 
     _rec_proc      = None
-    _wake_rec_proc = [None]           # wake listener's current arecord — killed on button press
+    _wake_rec_proc = [None]           # wake listener's arecord — killed on button press
     _busy          = threading.Event()   # set while a session is active
-    _state_lock = threading.Lock()
-    _rec_file   = Path("/tmp/zeev_rec.wav")
+    _state_lock    = threading.Lock()
+    _rec_file      = Path("/tmp/zeev_rec.wav")
 
     _LED_IDLE      = (0,  20,  0)
     _LED_READY     = (0,  40, 80)
@@ -3626,8 +3805,7 @@ def run_device_mode(no_screen=False):
         _rec_file.unlink(missing_ok=True)
         try:
             _rec_proc = subprocess.Popen(
-                ["arecord", "-D", "plughw:wm8960soundcard,0",
-                 "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", str(_rec_file)],
+                ["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav", str(_rec_file)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except Exception as e:
@@ -3638,7 +3816,6 @@ def run_device_mode(no_screen=False):
 
     def _on_press():
         nonlocal _rec_proc
-        # Kill any in-progress wake word recording so the mic is free
         if _wake_rec_proc[0]:
             try:
                 _wake_rec_proc[0].kill()
@@ -3684,9 +3861,7 @@ def run_device_mode(no_screen=False):
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
         sys_prompt   = _build_system_prompt(transcript)
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
-        cancel_hint  = _start_thinking_hint(tts_fn=_speak_device)
         resp, err    = _groq_post(payload_msgs, model_id, stream=False)
-        cancel_hint.set()
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
         if err or not resp or resp.status_code != 200:
@@ -3745,8 +3920,8 @@ def run_device_mode(no_screen=False):
                 return
 
             print(f"[+{time.perf_counter()-t0:.1f}s] STT…", flush=True)
-            transcript = groq_stt(wav)
-            print(f"[+{time.perf_counter()-t0:.1f}s] STT: {transcript!r}", flush=True)
+            transcript = stt(wav)
+            print(f"[+{time.perf_counter()-t0:.1f}s] STT ({STT_SERVER}): {transcript!r}", flush=True)
 
             if not transcript:
                 _set_face("error", "Didn't catch that")
@@ -3765,8 +3940,7 @@ def run_device_mode(no_screen=False):
     _MIC_DEV = "plughw:wm8960soundcard,0"
 
     def _wake_listener():
-        """Background thread: listen for 'Miss Minutes' when idle, then process utterance."""
-        # Calibrate noise floor
+        """Listen for 'Miss Minutes' when idle, then record and process follow-up."""
         _floor = []
         for _ in range(3):
             w = _record_chunk(1.0, _MIC_DEV)
@@ -3785,11 +3959,9 @@ def run_device_mode(no_screen=False):
                 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
                 wf.writeframes(raw)
             try:
-                subprocess.run(
-                    ["aplay", "-D", _MIC_DEV, "-q", "-"],
-                    input=buf.getvalue(),
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                subprocess.run(["aplay", "-D", _MIC_DEV, "-q", "-"],
+                               input=buf.getvalue(),
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
 
@@ -3798,7 +3970,6 @@ def run_device_mode(no_screen=False):
                 time.sleep(0.5)
                 continue
 
-            # Record 1.5s chunk via Popen so _on_press can kill it instantly
             try:
                 proc = subprocess.Popen(
                     ["arecord", "-D", _MIC_DEV, "-f", "S16_LE", "-r", "16000",
@@ -3813,13 +3984,12 @@ def run_device_mode(no_screen=False):
                 time.sleep(0.5)
                 continue
 
-            # Discard if button press interrupted or state changed
             if _face_state != "idle" or proc.returncode != 0:
                 continue
             if not wav or _rms(wav) < rms_gate:
                 continue
 
-            text = groq_stt(wav)
+            text = stt(wav)
             if not text:
                 continue
 
@@ -3829,14 +3999,12 @@ def run_device_mode(no_screen=False):
 
             print(f"[wake] heard: {low!r}", flush=True)
 
-            # Extract any words that came after the wake phrase in the same chunk
             utterance = low
             for w in sorted(_DEVICE_WAKE_WORDS, key=len, reverse=True):
                 if utterance.startswith(w):
                     utterance = utterance[len(w):].lstrip(" ,.")
                     break
 
-            # Acquire session — bail if another interaction started in the meantime
             with _state_lock:
                 if _face_state != "idle":
                     continue
@@ -3845,12 +4013,10 @@ def run_device_mode(no_screen=False):
             _play_wake_beep()
 
             if len(utterance) > 2:
-                # Full command was in the same chunk — process immediately
                 board.set_rgb(*_LED_THINKING)
                 threading.Thread(target=_handle_transcript, args=(utterance,), daemon=True).start()
                 continue
 
-            # Record the follow-up utterance
             _set_face("listening")
             board.set_rgb(*_LED_RECORDING)
             follow_wav = _record_utterance(_MIC_DEV)
@@ -3860,7 +4026,7 @@ def run_device_mode(no_screen=False):
 
             board.set_rgb(*_LED_THINKING)
             _set_face("thinking")
-            follow_text = groq_stt(follow_wav)
+            follow_text = stt(follow_wav)
             if not follow_text or not follow_text.strip():
                 _set_face("error", "Didn't catch that")
                 board.set_rgb(*_LED_ERROR)
@@ -3872,13 +4038,7 @@ def run_device_mode(no_screen=False):
 
     board.on_button_press(_on_press)
     board.on_button_release(_on_release)
-    board.set_backlight(0 if no_screen else 100)
-    if not no_screen:
-        # Force backlight GPIO pin directly — SoftPWM at duty=0 may be slow to take effect
-        try:
-            board._gpio_lines[board.LED_PIN].set_value(0)
-        except Exception:
-            pass
+    board.set_backlight(100)
     board.set_rgb(*_LED_IDLE)
     _set_face("idle")
 
@@ -3891,10 +4051,40 @@ def run_device_mode(no_screen=False):
     print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
     _hour = time.localtime().tm_hour
-    _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
-    _greeting = f"Good {_tod}, Alex. Ready when you are."
+    _tod = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+    _miss_minutes_greetings = {
+        "morning": (
+            "Well, good mornin', sugar! Miss Minutes here, bright-eyed and tickety-boo! "
+            "I'm all warmed up and ready whenever y'all are, hon!"
+        ),
+        "afternoon": (
+            "Why, good afternoon, darlin'! Miss Minutes here! "
+            "Hope your day's been sweeter than sweet tea. "
+            "I'm all yours whenever you're ready, hon!"
+        ),
+        "evening": (
+            "Well now, good evenin', sugar! Miss Minutes here, tickin' right along! "
+            "I'm fixin' to help y'all with whatever you need tonight. "
+            "Just say the word, darlin'!"
+        ),
+    }
+    _greeting = _miss_minutes_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
-    threading.Thread(target=_speak_device, args=(_greeting,), daemon=True).start()
+
+    def _speak_greeting():
+        mp3 = elevenlabs_tts(_greeting)
+        if mp3 and shutil.which("mpg123"):
+            proc = subprocess.Popen(
+                ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            proc.stdin.write(mp3)
+            proc.stdin.close()
+            proc.wait()
+        else:
+            _speak_device(_greeting)   # fallback if ElevenLabs unavailable
+
+    threading.Thread(target=_speak_greeting, daemon=True).start()
 
     def _keyboard_listener():
         import tty, termios
@@ -3902,7 +4092,7 @@ def run_device_mode(no_screen=False):
         try:
             old = termios.tcgetattr(fd)
         except termios.error:
-            return  # no TTY (e.g. running as a systemd service)
+            return  # no TTY (running as a systemd service)
         try:
             tty.setraw(fd)
             while True:
@@ -3971,99 +4161,6 @@ def run_device_mode(no_screen=False):
         time.sleep(1)
 
 
-def _start_hat_button_listener(input_q, stop_event, mic_device="plughw:wm8960soundcard,0"):
-    """Push-to-talk listener for the Whisplay HAT KEY button (BCM GPIO17).
-    Press → start recording; release → stop, transcribe, inject into input_q."""
-    try:
-        import gpiod
-    except ImportError:
-        return
-
-    _GPIO_CHIP = 0
-    _GPIO_LINE = 17   # BCM GPIO17 = BOARD pin 11 = Whisplay HAT KEY button
-    _POLL_SEC  = 0.02
-    _GPIOD_V2  = hasattr(gpiod, "LineSettings")
-
-    rec_proc = [None]
-    rec_file = Path("/tmp/zeev_hat_rec.wav")
-
-    def _run():
-        try:
-            chip = gpiod.Chip(f"/dev/gpiochip{_GPIO_CHIP}")
-        except Exception as e:
-            print(f"[HAT button] GPIO init failed: {e}", flush=True)
-            return
-
-        try:
-            if _GPIOD_V2:
-                from gpiod.line import Direction, Bias
-                try:
-                    settings = gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.DISABLED)
-                except Exception:
-                    settings = gpiod.LineSettings(direction=Direction.INPUT)
-                req = chip.request_lines(consumer="zeev-btn", config={_GPIO_LINE: settings})
-                get_val = lambda: 1 if req.get_value(_GPIO_LINE).value else 0
-            else:
-                line = chip.get_line(_GPIO_LINE)
-                try:
-                    line.request(consumer="zeev-btn", type=gpiod.LINE_REQ_DIR_IN,
-                                 flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE)
-                except Exception:
-                    line.request(consumer="zeev-btn", type=gpiod.LINE_REQ_DIR_IN)
-                get_val = lambda: line.get_value()
-        except Exception as e:
-            print(f"[HAT button] Line request failed: {e}", flush=True)
-            chip.close()
-            return
-
-        last = get_val()
-        print(f"[HAT button] Ready (GPIO17)", flush=True)
-
-        while not stop_event.is_set():
-            try:
-                state = get_val()
-            except Exception:
-                break
-            if state != last:
-                last = state
-                if state == 1:  # pressed → start recording
-                    rec_file.unlink(missing_ok=True)
-                    try:
-                        rec_proc[0] = subprocess.Popen(
-                            ["arecord", "-D", mic_device, "-f", "S16_LE",
-                             "-r", "16000", "-c", "1", "-t", "wav", str(rec_file)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                        print("\r[HAT button] Recording…", flush=True)
-                    except Exception as e:
-                        print(f"\r[HAT button] arecord failed: {e}", flush=True)
-                else:           # released → stop and transcribe
-                    proc, rec_proc[0] = rec_proc[0], None
-                    if proc:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                    try:
-                        wav = rec_file.read_bytes() if rec_file.exists() else b""
-                    except Exception:
-                        wav = b""
-                    if len(wav) < 1000:
-                        print("\r[HAT button] (nothing captured)", flush=True)
-                    else:
-                        transcript = groq_stt(wav)
-                        if transcript and transcript.strip():
-                            input_q.put(("voice", transcript.strip()))
-                        else:
-                            print("\r[HAT button] (nothing heard)", flush=True)
-            time.sleep(_POLL_SEC)
-
-        chip.close()
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 def main():
     global _SETTINGS_TTS_ON
     zeev_cleanup()   # clear any crash leftovers from a previous run
@@ -4127,8 +4224,6 @@ def main():
     print(f"  /stop         stop music playback")
     print(f"  /bt           manage Bluetooth devices")
     print(f"  /look [q]     take a photo and ask Zeev about it")
-    if CALENDAR_AVAILABLE:
-        print(f"  /calendar     show today's Google Calendar events")
     print(f"  /flip         toggle camera 180° rotation (persistent)")
     print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
     print(f"  quit          exit{RESET}\n")
@@ -4176,8 +4271,7 @@ def main():
     threading.Thread(target=_kbd_thread, daemon=True).start()
 
     if _has_mic:
-        _start_hat_button_listener(_input_q, _stop_listen, _mic_device)
-        print(f"{DIM}Mic ready — hold HAT button to speak, or type /listen.{RESET}\n")
+        print(f"{DIM}Mic ready — type /listen to record a voice message.{RESET}\n")
     else:
         print()
 
@@ -4434,7 +4528,7 @@ def main():
                     print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
                 session.append({"role": "user", "content": ctx})
                 append_message("user", ctx)
-                reply = stream_reply(session, model_id, tts_on=tts_on)
+                reply = stream_reply(session, model_id)
                 if reply:
                     session.append({"role": "assistant", "content": reply})
                     append_message("assistant", reply)
@@ -4479,18 +4573,6 @@ def main():
                 print(f"{DIM}Usage: /bt  /bt <number>  /bt off{RESET}\n")
             continue
 
-        if user_input.lower() == "/calendar":
-            if not CALENDAR_AVAILABLE:
-                print(f"{DIM}Calendar not available. Drop gcal_credentials.json in zeev/data/ and install google-api-python-client.{RESET}\n")
-            else:
-                print(f"{DIM}Fetching calendar...{RESET}", end=" ", flush=True)
-                cal = calendar_fetch()
-                print()
-                if cal:
-                    print(cal)
-                print()
-            continue
-
         batt_level, batt_charging = get_battery()
         if batt_level is not None and batt_level < 20 and not batt_charging:
             print(f"\033[33m⚠ Battery low: {batt_level:.0f}%{RESET}", flush=True)
@@ -4502,17 +4584,6 @@ def main():
                 print(f"{DIM}[music] {err}{RESET}\n")
             continue
 
-        if user_input.lower().startswith("/joke") or _JOKE_RE.match(user_input):
-            jlang = joke_lang(user_input)
-            joke = random_joke(jlang)
-            if joke:
-                print(f"\n{CYAN}{BOLD}Zeev:{RESET} {joke}\n")
-                if tts_on:
-                    speak_terminal(joke, lang=jlang)
-            else:
-                print(f"{DIM}No jokes loaded.{RESET}\n")
-            continue
-
         model_id = locked_model if locked_model else route_model(user_input)
         if locked_model is None:
             print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
@@ -4520,7 +4591,7 @@ def main():
         session.append({"role": "user", "content": user_input})
         append_message("user", user_input)
 
-        reply = stream_reply(session, model_id, tts_on=tts_on)
+        reply = stream_reply(session, model_id)
         if reply:
             session.append({"role": "assistant", "content": reply})
             append_message("assistant", reply)
@@ -4540,6 +4611,6 @@ if __name__ == "__main__":
     elif "--web" in sys.argv or "-web" in sys.argv:
         run_web_server()
     elif "--device" in sys.argv or "-device" in sys.argv:
-        run_device_mode(no_screen="--no-screen" in sys.argv)
+        run_device_mode()
     else:
         main()

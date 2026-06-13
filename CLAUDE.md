@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Hardware Environment
+
+This is a Raspberry Pi project (Zeev) using Python with hardware HATs (Whisplay display, PiSugar battery, WM8960 audio). Always verify hardware-related config changes (`config.txt`, I2C/SPI baudrates) before assuming software causes for audio/display failures.
+
+## TTS / Audio
+
+TTS uses Piper with a persistent process; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
+
+## Version Control
+
+Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless explicitly asked. Add generated/data files to `.gitignore` by default and confirm before committing.
+
+## Shell Scripts / Deployment
+
+When generating shell scripts or sudoers/inline commands for the Pi, watch for CRLF line endings from copy-paste; prefer inline commands or strip CRLF explicitly.
+
 ## Project: Zeev
 
 A local AI companion running on a Raspberry Pi Zero 2W. It calls the [Groq](https://groq.com) API (OpenAI-compatible) for fast cloud inference and supports both a terminal REPL and a mobile-friendly web UI.

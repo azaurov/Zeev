@@ -183,19 +183,36 @@ def _pisugar_query(cmd):
         return None
 
 
+_batt_state      = (None, None)   # (level: float|None, charging: bool|None)
+_batt_state_lock = threading.Lock()
+
+
+def _batt_poll_loop(interval=30):
+    """Background thread: poll PiSugar every `interval` seconds."""
+    global _batt_state
+    while True:
+        level_resp = _pisugar_query("get battery")
+        if level_resp and "I2C not connected" not in level_resp:
+            charge_resp = _pisugar_query("get battery_charging")
+        else:
+            charge_resp = None
+        try:
+            level = float(level_resp.split(": ")[1])
+        except (AttributeError, IndexError, ValueError):
+            level = None
+        try:
+            charging = charge_resp.split(": ")[1].strip().lower() == "true"
+        except (AttributeError, IndexError):
+            charging = None
+        with _batt_state_lock:
+            _batt_state = (level, charging)
+        time.sleep(interval)
+
+
 def get_battery():
-    """Return (level: float, charging: bool) or (None, None) if unavailable."""
-    level_resp  = _pisugar_query("get battery")
-    charge_resp = _pisugar_query("get battery_charging")
-    try:
-        level = float(level_resp.split(": ")[1])
-    except (AttributeError, IndexError, ValueError):
-        level = None
-    try:
-        charging = charge_resp.split(": ")[1].strip().lower() == "true"
-    except (AttributeError, IndexError):
-        charging = None
-    return level, charging
+    """Return (level: float|None, charging: bool|None) from the background poller."""
+    with _batt_state_lock:
+        return _batt_state
 
 
 # ---------------------------------------------------------------------------
@@ -1136,6 +1153,7 @@ def init_learning():
     USER_NOTES = load_notes()
     load_settings()
     build_rag_index()
+    threading.Thread(target=_batt_poll_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -3451,26 +3469,19 @@ def run_device_mode():
             _face_caption = caption
 
     def _face_loop():
-        nonlocal _mouth_open
-        last_state = ""
         while True:
+            now = time.time()
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
-            if state == "speaking":
-                _mouth_open = not _mouth_open
-                interval    = 0.18
-            else:
-                _mouth_open = False
-                interval    = 0.12 if state != last_state else 0.5
-            last_state = state
             if _have_pil:
                 try:
-                    img = _draw_face_img(state, _mouth_open, caption)
+                    from face_scroll import draw_frame
+                    img = draw_frame(state, caption, now, batt=get_battery())
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
-            time.sleep(interval)
+            time.sleep(0.08)
 
     threading.Thread(target=_face_loop, daemon=True).start()
 
@@ -3778,7 +3789,7 @@ def run_device_mode():
                 session = session[-60:]
 
             board.set_rgb(*_LED_SPEAKING)
-            _set_face("speaking", reply[:120])
+            _set_face("speaking", reply)
             print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
             _speak_device(reply)
             print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)

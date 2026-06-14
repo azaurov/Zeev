@@ -3611,7 +3611,7 @@ def run_device_mode():
     # Render interval per state — active states get full 12fps; static or
     # slow-changing states are throttled to save CPU and SPI bandwidth.
     _FACE_INTERVAL = {
-        "idle":      1/10,   # Miss Minutes webp at 10fps
+        "idle":      1/6,    # Miss Minutes webp at 6fps
         "ready":     1.0,    # static face — 1fps is plenty
         "listening": 1/8,
         "thinking":  1/8,

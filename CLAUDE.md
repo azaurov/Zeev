@@ -51,7 +51,11 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
-- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Token limit is model-aware: Torah queries and 70B/R1 models use 1200; 8B fast uses 600.
+- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Token limit is model-aware: Torah queries and 70B/R1 models use 1200; 8B fast uses 600. On connection failure, `_llm_post()` automatically falls back to `_bosgame_stream()` if `BOSGAME_URL` is set.
+- **`_bosgame_complete(msgs, max_tokens, json_mode)`** — non-streaming OpenAI-compatible POST to bosgame's Ollama via nginx proxy (`BOSGAME_URL/v1/chat/completions`). Uses `BOSGAME_MODEL` (default `llama3.2:1b`). Called by `extract_memory()` as the preferred (free, local) backend before falling back to Groq.
+- **`_bosgame_stream(msgs, max_tokens)`** — streaming chat fallback via bosgame Ollama (`llama3.1:8b`). Uses `http.client.HTTPSConnection` directly (not `requests`) with a dedicated SSL context to avoid urllib3 pool conflicts. Connect timeout 10s; after connect, socket timeout extended to 300s for slow CPU inference. Returns a `_LineIter` wrapper with `iter_lines()` compatible with `_iter_llm_tokens(..., "groq")`.
+- **`_llm_post(msgs, model, stream, max_tokens)`** — routes to the active LLM provider. For the `groq` provider: on connection errors (`NameResolution`, `Failed to resolve`, `Max retries`, `ConnectionError`, `Connection refused`), prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
+- **`extract_memory(session_msgs)`** — prefers bosgame (`_bosgame_complete`, `llama3.2:1b`, ~5–10s on CPU) over Groq for fact extraction; falls back to Groq on error.
 - **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
 - **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`; `/volume` GET returns `{"volume": N}`, POST accepts `{"delta": ±N}` or `{"level": N}` and returns updated `{"volume": N}`.
 - **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
@@ -59,7 +63,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_clean_for_tts(text, lang=None)`** — strips markdown; replaces the Tetragrammaton with `אֲדֹנָי` (Hebrew) or `Adonai` (English) depending on `lang`.
 - **`speak_terminal(text, lang=None)`** — optional `lang` override skips `detect_lang`; routes to Google Translate TTS + mpg123 (he/es/ru) or Piper (en). Runs in a background thread. Torah queries force `lang='he'`.
 - **`_gtts_chunks(text)`** — splits text at sentence boundaries into ≤200-char chunks for Google Translate TTS.
-- **`_gtts_fetch_chunk(chunk, lang)`** — fetches one MP3 chunk from `translate.googleapis.com/translate_tts`. No API key needed.
+- **`_gtts_fetch_chunk(chunk, lang)`** — fetches one MP3 chunk from `translate.googleapis.com/translate_tts` using `urllib.request` (not `requests`, to avoid shared urllib3 connection pool conflicts with the bosgame fallback stream). No API key needed.
 - **`_gtts_speak(text, lang, adev=None)`** — plays Google Translate TTS via `mpg123` in a background thread; `adev` selects the ALSA device (used in device mode).
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
@@ -242,6 +246,18 @@ Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Ch
 - On startup, `main()` speaks **"Good morning/afternoon/evening, Alex. Ready when you are."** via gTTS+mpg123 (background thread, plays within ~2s).
 - On exit (`quit`, Ctrl-C, or SIGTERM), `main()` speaks **"Goodbye, Alex."** synchronously before calling `sys.exit()`.
 - Journald is configured for persistent storage (`/var/log/journal/`) so logs survive reboots and `journalctl -b -1` works.
+
+### bosgame Ollama integration
+
+bosgame (`Maccabeus-Ecolite-Series`, LAN IP `10.0.0.141`) runs Ollama and acts as a free local inference backend. The Pi reaches it via an nginx reverse proxy on `sogdiana-gematria.net`:
+
+- **Endpoint**: `https://ollama.sogdiana-gematria.net/ollama/` (grey-cloud DNS → `10.0.0.141` direct, bypasses Cloudflare)
+- **Auth**: `X-Zeev-Key` header; value in `.env` as `BOSGAME_KEY`
+- **`.env` keys**: `BOSGAME_URL=https://ollama.sogdiana-gematria.net/ollama`, `BOSGAME_MODEL=llama3.2:1b`, `BOSGAME_KEY=<hash>`
+- **Models available**: `llama3.1:8b` (chat fallback), `llama3.2:1b` (memory extraction, ~5–10s on CPU)
+- **Pi `/etc/hosts`**: `10.0.0.141 ollama.sogdiana-gematria.net` — required to avoid NAT hairpin (Pi on LAN cannot reach the public IP). Entry is persisted via `/etc/cloud/templates/hosts.debian.tmpl` (cloud-init manages `/etc/hosts` and resets it on reboot without this).
+- **Offline coverage**: fallback only works when Pi is on the home LAN. Away from home with no WiFi = no fallback (bosgame unreachable). Use phone hotspot for mobile use.
+- **nginx config** (bosgame `/etc/nginx/sites-available/default`): `/ollama/` location with `proxy_buffering off`, `proxy_read_timeout 300s`, auth via `$http_x_zeev_key`.
 
 ### User
 

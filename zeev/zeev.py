@@ -3606,6 +3606,9 @@ def run_device_mode():
     def _face_loop():
         while True:
             now = time.time()
+            if not _screen_on[0]:
+                time.sleep(0.5)
+                continue
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
@@ -3802,13 +3805,39 @@ def run_device_mode():
     _LED_SPEAKING  = (0, 180, 50)
     _LED_ERROR     = (150, 0,  0)
 
+    # ── Screen sleep ─────────────────────────────────────────────────────────
+    _IDLE_SLEEP_SEC = 30          # seconds of idle before screen + LED turn off
+    _screen_on      = [True]      # mutable so nested functions can update it
+    _last_activity  = [time.time()]
+
+    def _screen_wake():
+        """Restore backlight and idle LED after sleep."""
+        if not _screen_on[0]:
+            _screen_on[0] = True
+            _last_activity[0] = time.time()
+            board.set_backlight(100)
+            board.set_rgb(*_LED_IDLE)
+
+    def _idle_sleep_watcher():
+        while True:
+            time.sleep(5)
+            if _screen_on[0] and _face_state == "idle":
+                if time.time() - _last_activity[0] >= _IDLE_SLEEP_SEC:
+                    _screen_on[0] = False
+                    board.set_backlight(0)
+                    board.set_rgb(0, 0, 0)
+
+    threading.Thread(target=_idle_sleep_watcher, daemon=True).start()
+
     def _go_ready():
+        _screen_wake()
         _set_face("ready")
         board.set_rgb(*_LED_READY)
 
     def _go_idle():
         _set_face("idle")
         board.set_rgb(*_LED_IDLE)
+        _last_activity[0] = time.time()
         _busy.clear()
 
     def _start_recording():
@@ -3829,6 +3858,10 @@ def run_device_mode():
 
     def _on_press():
         nonlocal _rec_proc
+        # If the screen is asleep, wake it and consume the press.
+        if not _screen_on[0]:
+            _screen_wake()
+            return
         if _wake_rec_proc[0]:
             try:
                 _wake_rec_proc[0].kill()
@@ -4011,6 +4044,7 @@ def run_device_mode():
                 continue
 
             print(f"[wake] heard: {low!r}", flush=True)
+            _screen_wake()
 
             utterance = low
             for w in sorted(_DEVICE_WAKE_WORDS, key=len, reverse=True):

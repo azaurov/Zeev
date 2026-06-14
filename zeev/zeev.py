@@ -121,6 +121,20 @@ def extract_music_query(text):
     m = _MUSIC_RE.match(text.strip())
     return m.group("query").strip() if m else None
 
+_QUANTUM_RE = re.compile(
+    r"^(?:quantum\s+(?:reasoning|analysis|circuit)[:\s]+|"
+    r"run\s+(?:a\s+)?quantum\s+(?:circuit\s+)?(?:on\s+)?|"
+    r"use\s+quantum\s+(?:reasoning\s+)?(?:(?:to\s+)?analyze\s+)?|"
+    r"quantum[:\s]+)"
+    r"(?P<idea>.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+def extract_quantum_query(text):
+    """Return the idea if text is a quantum reasoning request, else None."""
+    m = _QUANTUM_RE.match(text.strip())
+    return m.group("idea").strip() if m else None
+
 # Model auto-routing heuristics
 _REASONING_RE = re.compile(
     r"\b(prove|proof|calculate|solve|equation|formula|math|"
@@ -3343,6 +3357,47 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 append_message("user", user_msg)
                 snapshot = list(session)
 
+            quantum_idea = extract_quantum_query(user_msg)
+            if quantum_idea:
+                sse({"info": f"[quantum] mapping \"{quantum_idea[:60]}\" to circuit..."})
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, str(Path(__file__).parent))
+                    import quantum as _q
+                    def _qllm(msgs, max_tokens=300, json_mode=False):
+                        return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
+                    interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm)
+                except Exception as e:
+                    err = str(e)
+                    interpretation, spec, result = None, None, None
+                if err or not interpretation:
+                    sse({"error": f"[quantum] {err or 'unknown error'}"})
+                else:
+                    options = spec["options"]
+                    probs = result["probabilities"]
+                    n = len(options)
+                    lines = [f"**Quantum circuit: {', '.join(options)}**"]
+                    for bits, prob in list(probs.items())[:5]:
+                        active = [options[i] for i in range(n) if i < len(bits) and bits[-(i + 1)] == "1"]
+                        label = " + ".join(active) if active else "none / reset"
+                        bar = "█" * max(1, int(prob * 20))
+                        lines.append(f"{label}: {bar} {prob * 100:.1f}%")
+                    circuit_text = "\n".join(lines)
+                    full_reply = circuit_text + "\n\n" + interpretation
+                    sse({"token": circuit_text + "\n\n"})
+                    sse({"token": interpretation})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    with lock:
+                        session.append({"role": "assistant", "content": full_reply})
+                        append_message("assistant", full_reply)
+                        if len(session) > 60:
+                            session[:] = session[-60:]
+                    return
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
             if model_pref == "auto":
                 sse({"model": model_label(model)})
 
@@ -4541,6 +4596,7 @@ def main():
     print(f"  /look [q]     take a photo and ask Zeev about it")
     print(f"  /flip         toggle camera 180° rotation (persistent)")
     print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
+    print(f"  /quantum <q>  run a quantum circuit on your idea or dilemma")
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
@@ -4853,6 +4909,51 @@ def main():
                     session = session[-60:]
             continue
 
+        if user_input.lower().startswith("/quantum"):
+            idea = user_input[8:].strip()
+            if not idea:
+                print(f"{DIM}Usage: /quantum <your idea or dilemma>{RESET}\n")
+                continue
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                import quantum as _q
+            except ImportError as e:
+                print(f"{DIM}[quantum] module error: {e}{RESET}\n")
+                continue
+
+            def _qllm(msgs, max_tokens=300, json_mode=False):
+                return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
+
+            print(f"{DIM}[quantum] mapping idea to circuit...{RESET}", flush=True)
+            interpretation, spec, result, err = _q.quantum_reason(idea, _qllm)
+            if err:
+                print(f"{DIM}[quantum] {err}{RESET}\n")
+                continue
+
+            options = spec["options"]
+            probs = result["probabilities"]
+            n = len(options)
+            print(f"\n{DIM}[quantum] Options: {', '.join(options)}{RESET}")
+            print(f"{DIM}[quantum] Interference outcomes:{RESET}")
+            for bits, prob in list(probs.items())[:5]:
+                active = [options[i] for i in range(n) if i < len(bits) and bits[-(i + 1)] == "1"]
+                label = " + ".join(active) if active else "none / reset"
+                bar = "█" * max(1, int(prob * 24))
+                print(f"{DIM}  {label:<28} {bar} {prob * 100:.1f}%{RESET}")
+            print()
+
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {interpretation}\n")
+            session.append({"role": "user", "content": f"[quantum] {idea}"})
+            session.append({"role": "assistant", "content": interpretation})
+            append_message("user", f"[quantum] {idea}")
+            append_message("assistant", interpretation)
+            if tts_on:
+                speak_terminal(interpretation)
+            if len(session) > 60:
+                session = session[-60:]
+            continue
+
         if user_input.lower().startswith("/bt"):
             parts = user_input.split()
             devices = bt_list()
@@ -4891,6 +4992,43 @@ def main():
         batt_level, batt_charging = get_battery()
         if batt_level is not None and batt_level < 20 and not batt_charging:
             print(f"\033[33m⚠ Battery low: {batt_level:.0f}%{RESET}", flush=True)
+
+        quantum_idea = extract_quantum_query(user_input)
+        if quantum_idea:
+            print(f"{DIM}[quantum] mapping idea to circuit...{RESET}", flush=True)
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                import quantum as _q
+                def _qllm(msgs, max_tokens=300, json_mode=False):
+                    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
+                interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm)
+            except Exception as e:
+                err = str(e)
+                interpretation, spec, result = None, None, None
+            if err or not interpretation:
+                print(f"{DIM}[quantum] {err or 'unknown error'}{RESET}\n")
+            else:
+                options = spec["options"]
+                probs = result["probabilities"]
+                n = len(options)
+                print(f"\n{DIM}[quantum] Options: {', '.join(options)}{RESET}")
+                for bits, prob in list(probs.items())[:5]:
+                    active = [options[i] for i in range(n) if i < len(bits) and bits[-(i + 1)] == "1"]
+                    label = " + ".join(active) if active else "none / reset"
+                    bar = "█" * max(1, int(prob * 24))
+                    print(f"{DIM}  {label:<28} {bar} {prob * 100:.1f}%{RESET}")
+                print()
+                print(f"\n{CYAN}{BOLD}Zeev:{RESET} {interpretation}\n")
+                session.append({"role": "user", "content": f"[quantum] {quantum_idea}"})
+                session.append({"role": "assistant", "content": interpretation})
+                append_message("user", f"[quantum] {quantum_idea}")
+                append_message("assistant", interpretation)
+                if tts_on:
+                    speak_terminal(interpretation)
+                if len(session) > 60:
+                    session = session[-60:]
+            continue
 
         music_query = extract_music_query(user_input)
         if music_query:

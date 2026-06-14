@@ -1294,6 +1294,107 @@ def tavily_search(query):
 
 
 # ---------------------------------------------------------------------------
+# Google Calendar
+# ---------------------------------------------------------------------------
+
+GCAL_TOKEN_PATH = BASE_DIR / "data" / "gcal_token.json"
+_gcal_cache: dict = {"events": None, "ts": 0.0}
+_GCAL_CACHE_TTL = 300  # seconds
+
+_CALENDAR_RE = re.compile(
+    r"\b(calendar|schedule|agenda|appointment|meeting|event|busy|free today|"
+    r"what do i have|do i have anything|what's on|what is on|upcoming|"
+    r"remind me|what time is|am i free|what's today|my day|today's plan)\b",
+    re.IGNORECASE,
+)
+
+def needs_calendar(text):
+    return bool(_CALENDAR_RE.search(text)) and GCAL_TOKEN_PATH.exists()
+
+
+def _gcal_refresh(tok: dict) -> dict:
+    """Refresh the OAuth2 access token and update gcal_token.json. Returns updated tok."""
+    resp = requests.post(
+        tok["token_uri"],
+        data={
+            "grant_type": "refresh_token",
+            "client_id": tok["client_id"],
+            "client_secret": tok["client_secret"],
+            "refresh_token": tok["refresh_token"],
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    new = resp.json()
+    tok["token"] = new["access_token"]
+    import datetime as _dt
+    expires_in = new.get("expires_in", 3600)
+    tok["expiry"] = (_dt.datetime.utcnow() + _dt.timedelta(seconds=expires_in)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    GCAL_TOKEN_PATH.write_text(json.dumps(tok))
+    return tok
+
+
+def gcal_fetch(days=1) -> str:
+    """Return today's calendar events as a formatted string (cached 5 min)."""
+    now = time.time()
+    if _gcal_cache["events"] is not None and now - _gcal_cache["ts"] < _GCAL_CACHE_TTL:
+        return _gcal_cache["events"]
+    try:
+        tok = json.loads(GCAL_TOKEN_PATH.read_text())
+        import datetime as _dt
+        expiry_str = tok.get("expiry", "")
+        expired = True
+        if expiry_str:
+            try:
+                exp = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
+                expired = _dt.datetime.utcnow() >= exp - _dt.timedelta(seconds=60)
+            except ValueError:
+                pass
+        if expired:
+            tok = _gcal_refresh(tok)
+
+        time_min = _dt.datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z")
+        time_max = (_dt.datetime.utcnow() + _dt.timedelta(days=days)).strftime(
+            "%Y-%m-%dT23:59:59Z"
+        )
+        resp = requests.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {tok['token']}"},
+            params={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "10",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if not items:
+            result = "No events today."
+        else:
+            lines = []
+            for e in items:
+                start = e["start"].get("dateTime", e["start"].get("date", ""))
+                if "T" in start:
+                    try:
+                        t = _dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        start = t.strftime("%-I:%M %p")
+                    except Exception:
+                        pass
+                lines.append(f"- {start}: {e.get('summary', '(no title)')}")
+            result = "\n".join(lines)
+    except Exception as e:
+        result = f"(calendar unavailable: {e})"
+    _gcal_cache["events"] = result
+    _gcal_cache["ts"] = now
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Groq streaming
 # ---------------------------------------------------------------------------
 
@@ -1686,6 +1787,10 @@ def _build_system_prompt(user_text, on_search=None):
                 f"{ref}: {en[:500]}" for ref, en in torah_hits
             )
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
+
+    if needs_calendar(user_text):
+        cal = gcal_fetch()
+        parts.append(f"\n\n## Today's calendar:\n{cal}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:

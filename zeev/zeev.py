@@ -1616,7 +1616,7 @@ def _bosgame_stream(msgs, max_tokens=600):
                   "temperature": 0.75, "max_tokens": max_tokens, "stream": True},
             headers=headers,
             stream=True,
-            timeout=300,
+            timeout=(10, 300),
         ), None
     except Exception as e:
         return None, str(e)

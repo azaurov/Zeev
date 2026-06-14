@@ -3902,6 +3902,8 @@ def run_device_mode():
 
     # ── Shared LLM + TTS handler ─────────────────────────────────────────────
 
+    _turn_count = [0]   # counts completed turns for auto-memorize trigger
+
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
         nonlocal session
@@ -3938,6 +3940,19 @@ def run_device_mode():
 
         if len(session) > 60:
             session = session[-60:]
+
+        # B — refresh RAG index with the new turn so future turns can recall it
+        build_rag_index()
+
+        # A — auto-memorize every 5 turns in a background thread
+        _turn_count[0] += 1
+        if _turn_count[0] % 5 == 0:
+            snap = list(session)
+            def _bg_memorize():
+                facts = extract_memory(snap)
+                if facts is not None:
+                    print(f"[memory] {len(facts)} fact(s) stored", flush=True)
+            threading.Thread(target=_bg_memorize, daemon=True).start()
 
         board.set_rgb(*_LED_SPEAKING)
         _set_face("speaking", reply)

@@ -64,6 +64,8 @@ OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY",     "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY",     "")
 OLLAMA_URL         = os.environ.get("OLLAMA_URL",         "http://localhost:11434")
 OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL",       "llama3.2")
+BOSGAME_URL        = os.environ.get("BOSGAME_URL",        "")   # e.g. http://10.0.0.141:11434
+BOSGAME_MODEL      = os.environ.get("BOSGAME_MODEL",      "llama3.1:8b")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
@@ -1036,7 +1038,11 @@ def extract_memory(session_msgs):
         {"role": "system", "content": "You are a data extractor. Output only valid JSON."},
         {"role": "user", "content": user_prompt},
     ]
-    text, err = _llm_complete(msgs, MODELS["1"][0], max_tokens=300, json_mode=True)
+    # Prefer bosgame (free local CPU) for background extraction; fall back to Groq.
+    text, err = _bosgame_complete(msgs, max_tokens=300, json_mode=True)
+    if err:
+        print(f"[bosgame] {err} — falling back to Groq", flush=True)
+        text, err = _llm_complete(msgs, MODELS["1"][0], max_tokens=300, json_mode=True)
     if err == "rate-limited":
         return None
     if err or not text:
@@ -1559,6 +1565,31 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
         return text, None
 
     return None, f"unknown provider: {provider}"
+
+
+def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
+    """Non-streaming completion via Ollama on bosgame. Returns (text, err) or (None, err)."""
+    if not BOSGAME_URL:
+        return None, "BOSGAME_URL not set"
+    body = {
+        "model": BOSGAME_MODEL,
+        "messages": msgs,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    try:
+        r = requests.post(
+            f"{BOSGAME_URL}/v1/chat/completions",
+            json=body,
+            timeout=180,   # CPU inference is slow
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"], None
+    except Exception as e:
+        return None, str(e)
 
 
 def _build_system_prompt(user_text, on_search=None):

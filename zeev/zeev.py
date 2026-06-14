@@ -1480,6 +1480,10 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
 
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+        if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
+            print(f"{DIM}[offline → bosgame]{RESET}", flush=True)
+            resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
+            return resp, err, "groq"
         return resp, err, "groq"
 
     if provider == "openai":
@@ -1593,6 +1597,26 @@ def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"], None
+    except Exception as e:
+        return None, str(e)
+
+
+def _bosgame_stream(msgs, max_tokens=600):
+    """Streaming chat via bosgame Ollama (offline fallback). Returns (response, error)."""
+    if not BOSGAME_URL:
+        return None, "BOSGAME_URL not set"
+    headers = {"Content-Type": "application/json"}
+    if BOSGAME_KEY:
+        headers["X-Zeev-Key"] = BOSGAME_KEY
+    try:
+        return requests.post(
+            f"{BOSGAME_URL}/v1/chat/completions",
+            json={"model": "llama3.1:8b", "messages": msgs,
+                  "temperature": 0.75, "max_tokens": max_tokens, "stream": True},
+            headers=headers,
+            stream=True,
+            timeout=300,
+        ), None
     except Exception as e:
         return None, str(e)
 

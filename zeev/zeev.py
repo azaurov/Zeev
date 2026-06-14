@@ -3608,12 +3608,23 @@ def run_device_mode():
     _screen_on      = [True]      # mutable so nested functions can update it
     _last_activity  = [time.time()]
 
+    # Render interval per state — active states get full 12fps; static or
+    # slow-changing states are throttled to save CPU and SPI bandwidth.
+    _FACE_INTERVAL = {
+        "idle":      1/10,   # Miss Minutes webp at 10fps
+        "ready":     1.0,    # static face — 1fps is plenty
+        "listening": 1/8,
+        "thinking":  1/8,
+        "speaking":  1/8,
+        "error":     1.0,
+    }
+
     def _face_loop():
         while True:
-            now = time.time()
             if not _screen_on[0]:
                 time.sleep(0.5)
                 continue
+            now = time.time()
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
@@ -3624,7 +3635,7 @@ def run_device_mode():
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
-            time.sleep(0.08)
+            time.sleep(_FACE_INTERVAL.get(state, 1/8))
 
     threading.Thread(target=_face_loop, daemon=True).start()
 
@@ -3804,10 +3815,10 @@ def run_device_mode():
     _rec_file      = Path("/tmp/zeev_rec.wav")
 
     _LED_IDLE      = (0,  20,  0)
-    _LED_READY     = (0,  40, 80)
+    _LED_READY     = (0,  20, 40)
     _LED_RECORDING = (180, 0,  0)
-    _LED_THINKING  = (0,   0, 180)
-    _LED_SPEAKING  = (0, 180, 50)
+    _LED_THINKING  = (0,   0, 90)
+    _LED_SPEAKING  = (0,  90, 25)
     _LED_ERROR     = (150, 0,  0)
 
     def _screen_wake():
@@ -4013,7 +4024,7 @@ def run_device_mode():
                 pass
 
         while True:
-            if _face_state != "idle":
+            if _face_state != "idle" or not _screen_on[0]:
                 time.sleep(0.5)
                 continue
 

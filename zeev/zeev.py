@@ -1647,6 +1647,8 @@ def _bosgame_stream(msgs, max_tokens=600):
     try:
         ctx = ssl.create_default_context()
         conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=10)
+        conn.connect()                 # connect+TLS within 10s
+        conn.sock.settimeout(300)      # allow 5 min between streaming chunks
         conn.request("POST", path, body=body, headers=hdrs)
         resp = conn.getresponse()
         if resp.status != 200:

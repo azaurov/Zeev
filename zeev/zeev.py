@@ -1482,6 +1482,15 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
         if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
             print(f"[DBG1 offline fallback firing]", flush=True)
+            import socket as _sock
+            try:
+                _ip = _sock.gethostbyname("ollama.sogdiana-gematria.net")
+                print(f"[DBG1b DNS ollama→{_ip}]", flush=True)
+                _s = _sock.create_connection((_ip, 443), timeout=5)
+                _s.close()
+                print(f"[DBG1c TCP ok]", flush=True)
+            except Exception as _e:
+                print(f"[DBG1c TCP FAIL: {_e}]", flush=True)
             resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
             print(f"[DBG2 bosgame returned resp={resp is not None} err={str(err)[:80]}]", flush=True)
             return resp, err, "groq"

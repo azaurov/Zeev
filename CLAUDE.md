@@ -50,7 +50,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–160). State stored in `_VOLUME` global (default 75).
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
-- **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Tavily results. `_with_search()` is an alias kept for compatibility.
+- **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Google Calendar events + optional Tavily results. `_with_search()` is an alias kept for compatibility.
 - **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Token limit is model-aware: Torah queries and 70B/R1 models use 1200; 8B fast uses 600. On connection failure, `_llm_post()` automatically falls back to `_bosgame_stream()` if `BOSGAME_URL` is set.
 - **`_bosgame_complete(msgs, max_tokens, json_mode)`** — non-streaming OpenAI-compatible POST to bosgame's Ollama via nginx proxy (`BOSGAME_URL/v1/chat/completions`). Uses `BOSGAME_MODEL` (default `llama3.2:1b`). Called by `extract_memory()` as the preferred (free, local) backend before falling back to Groq.
 - **`_bosgame_stream(msgs, max_tokens)`** — streaming chat fallback via bosgame Ollama (`llama3.1:8b`). Uses `http.client.HTTPSConnection` directly (not `requests`) with a dedicated SSL context to avoid urllib3 pool conflicts. Connect timeout 10s; after connect, socket timeout extended to 300s for slow CPU inference. Returns a `_LineIter` wrapper with `iter_lines()` compatible with `_iter_llm_tokens(..., "groq")`.
@@ -102,6 +102,10 @@ Default is **auto-routing**: the model is chosen per message by `route_model()`.
 - Default → 8B Fast
 
 The terminal prints `[auto → 8B/70B/R1]` before each response. The web UI shows the model as a dim tag below the bubble. Lock/unlock with `/model`.
+
+### Google Calendar
+
+`gcal_fetch()` reads `data/gcal_token.json` (OAuth2 credentials from `gcal_auth.py` one-time flow), auto-refreshes the access token when expired (writes updated token back), and fetches today's events from the Google Calendar API. Results are cached in-process for 5 minutes. `needs_calendar(text)` triggers on keywords like "calendar", "schedule", "meeting", "agenda", "am I free", etc. — silently skips if `gcal_token.json` is absent. When triggered, `_build_system_prompt()` injects events as `## Today's calendar:`. No google-auth library required — uses `requests` directly. `gcal_fetch()` only covers the current calendar day (midnight-to-midnight UTC); multi-day queries ("this week") still answer from the day's events.
 
 ### Web search
 

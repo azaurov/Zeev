@@ -1298,7 +1298,7 @@ def tavily_search(query):
 # ---------------------------------------------------------------------------
 
 GCAL_TOKEN_PATH = BASE_DIR / "data" / "gcal_token.json"
-_gcal_cache: dict = {"events": None, "ts": 0.0}
+_gcal_cache: dict = {}   # days -> {"result": str, "ts": float}
 _GCAL_CACHE_TTL = 300  # seconds
 
 _CALENDAR_RE = re.compile(
@@ -1307,6 +1307,24 @@ _CALENDAR_RE = re.compile(
     r"remind me|what time is|am i free|what's today|my day|today's plan)\b",
     re.IGNORECASE,
 )
+
+# Patterns that imply a multi-day range
+_GCAL_DAYS_RE = [
+    (re.compile(r"\bnext\s+(\d+)\s+days?\b",         re.IGNORECASE), lambda m: int(m.group(1))),
+    (re.compile(r"\bthis\s+week\b|\bfor\s+the\s+week\b", re.IGNORECASE), lambda m: 7),
+    (re.compile(r"\bnext\s+week\b",                   re.IGNORECASE), lambda m: 14),
+    (re.compile(r"\bthis\s+month\b",                  re.IGNORECASE), lambda m: 30),
+    (re.compile(r"\btomorrow\b",                      re.IGNORECASE), lambda m: 2),
+    (re.compile(r"\bnext\s+(\d+)\s+weeks?\b",         re.IGNORECASE), lambda m: int(m.group(1)) * 7),
+]
+
+def gcal_days_from_query(text: str) -> int:
+    """Return how many days ahead to fetch based on natural-language cues."""
+    for pattern, extractor in _GCAL_DAYS_RE:
+        m = pattern.search(text)
+        if m:
+            return extractor(m)
+    return 1
 
 def needs_calendar(text):
     return bool(_CALENDAR_RE.search(text)) and GCAL_TOKEN_PATH.exists()
@@ -1337,10 +1355,11 @@ def _gcal_refresh(tok: dict) -> dict:
 
 
 def gcal_fetch(days=1) -> str:
-    """Return today's calendar events as a formatted string (cached 5 min)."""
+    """Return calendar events for the next `days` days as a formatted string (cached 5 min per range)."""
     now = time.time()
-    if _gcal_cache["events"] is not None and now - _gcal_cache["ts"] < _GCAL_CACHE_TTL:
-        return _gcal_cache["events"]
+    cached = _gcal_cache.get(days)
+    if cached and now - cached["ts"] < _GCAL_CACHE_TTL:
+        return cached["result"]
     try:
         tok = json.loads(GCAL_TOKEN_PATH.read_text())
         import datetime as _dt
@@ -1355,10 +1374,9 @@ def gcal_fetch(days=1) -> str:
         if expired:
             tok = _gcal_refresh(tok)
 
-        time_min = _dt.datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z")
-        time_max = (_dt.datetime.utcnow() + _dt.timedelta(days=days)).strftime(
-            "%Y-%m-%dT23:59:59Z"
-        )
+        today = _dt.datetime.utcnow()
+        time_min = today.strftime("%Y-%m-%dT00:00:00Z")
+        time_max = (today + _dt.timedelta(days=days)).strftime("%Y-%m-%dT23:59:59Z")
         resp = requests.get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             headers={"Authorization": f"Bearer {tok['token']}"},
@@ -1367,14 +1385,14 @@ def gcal_fetch(days=1) -> str:
                 "timeMax": time_max,
                 "singleEvents": "true",
                 "orderBy": "startTime",
-                "maxResults": "10",
+                "maxResults": str(min(50, days * 10)),
             },
             timeout=10,
         )
         resp.raise_for_status()
         items = resp.json().get("items", [])
         if not items:
-            result = "No events today."
+            result = f"No events in the next {days} day{'s' if days != 1 else ''}."
         else:
             lines = []
             for e in items:
@@ -1382,15 +1400,21 @@ def gcal_fetch(days=1) -> str:
                 if "T" in start:
                     try:
                         t = _dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
-                        start = t.strftime("%-I:%M %p")
+                        label = t.strftime("%a %-I:%M %p") if days > 1 else t.strftime("%-I:%M %p")
                     except Exception:
-                        pass
-                lines.append(f"- {start}: {e.get('summary', '(no title)')}")
+                        label = start
+                else:
+                    # all-day event: just show weekday + date
+                    try:
+                        t = _dt.datetime.strptime(start, "%Y-%m-%d")
+                        label = t.strftime("%a %b %-d") if days > 1 else "all day"
+                    except Exception:
+                        label = start
+                lines.append(f"- {label}: {e.get('summary', '(no title)')}")
             result = "\n".join(lines)
     except Exception as e:
         result = f"(calendar unavailable: {e})"
-    _gcal_cache["events"] = result
-    _gcal_cache["ts"] = now
+    _gcal_cache[days] = {"result": result, "ts": now}
     return result
 
 
@@ -1789,8 +1813,10 @@ def _build_system_prompt(user_text, on_search=None):
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
 
     if needs_calendar(user_text):
-        cal = gcal_fetch()
-        parts.append(f"\n\n## Today's calendar:\n{cal}")
+        _gcal_days = gcal_days_from_query(user_text)
+        cal = gcal_fetch(_gcal_days)
+        _gcal_label = "Today's calendar" if _gcal_days == 1 else f"Calendar (next {_gcal_days} days)"
+        parts.append(f"\n\n## {_gcal_label}:\n{cal}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:

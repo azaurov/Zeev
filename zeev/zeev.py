@@ -459,14 +459,15 @@ def _gtts_chunks(text, limit=200):
 
 def _gtts_fetch_chunk(chunk, lang):
     """Fetch one chunk from Google Translate TTS. Returns MP3 bytes or None."""
+    import urllib.request as _ur, urllib.parse as _up
     try:
-        resp = requests.get(
-            "https://translate.googleapis.com/translate_tts",
-            params={"ie": "UTF-8", "q": chunk, "tl": lang, "client": "gtx"},
+        qs = _up.urlencode({"ie": "UTF-8", "q": chunk, "tl": lang, "client": "gtx"})
+        req = _ur.Request(
+            f"https://translate.googleapis.com/translate_tts?{qs}",
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
         )
-        return resp.content if resp.status_code == 200 else None
+        with _ur.urlopen(req, timeout=10) as r:
+            return r.read() if r.status == 200 else None
     except Exception:
         return None
 
@@ -1481,18 +1482,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
         if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
-            print(f"[DBG1 offline fallback firing]", flush=True)
-            import socket as _sock
-            try:
-                _ip = _sock.gethostbyname("ollama.sogdiana-gematria.net")
-                print(f"[DBG1b DNS ollama→{_ip}]", flush=True)
-                _s = _sock.create_connection((_ip, 443), timeout=5)
-                _s.close()
-                print(f"[DBG1c TCP ok]", flush=True)
-            except Exception as _e:
-                print(f"[DBG1c TCP FAIL: {_e}]", flush=True)
+            print(f"[offline] Groq unreachable, falling back to bosgame Ollama", flush=True)
             resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
-            print(f"[DBG2 bosgame returned resp={resp is not None} err={str(err)[:80]}]", flush=True)
             return resp, err, "groq"
         return resp, err, "groq"
 
@@ -1612,21 +1603,55 @@ def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
 
 
 def _bosgame_stream(msgs, max_tokens=600):
-    """Streaming chat via bosgame Ollama (offline fallback). Returns (response, error)."""
+    """Streaming chat via bosgame Ollama (offline fallback). Returns (response_wrapper, error).
+    Uses http.client directly to avoid urllib3/requests connection pool conflicts."""
     if not BOSGAME_URL:
         return None, "BOSGAME_URL not set"
-    headers = {"Content-Type": "application/json"}
+    import http.client, ssl, json as _json, urllib.parse as _up
+
+    parsed = _up.urlparse(BOSGAME_URL)
+    host = parsed.hostname
+    port = parsed.port or 443
+    path = parsed.path.rstrip("/") + "/v1/chat/completions"
+
+    body = _json.dumps({
+        "model": "llama3.1:8b", "messages": msgs,
+        "temperature": 0.75, "max_tokens": max_tokens, "stream": True,
+    }).encode()
+    hdrs = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "Host": host,
+    }
     if BOSGAME_KEY:
-        headers["X-Zeev-Key"] = BOSGAME_KEY
+        hdrs["X-Zeev-Key"] = BOSGAME_KEY
+
+    class _LineIter:
+        """Wrap http.client response to provide iter_lines() like requests.Response."""
+        def __init__(self, resp):
+            self._resp = resp
+
+        def iter_lines(self):
+            buf = b""
+            while True:
+                chunk = self._resp.read(512)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.rstrip(b"\r")
+                    if line:
+                        yield line
+
     try:
-        return requests.post(
-            f"{BOSGAME_URL}/v1/chat/completions",
-            json={"model": "llama3.1:8b", "messages": msgs,
-                  "temperature": 0.75, "max_tokens": max_tokens, "stream": True},
-            headers=headers,
-            stream=True,
-            timeout=(10, 300),
-        ), None
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=10)
+        conn.request("POST", path, body=body, headers=hdrs)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None, f"HTTP {resp.status} {resp.reason}"
+        return _LineIter(resp), None
     except Exception as e:
         return None, str(e)
 
@@ -1819,9 +1844,7 @@ def stream_reply(messages, model):
     else:
         tok_limit = 600
 
-    print(f"[DBG3 calling _llm_post]", flush=True)
     resp, err, provider = _llm_post(payload_msgs, model, max_tokens=tok_limit)
-    print(f"[DBG4 _llm_post returned err={str(err)[:60] if err else None} provider={provider}]", flush=True)
     if err:
         print(f"\nConnection error: {err}")
         return ""

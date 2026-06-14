@@ -1481,9 +1481,9 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
         if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
-            print(f"{DIM}[offline → bosgame]{RESET}", flush=True)
+            print(f"[DBG1 offline fallback firing]", flush=True)
             resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
-            print(f"{DIM}[bosgame resp={resp is not None} err={err!r:.80}]{RESET}", flush=True)
+            print(f"[DBG2 bosgame returned resp={resp is not None} err={str(err)[:80]}]", flush=True)
             return resp, err, "groq"
         return resp, err, "groq"
 
@@ -1810,7 +1810,9 @@ def stream_reply(messages, model):
     else:
         tok_limit = 600
 
+    print(f"[DBG3 calling _llm_post]", flush=True)
     resp, err, provider = _llm_post(payload_msgs, model, max_tokens=tok_limit)
+    print(f"[DBG4 _llm_post returned err={str(err)[:60] if err else None} provider={provider}]", flush=True)
     if err:
         print(f"\nConnection error: {err}")
         return ""

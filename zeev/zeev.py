@@ -64,8 +64,9 @@ OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY",     "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY",     "")
 OLLAMA_URL         = os.environ.get("OLLAMA_URL",         "http://localhost:11434")
 OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL",       "llama3.2")
-BOSGAME_URL        = os.environ.get("BOSGAME_URL",        "")   # e.g. http://10.0.0.141:11434
+BOSGAME_URL        = os.environ.get("BOSGAME_URL",        "")   # e.g. https://sogdiana-gematria.net/ollama
 BOSGAME_MODEL      = os.environ.get("BOSGAME_MODEL",      "llama3.1:8b")
+BOSGAME_KEY        = os.environ.get("BOSGAME_KEY",        "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
@@ -1581,9 +1582,13 @@ def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     try:
+        headers = {}
+        if BOSGAME_KEY:
+            headers["X-Zeev-Key"] = BOSGAME_KEY
         r = requests.post(
             f"{BOSGAME_URL}/v1/chat/completions",
             json=body,
+            headers=headers,
             timeout=180,   # CPU inference is slow
         )
         r.raise_for_status()

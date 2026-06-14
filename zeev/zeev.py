@@ -3603,6 +3603,11 @@ def run_device_mode():
             _face_state   = state
             _face_caption = caption
 
+    # ── Screen sleep ─────────────────────────────────────────────────────────
+    _IDLE_SLEEP_SEC = 30          # seconds of idle before screen + LED turn off
+    _screen_on      = [True]      # mutable so nested functions can update it
+    _last_activity  = [time.time()]
+
     def _face_loop():
         while True:
             now = time.time()
@@ -3804,11 +3809,6 @@ def run_device_mode():
     _LED_THINKING  = (0,   0, 180)
     _LED_SPEAKING  = (0, 180, 50)
     _LED_ERROR     = (150, 0,  0)
-
-    # ── Screen sleep ─────────────────────────────────────────────────────────
-    _IDLE_SLEEP_SEC = 30          # seconds of idle before screen + LED turn off
-    _screen_on      = [True]      # mutable so nested functions can update it
-    _last_activity  = [time.time()]
 
     def _screen_wake():
         """Restore backlight and idle LED after sleep."""

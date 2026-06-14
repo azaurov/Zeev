@@ -2,6 +2,7 @@
 """Zeev — AI Companion"""
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -27,6 +28,7 @@ NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
 RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
 SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
 TORAH_DB      = BASE_DIR / "data" / "torah.db"
+TTS_CACHE_DIR = BASE_DIR / "data" / "tts_cache"
 
 # Load .env from repo root if present (supplements environment variables)
 _ENV_FILE = BASE_DIR.parent / ".env"
@@ -688,6 +690,11 @@ def groq_tts(text, voice="daniel"):
     clean = _clean_for_tts(text, "en")
     if not clean or detect_lang(clean) != "en":
         return None
+    key = hashlib.md5(f"{voice}:{clean[:4096]}".encode()).hexdigest()
+    TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = TTS_CACHE_DIR / f"{key}.wav"
+    if cache_path.exists():
+        return cache_path.read_bytes()
     try:
         resp = requests.post(
             GROQ_TTS_URL,
@@ -697,7 +704,13 @@ def groq_tts(text, voice="daniel"):
                   "input": clean[:4096], "voice": voice, "response_format": "wav"},
             timeout=30,
         )
-        return resp.content if resp.status_code == 200 else None
+        if resp.status_code == 200:
+            try:
+                cache_path.write_bytes(resp.content)
+            except Exception:
+                pass
+            return resp.content
+        return None
     except Exception:
         return None
 

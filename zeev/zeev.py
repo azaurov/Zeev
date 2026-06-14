@@ -3821,7 +3821,7 @@ def run_device_mode():
     def _idle_sleep_watcher():
         while True:
             time.sleep(5)
-            if _screen_on[0] and _face_state == "idle":
+            if _screen_on[0] and _face_state in ("idle", "ready"):
                 if time.time() - _last_activity[0] >= _IDLE_SLEEP_SEC:
                     _screen_on[0] = False
                     board.set_backlight(0)
@@ -3833,6 +3833,7 @@ def run_device_mode():
         _screen_wake()
         _set_face("ready")
         board.set_rgb(*_LED_READY)
+        _last_activity[0] = time.time()
 
     def _go_idle():
         _set_face("idle")

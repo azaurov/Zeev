@@ -1483,6 +1483,7 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
         if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
             print(f"{DIM}[offline → bosgame]{RESET}", flush=True)
             resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
+            print(f"{DIM}[bosgame resp={resp is not None} err={err!r:.80}]{RESET}", flush=True)
             return resp, err, "groq"
         return resp, err, "groq"
 

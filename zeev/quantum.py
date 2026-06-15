@@ -127,7 +127,7 @@ def _llm_circuit_spec(idea, llm_fn):
         return None, f"invalid spec ({e}): {text[:200]}"
 
 
-def _llm_interpret(idea, spec, result, llm_fn):
+def _llm_interpret(idea, spec, result, llm_fn, past_insights=None):
     options = spec["options"]
     phases = spec["phases"]
     probs = result["probabilities"]
@@ -144,6 +144,11 @@ def _llm_interpret(idea, spec, result, llm_fn):
     phase_lines = [f"  {opt}: {ph:.2f} rad ({'aligned' if ph < 1.6 else 'conflicted' if ph > 2.5 else 'neutral'})"
                    for opt, ph in zip(options, phases)]
 
+    past_block = ""
+    if past_insights:
+        lines = "\n".join(f"  - [{p['idea']}]: {p['interpretation'][:120]}…" for p in past_insights)
+        past_block = f"\n\nRelated patterns from prior quantum sessions:\n{lines}\n"
+
     prompt = (
         f'Quantum circuit explored: "{idea}"\n\n'
         f"Reflection: {reflection}\n\n"
@@ -153,8 +158,9 @@ def _llm_interpret(idea, spec, result, llm_fn):
         + "\n".join(phase_lines)
         + "\n\nAfter quantum interference, top measurement outcomes:\n"
         + "\n".join(outcome_lines)
+        + past_block
         + "\n\nInterpret this as Zeev, a thoughtful companion. What does the interference pattern reveal "
-        "about this dilemma? Speak in 3-4 sentences directly to Ragnar. Be specific, not vague."
+        "about this dilemma? Speak in 3-4 sentences directly to Alex. Be specific, not vague."
     )
     msgs = [
         {"role": "system", "content": "You are Zeev, a humble, calm, insightful AI companion."},
@@ -168,11 +174,13 @@ def _llm_interpret(idea, spec, result, llm_fn):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def quantum_reason(idea, llm_fn):
+def quantum_reason(idea, llm_fn, past_insights=None):
     """Run the full quantum reasoning pipeline.
 
     Returns (interpretation, spec, result, error).
     On error, interpretation is None and error is a string.
+    past_insights: list of dicts with 'idea' and 'interpretation' keys,
+                   injected as context to improve the interpretation.
     """
     spec, err = _llm_circuit_spec(idea, llm_fn)
     if err:
@@ -182,7 +190,7 @@ def quantum_reason(idea, llm_fn):
     if err:
         result = _simulate_pure_python(spec)
 
-    interpretation, err = _llm_interpret(idea, spec, result, llm_fn)
+    interpretation, err = _llm_interpret(idea, spec, result, llm_fn, past_insights=past_insights)
     if err:
         return None, spec, result, f"interpretation: {err}"
 

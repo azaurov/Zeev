@@ -1019,6 +1019,14 @@ def _db() -> sqlite3.Connection:
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS quantum_insights (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                idea           TEXT    NOT NULL,
+                spec_json      TEXT    NOT NULL,
+                result_json    TEXT    NOT NULL,
+                interpretation TEXT    NOT NULL,
+                ts             TEXT    NOT NULL
+            );
         """)
         _db_con.commit()
     return _db_con
@@ -1301,6 +1309,30 @@ def torah_search(query, k=3):
         return rows
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Quantum insights (persistent circuit reasoning log)
+# ---------------------------------------------------------------------------
+
+def save_quantum_insight(idea, spec, result, interpretation):
+    with _db_lock:
+        _db().execute(
+            "INSERT INTO quantum_insights (idea, spec_json, result_json, interpretation, ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (idea, json.dumps(spec), json.dumps(result), interpretation, datetime.now().isoformat()),
+        )
+        _db().commit()
+
+
+def load_quantum_insights(k=3):
+    """Return the k most recent quantum insight dicts (idea, interpretation)."""
+    with _db_lock:
+        rows = _db().execute(
+            "SELECT idea, interpretation FROM quantum_insights ORDER BY id DESC LIMIT ?",
+            (k,),
+        ).fetchall()
+    return [{"idea": r["idea"], "interpretation": r["interpretation"]} for r in rows]
 
 
 def init_learning():
@@ -3395,13 +3427,15 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     import quantum as _q
                     def _qllm(msgs, max_tokens=300, json_mode=False):
                         return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
-                    interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm)
+                    past = load_quantum_insights(k=3)
+                    interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm, past_insights=past)
                 except Exception as e:
                     err = str(e)
                     interpretation, spec, result = None, None, None
                 if err or not interpretation:
                     sse({"error": f"[quantum] {err or 'unknown error'}"})
                 else:
+                    save_quantum_insight(quantum_idea, spec, result, interpretation)
                     options = spec["options"]
                     probs = result["probabilities"]
                     n = len(options)
@@ -4956,11 +4990,13 @@ def main():
                 return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
 
             print(f"{DIM}[quantum] mapping idea to circuit...{RESET}", flush=True)
-            interpretation, spec, result, err = _q.quantum_reason(idea, _qllm)
+            past = load_quantum_insights(k=3)
+            interpretation, spec, result, err = _q.quantum_reason(idea, _qllm, past_insights=past)
             if err:
                 print(f"{DIM}[quantum] {err}{RESET}\n")
                 continue
 
+            save_quantum_insight(idea, spec, result, interpretation)
             options = spec["options"]
             probs = result["probabilities"]
             n = len(options)
@@ -5032,13 +5068,15 @@ def main():
                 import quantum as _q
                 def _qllm(msgs, max_tokens=300, json_mode=False):
                     return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
-                interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm)
+                past = load_quantum_insights(k=3)
+                interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm, past_insights=past)
             except Exception as e:
                 err = str(e)
                 interpretation, spec, result = None, None, None
             if err or not interpretation:
                 print(f"{DIM}[quantum] {err or 'unknown error'}{RESET}\n")
             else:
+                save_quantum_insight(quantum_idea, spec, result, interpretation)
                 options = spec["options"]
                 probs = result["probabilities"]
                 n = len(options)

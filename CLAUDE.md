@@ -46,7 +46,7 @@ Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and 
 Everything lives in `zeev/zeev.py` — a single-file script:
 
 - **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
-- **`load_prior()` / `append_message()`** — persistence via `data/history.jsonl` (JSONL, one `{role, content, ts}` per line). Loads the last `PRIOR_TURNS=15` turns at startup; caps in-session context at 60 messages.
+- **`load_prior()` / `append_message()`** — persistence via `data/zeev.db` SQLite (`messages` table, WAL mode). Loads the last `PRIOR_TURNS=15` turns (`ORDER BY id DESC LIMIT N`, reversed); caps in-session context at 60 messages.
 - **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–160). State stored in `_VOLUME` global (default 75).
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
@@ -68,6 +68,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
+- **`_db()` / `_db_lock` / `_db_con`** — lazy singleton SQLite connection to `data/zeev.db` (`check_same_thread=False`, WAL mode). All storage calls acquire `_db_lock` before executing; this is the thread-safety mechanism for `ThreadingHTTPServer`. Tables: `messages`, `facts`, `notes`, `settings`.
 - **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f zeev_music` and `pkill -f zeev_rec.wav` to catch orphaned ffmpeg/mpg123/arecord processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value. Speaks a time-of-day greeting to Alex on startup and "Goodbye, Alex." on exit via gTTS+mpg123 (blocking on exit so audio completes before the process dies).
 
@@ -118,9 +119,9 @@ Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SS
 
 ### User memory (persistent facts)
 
-Facts about the user are extracted from conversations and stored in `data/user_memory.json`. They are injected into every system prompt under `## What I know about Alex:`.
+Facts about the user are extracted from conversations and stored in `data/zeev.db` (`facts` table). Injected into every system prompt under `## What I know about Alex:`.
 
-- **`load_memory()` / `save_memory()`** — read/write `data/user_memory.json` (JSON list of strings).
+- **`load_memory()` / `save_memory()`** — read/write the `facts` table in `zeev.db` (unique text rows, ordered by insertion `id`).
 - **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit.
 - Extraction runs automatically on `quit` in terminal mode. Can also be triggered with `/memorize` (terminal) or the 🧠 → "Memorize this session" button (web UI).
 - Remove individual facts with `/forget-fact N` (terminal) or via the memory panel (web UI).
@@ -129,7 +130,7 @@ Facts about the user are extracted from conversations and stored in `data/user_m
 
 Past conversations are indexed at startup for keyword-based retrieval. Relevant exchanges are injected into the system prompt for each turn.
 
-- **`build_rag_index()`** — parses `data/history.jsonl` into an inverted word index (`_HISTORY_INDEX`) at startup, filtering stop words (`_STOP_WORDS`).
+- **`build_rag_index()`** — reads all rows from the `messages` table (`ORDER BY id`) into `_HISTORY_ENTRIES` and builds an inverted word index (`_HISTORY_INDEX`), filtering stop words (`_STOP_WORDS`).
 - **`retrieve_relevant(query, k=2, min_score=2)`** — scores past entries by word overlap with the current query, returns up to `k` `(user_msg, assistant_reply)` pairs above `min_score`. Injected as `## Relevant past exchanges:`.
 - **`init_learning()`** — called once at startup by both `main()` and `run_web_server()`; loads memory and builds RAG index.
 
@@ -200,9 +201,10 @@ zeev/
   mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
   import_sefaria.py              # populate data/torah.db (Sefaria, ETCBC DSS, ETCSL Sumerian)
   setup.sh                       # one-time setup script (legacy llama.cpp)
+  migrate_to_sqlite.py           # idempotent flat-file → zeev.db import (run once)
+  test_sqlite_migration.py       # 38-test regression harness (flat-file vs SQLite parity)
   data/                          # runtime files (git-ignored)
-    history.jsonl                # conversation history (JSONL)
-    user_memory.json             # persistent user facts
+    zeev.db                      # WAL-mode SQLite: messages, facts, notes, settings tables
     torah.db                     # FTS5 corpus DB (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)

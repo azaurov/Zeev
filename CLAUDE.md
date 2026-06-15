@@ -148,6 +148,16 @@ Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, 
 - **Dead Sea Scrolls**: ~11,000 fragments in Hebrew/Aramaic from [ETCBC/dss](https://github.com/ETCBC/dss) (Martin Abegg's transcriptions, Text-Fabric format). `import_dss()` fetches 5 TF feature files (scroll.tf, fragment.tf, full.tf, after.tf, oslots.tf), parses oslots in a single pass to get word→line first-sign mapping, groups words by scroll+fragment via bisect. `scroll.tf`/`fragment.tf` are annotated per LINE node (not fragment node).
 - **Sumerian**: 381 ETCSL texts (myths, hymns, Gilgamesh, royal praise, lamentations, proverbs) via a single JSON fetch from GitHub. `import_sumerian()` strips HTML from paragraph content.
 
+### Quantum reasoning
+
+`quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py` runs the full pipeline: idea → circuit spec → simulate → interpret. `past_insights` (list of `{idea, interpretation}` dicts) is injected into the interpretation prompt to compound learning over time.
+
+- **`zeev/quantum_daily.py`** — 8 canonical human-dilemma scenarios, one runs per day (selected by `day-of-year % 8`). Saves `idea`, `spec_json`, `result_json`, and `interpretation` to the `quantum_insights` table in `zeev.db`. `--all` flag runs every scenario. Cron: `0 6 * * *` on the Pi, logs to `zeev/data/quantum_daily.log`.
+- **`save_quantum_insight(idea, spec, result, interpretation)`** — writes one row to `quantum_insights`.
+- **`load_quantum_insights(k=3)`** — returns the `k` most recent insights (newest first) for injection into the next run's interpretation prompt.
+- All three `quantum_reason()` call sites (web handler, device mode `/quantum`, terminal REPL) load `k=3` past insights before running and save the result afterward.
+- `quantum_insights` table is part of `zeev.db` schema, auto-created by `_db()`.
+
 ### Music playback
 
 - **`youtube_play(query, adev=None)`** — searches YouTube via `yt-dlp --default-search ytsearch1`, downloads best audio, pipes through `ffmpeg` → `mpg123`. Returns `(title, error)`.
@@ -203,8 +213,10 @@ zeev/
   setup.sh                       # one-time setup script (legacy llama.cpp)
   migrate_to_sqlite.py           # idempotent flat-file → zeev.db import (run once)
   test_sqlite_migration.py       # 38-test regression harness (flat-file vs SQLite parity)
+  quantum_daily.py               # daily quantum teaching: 8 scenarios, cron 0 6 * * *
   data/                          # runtime files (git-ignored)
-    zeev.db                      # WAL-mode SQLite: messages, facts, notes, settings tables
+    zeev.db                      # WAL-mode SQLite: messages, facts, notes, settings, quantum_insights
+    quantum_daily.log            # stdout from cron runs of quantum_daily.py
     torah.db                     # FTS5 corpus DB (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)

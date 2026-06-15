@@ -8,6 +8,7 @@ import json
 import os
 import re
 import readline
+import sqlite3
 import select
 import shutil
 import signal
@@ -22,11 +23,8 @@ from pathlib import Path
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
-HISTORY_FILE  = BASE_DIR / "data" / "history.jsonl"
-MEMORY_FILE   = BASE_DIR / "data" / "user_memory.json"
-NOTES_FILE    = BASE_DIR / "data" / "notes.jsonl"
+ZEEV_DB       = BASE_DIR / "data" / "zeev.db"
 RL_HISTORY    = BASE_DIR / "data" / ".readline_history"
-SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
 TORAH_DB      = BASE_DIR / "data" / "torah.db"
 TTS_CACHE_DIR = BASE_DIR / "data" / "tts_cache"
 
@@ -987,31 +985,65 @@ RESET = "\033[0m"
 
 
 # ---------------------------------------------------------------------------
+# SQLite — single shared connection (WAL mode, thread-safe via lock)
+# ---------------------------------------------------------------------------
+
+_db_lock = threading.Lock()
+_db_con: sqlite3.Connection | None = None
+
+
+def _db() -> sqlite3.Connection:
+    global _db_con
+    if _db_con is None:
+        ZEEV_DB.parent.mkdir(parents=True, exist_ok=True)
+        _db_con = sqlite3.connect(str(ZEEV_DB), check_same_thread=False)
+        _db_con.execute("PRAGMA journal_mode=WAL")
+        _db_con.row_factory = sqlite3.Row
+        _db_con.executescript("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                role    TEXT    NOT NULL,
+                content TEXT    NOT NULL,
+                ts      TEXT    NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS facts (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                fact TEXT    NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS notes (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT    NOT NULL,
+                ts   TEXT    NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+        _db_con.commit()
+    return _db_con
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
 def load_prior():
-    if not HISTORY_FILE.exists():
-        return []
-    lines = HISTORY_FILE.read_text().strip().splitlines()
-    messages = []
-    for line in lines[-(PRIOR_TURNS * 2):]:
-        try:
-            entry = json.loads(line)
-            messages.append({"role": entry["role"], "content": entry["content"]})
-        except (json.JSONDecodeError, KeyError):
-            pass
-    return messages
+    with _db_lock:
+        rows = _db().execute(
+            "SELECT role, content FROM messages ORDER BY id DESC LIMIT ?",
+            (PRIOR_TURNS * 2,),
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
 def append_message(role, content):
-    HISTORY_FILE.parent.mkdir(exist_ok=True)
-    with open(HISTORY_FILE, "a") as f:
-        f.write(json.dumps({
-            "role": role,
-            "content": content,
-            "ts": datetime.now().isoformat(),
-        }) + "\n")
+    with _db_lock:
+        _db().execute(
+            "INSERT INTO messages (role, content, ts) VALUES (?, ?, ?)",
+            (role, content, datetime.now().isoformat()),
+        )
+        _db().commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1019,18 +1051,18 @@ def append_message(role, content):
 # ---------------------------------------------------------------------------
 
 def load_memory():
-    if not MEMORY_FILE.exists():
-        return []
-    try:
-        data = json.loads(MEMORY_FILE.read_text())
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, ValueError):
-        return []
+    with _db_lock:
+        rows = _db().execute("SELECT fact FROM facts ORDER BY id").fetchall()
+    return [r["fact"] for r in rows]
 
 
 def save_memory(facts):
-    MEMORY_FILE.parent.mkdir(exist_ok=True)
-    MEMORY_FILE.write_text(json.dumps(facts, indent=2))
+    with _db_lock:
+        con = _db()
+        con.execute("DELETE FROM facts")
+        for f in facts:
+            con.execute("INSERT INTO facts (fact) VALUES (?)", (f,))
+        con.commit()
 
 
 def extract_memory(session_msgs):
@@ -1082,23 +1114,18 @@ def extract_memory(session_msgs):
 # ---------------------------------------------------------------------------
 
 def load_notes():
-    if not NOTES_FILE.exists():
-        return []
-    notes = []
-    for line in NOTES_FILE.read_text().splitlines():
-        try:
-            notes.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-    return notes
+    with _db_lock:
+        rows = _db().execute("SELECT text, ts FROM notes ORDER BY id").fetchall()
+    return [{"text": r["text"], "ts": r["ts"]} for r in rows]
 
 
 def add_note(text):
     global USER_NOTES
-    note = {"text": text.strip(), "ts": datetime.now().isoformat()}
-    NOTES_FILE.parent.mkdir(exist_ok=True)
-    with open(NOTES_FILE, "a") as f:
-        f.write(json.dumps(note) + "\n")
+    ts = datetime.now().isoformat()
+    with _db_lock:
+        _db().execute("INSERT INTO notes (text, ts) VALUES (?, ?)", (text.strip(), ts))
+        _db().commit()
+    note = {"text": text.strip(), "ts": ts}
     with _notes_lock:
         USER_NOTES.append(note)
     return USER_NOTES
@@ -1110,9 +1137,12 @@ def delete_note(idx):
         if not (0 <= idx < len(USER_NOTES)):
             return False
         USER_NOTES.pop(idx)
-        NOTES_FILE.write_text(
-            "".join(json.dumps(n) + "\n" for n in USER_NOTES)
-        )
+    with _db_lock:
+        con = _db()
+        rows = con.execute("SELECT id FROM notes ORDER BY id").fetchall()
+        if 0 <= idx < len(rows):
+            con.execute("DELETE FROM notes WHERE id = ?", (rows[idx]["id"],))
+            con.commit()
     return True
 
 
@@ -1124,19 +1154,21 @@ _SETTINGS_TTS_ON = True   # default; overwritten by load_settings()
 
 def load_settings():
     global CAMERA_FLIP, _SETTINGS_TTS_ON
-    try:
-        data = json.loads(SETTINGS_FILE.read_text())
-        CAMERA_FLIP      = bool(data.get("camera_flip", False))
-        _SETTINGS_TTS_ON = bool(data.get("tts_on", True))
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    with _db_lock:
+        rows = _db().execute("SELECT key, value FROM settings").fetchall()
+    data = {r["key"]: json.loads(r["value"]) for r in rows}
+    CAMERA_FLIP      = bool(data.get("camera_flip", False))
+    _SETTINGS_TTS_ON = bool(data.get("tts_on", True))
 
 def save_settings():
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps({
-        "camera_flip": CAMERA_FLIP,
-        "tts_on":      _SETTINGS_TTS_ON,
-    }))
+    with _db_lock:
+        con = _db()
+        for k, v in [("camera_flip", CAMERA_FLIP), ("tts_on", _SETTINGS_TTS_ON)]:
+            con.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (k, json.dumps(v)),
+            )
+        con.commit()
 
 # ---------------------------------------------------------------------------
 # History RAG (keyword retrieval over past conversations)
@@ -1147,17 +1179,14 @@ def _tokenize(text):
 
 
 def build_rag_index():
-    """Parse history.jsonl into module-level globals for retrieval."""
+    """Load messages from SQLite into module-level globals for retrieval."""
     global _HISTORY_ENTRIES, _HISTORY_INDEX
-    if not HISTORY_FILE.exists():
-        return
-    entries = []
+    with _db_lock:
+        rows = _db().execute(
+            "SELECT role, content, ts FROM messages ORDER BY id"
+        ).fetchall()
+    entries = [{"role": r["role"], "content": r["content"], "ts": r["ts"]} for r in rows]
     index = {}
-    for line in HISTORY_FILE.read_text().splitlines():
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
     for i, entry in enumerate(entries):
         for word in _tokenize(entry.get("content", "")):
             index.setdefault(word, []).append(i)
@@ -4677,8 +4706,9 @@ def main():
             continue
 
         if user_input.lower() == "/forget":
-            if HISTORY_FILE.exists():
-                HISTORY_FILE.unlink()
+            with _db_lock:
+                _db().execute("DELETE FROM messages")
+                _db().commit()
             session.clear()
             print(f"{DIM}All history deleted.{RESET}\n")
             continue

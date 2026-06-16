@@ -12,6 +12,20 @@ TTS uses Piper with a persistent process; do NOT use per-sentence model reloads 
 
 In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio by resetting `_piper_dev_proc = None` and restarting the process — only falls through to espeak-ng if both attempts fail.
 
+WM8960 auto-powers-down after ~30s of ALSA inactivity. Device mode runs a keepalive thread that plays a 1s silent buffer every 20s to prevent this.
+
+All audio output (TTS, music) routes through `bt_audio_dev()` which returns the active BlueALSA PCM string when Bluetooth headphones are connected, or `plughw:wm8960soundcard,0` otherwise. Requires `bluez-alsa-utils` + `libasound2-plugin-bluez` on the Pi.
+
+## Bluetooth
+
+- `_BT_AUDIO_DEV` global holds the active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`) when headphones are connected.
+- `bt_scan()` — 10s scan for nearby devices; results stored in `_bt_scan_results`.
+- `bt_pair(mac)` — pairs and trusts a device via bluetoothctl.
+- `bt_connect(mac)` / `bt_disconnect(mac)` — connect/disconnect and update `_BT_AUDIO_DEV`.
+- `extract_bt_intent(text)` — detects 'scan'/'pair'/'connect'/'disconnect' from natural language.
+- Natural language handled before LLM routing in both terminal and device mode.
+- `/bt` slash command: `scan`, `pair <N>`, `<N>` to connect, `off` to disconnect.
+
 ## Version Control
 
 Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless explicitly asked. Add generated/data files to `.gitignore` by default and confirm before committing.

@@ -13,6 +13,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
 - **Quantum reasoning** — maps any idea or dilemma to a quantum circuit, simulates interference, and interprets the pattern as insight; compounds daily via `quantum_daily.py` (8 canonical scenarios, cron 6 AM)
 - **Music playback** — natural language YouTube search via yt-dlp + ffmpeg (`play some jazz`, `stop`)
+- **Bluetooth audio** — pair and connect headphones by voice (`scan for bluetooth`, `pair my headphones`, `disconnect bluetooth`); all TTS and music routes through the headphones when connected; `/bt` slash command for manual control
 - **Voice input** — Web Speech Recognition in the browser; Groq Whisper STT in device mode
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
@@ -215,6 +216,10 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 2. Google Translate TTS + mpg123 (he/es/ru, ~500ms)
 3. Piper local (English fallback) — retried once on process crash before falling through
 4. espeak-ng (last resort)
+
+**Bluetooth audio** (requires `sudo apt install bluez-alsa-utils libasound2-plugin-bluez`):
+
+Say `scan for bluetooth` → Zeev scans 10s and lists nearby devices. Say the device name (or `pair it` if only one) → Zeev pairs, trusts, and connects. All TTS and music then routes through the headphones. Say `disconnect bluetooth` to revert to the speaker. Manual control via `/bt scan`, `/bt pair <N>`, `/bt <N>`, `/bt off`.
 
 ## Terminal commands
 

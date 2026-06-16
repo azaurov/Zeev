@@ -1466,7 +1466,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         print("[call] Listening...", flush=True)
-        pcm = _vad_collect(rec, samplerate=samplerate)
+        # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
+        silence_ms = 3000 if call_type == "ivr" else 900
+        pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
         rec.terminate()
         rec.wait()
 
@@ -1479,17 +1481,18 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 break
             continue
 
+        # STT first — skip saving noise artifacts
+        transcript = stt_fn(pcm)
+        # Filter Whisper noise artifacts (single punct, very short non-speech)
+        if not transcript or not re.search(r'\w{2,}', transcript):
+            continue
+
         if record_dir:
             import os as _os
             wav_path = _os.path.join(record_dir, f"call_turn{turn:03d}_caller.wav")
             bt_call_record_wav(pcm, wav_path, samplerate)
             print(f"[call] Saved caller audio → {wav_path}", flush=True)
 
-        # STT
-        transcript = stt_fn(pcm)
-        # Filter Whisper noise artifacts (single punct, very short non-speech)
-        if not transcript or not re.search(r'\w{2,}', transcript):
-            continue
         print(f"[call] Caller: {transcript}", flush=True)
         call_log.append({"role": "caller", "text": transcript})
 

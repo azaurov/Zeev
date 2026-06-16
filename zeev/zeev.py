@@ -967,6 +967,8 @@ def stt(wav_bytes):
 
 
 _BT_AUDIO_DEV: str = ""   # set to bluealsa PCM when headphones are active
+_BT_RATE: int = 44100    # sample rate reported by bluealsa
+_BT_CHANNELS: int = 1    # channel count reported by bluealsa
 _bt_scan_results: list[tuple[str, str]] = []  # [(mac, name)] from last /bt scan
 
 
@@ -982,18 +984,27 @@ def bt_audio_dev() -> str:
 
 def bt_detect_connected():
     """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
-    global _BT_AUDIO_DEV
+    global _BT_AUDIO_DEV, _BT_CHANNELS, _BT_RATE
     try:
         result = subprocess.run(
             ["bluealsa-aplay", "--list-pcms"],
             capture_output=True, text=True, timeout=5,
         )
-        for line in result.stdout.splitlines():
-            # Lines look like: bluealsa:DEV=94:4B:F8:6B:08:08,PROFILE=a2dp,...
+        lines = result.stdout.splitlines()
+        for i, line in enumerate(lines):
             m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=a2dp', line)
             if m:
                 _BT_AUDIO_DEV = f"bluealsa:DEV={m.group(1)},PROFILE=a2dp"
-                print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV}")
+                # Parse format from next few lines, e.g. "A2DP (SBC): S16_LE 2 channels 44100 Hz"
+                for j in range(i+1, min(i+4, len(lines))):
+                    fmt = lines[j]
+                    mc = re.search(r'(\d+) channel', fmt)
+                    mr = re.search(r'(\d+) Hz', fmt)
+                    if mc:
+                        _BT_CHANNELS = int(mc.group(1))
+                    if mr:
+                        _BT_RATE = int(mr.group(1))
+                print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV} ({_BT_RATE}Hz {_BT_CHANNELS}ch)")
                 return
     except Exception:
         pass
@@ -1098,7 +1109,7 @@ def bt_pair(mac: str) -> bool:
 
 
 def bt_connect(mac: str) -> bool:
-    global _BT_AUDIO_DEV
+    global _BT_AUDIO_DEV, _BT_RATE, _BT_CHANNELS
     try:
         r = subprocess.run(
             ["bluetoothctl", "connect", mac],
@@ -1106,6 +1117,9 @@ def bt_connect(mac: str) -> bool:
         )
         if r.returncode == 0:
             _BT_AUDIO_DEV = bt_alsa_dev(mac)
+            # Refresh format from bluealsa after connect
+            import time as _t; _t.sleep(1)
+            bt_detect_connected()
             return True
         return False
     except Exception:
@@ -4230,16 +4244,17 @@ def run_device_mode():
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
             try:
-                # BT (bluealsa) requires 44100Hz stereo; resample WAV via ffmpeg
+                # BT (bluealsa) requires exact format match; resample WAV via ffmpeg
                 if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
                     ff = subprocess.Popen(
                         ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
-                         "-f", "s16le", "-ar", "44100", "-ac", "2", "pipe:1"],
+                         "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     )
                     raw, _ = ff.communicate(wav)
                     p2 = subprocess.Popen(
-                        ["aplay", "-D", adev, "-f", "S16_LE", "-r", "44100", "-c", "2", "-q", "-"],
+                        ["aplay", "-D", adev, "-f", "S16_LE",
+                         "-r", str(_BT_RATE), "-c", str(_BT_CHANNELS), "-q", "-"],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )

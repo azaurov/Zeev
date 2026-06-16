@@ -5505,20 +5505,21 @@ def run_device_mode():
     _greeting = _miss_minutes_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
 
-    def _speak_greeting():
-        mp3 = elevenlabs_tts(_greeting)
-        if mp3 and shutil.which("mpg123"):
-            proc = subprocess.Popen(
-                ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            proc.stdin.write(mp3)
-            proc.stdin.close()
-            proc.wait()
-        else:
-            _speak_device(_greeting)   # fallback if ElevenLabs unavailable
+    if "--no-greeting" not in sys.argv:
+        def _speak_greeting():
+            mp3 = elevenlabs_tts(_greeting)
+            if mp3 and shutil.which("mpg123"):
+                proc = subprocess.Popen(
+                    ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                proc.stdin.write(mp3)
+                proc.stdin.close()
+                proc.wait()
+            else:
+                _speak_device(_greeting)   # fallback if ElevenLabs unavailable
 
-    threading.Thread(target=_speak_greeting, daemon=True).start()
+        threading.Thread(target=_speak_greeting, daemon=True).start()
 
     def _keyboard_listener():
         import tty, termios
@@ -5694,14 +5695,15 @@ def main():
         print()
     print(f"{DIM}Model: auto-routing  (/model to change)  |  Language: auto  (/lang to change){RESET}\n")
 
-    _hour = time.localtime().tm_hour
-    _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
-    _greeting = f"Good {_tod}, Alex. Ready when you are."
-    # Use gTTS for the greeting — much faster than Piper's ~20s cold-start on Pi Zero
-    if shutil.which("mpg123"):
-        _gtts_speak(_greeting, "en")
-    else:
-        speak_terminal(_greeting)
+    if "--no-greeting" not in sys.argv:
+        _hour = time.localtime().tm_hour
+        _tod  = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+        _greeting = f"Good {_tod}, Alex. Ready when you are."
+        # Use gTTS for the greeting — much faster than Piper's ~20s cold-start on Pi Zero
+        if shutil.which("mpg123"):
+            _gtts_speak(_greeting, "en")
+        else:
+            speak_terminal(_greeting)
 
     # Start wake-word listener if mic is available
     _input_q = _queue.Queue()   # both keyboard and voice feed here

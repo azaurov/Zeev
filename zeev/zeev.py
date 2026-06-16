@@ -1296,6 +1296,14 @@ def bt_call_at(mac: str, cmd: str) -> bool:
         return False
 
 
+def bt_call_dtmf(mac: str, digit: str) -> bool:
+    """Send a DTMF tone via AT+VTS. digit should be 0-9, *, or #."""
+    digit = digit.strip()
+    if not re.match(r'^[0-9*#]$', digit):
+        return False
+    return bt_call_at(mac, f"AT+VTS={digit}")
+
+
 def bt_call_dial(number: str) -> bool:
     """Dial a number via HFP ATD. Returns True if AT command sent."""
     global _BT_PHONE_MAC
@@ -1520,15 +1528,42 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             elif call_type == "ivr":
                 intent_line = f" Goal: {call_intent}." if call_intent else ""
                 ivr_context = (
-                    f"You are navigating an automated phone menu (IVR system) on behalf of Alex.{intent_line} "
-                    "Listen to the options and choose the one that best matches the goal. "
-                    "Respond with only the spoken option or DTMF digit (e.g. '1', 'two', 'yes'). Be concise."
+                    f"You are navigating an automated IVR phone menu on behalf of Alex.{intent_line} "
+                    "Reply with ONLY a single digit (0-9), *, or # to select the best matching option. "
+                    "No words, no explanation — just the digit."
                 )
-                speak_fn("Navigating the menu.")
+                # don't speak anything; wait for IVR to continue
 
             else:
                 # live or unknown — greet normally
                 speak_fn("Hello, this is Zeev. How can I help you?")
+
+        # In IVR mode: re-check for voicemail greeting on every subsequent turn
+        elif call_type == "ivr" and _CALL_VOICEMAIL_RE.search(transcript):
+            call_type = "voicemail"
+            print("[call] Voicemail detected mid-call", flush=True)
+            explicit_m = re.search(r'say(?:ing)?\s+(.+)', call_intent, re.IGNORECASE)
+            if explicit_m:
+                msg = explicit_m.group(1).strip()
+                msg = re.sub(r',?\s*then\b.*$', '', msg, flags=re.IGNORECASE).strip().strip('.,')
+            else:
+                intent_line = f" Reason: {call_intent}." if call_intent else ""
+                msg = llm_fn(
+                    f"Leave a brief voicemail on behalf of Alex.{intent_line} "
+                    f"Greeting: \"{transcript}\". "
+                    "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
+                )
+                if not msg:
+                    msg = "Hi, this is Zeev calling on behalf of Alex. Please call back. Thank you."
+                msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
+            print(f"[call] Zeev (voicemail): {msg}", flush=True)
+            speak_fn(msg)
+            if record_dir:
+                with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
+                    lf.write(f"[voicemail detected at turn {turn}]\nGreeting: {transcript}\nMessage: {msg}\n")
+            _IN_CALL = False
+            bt_call_hangup()
+            break
 
         # Hangup detection from caller's words
         if re.search(r"\b(bye|goodbye|hang up|gotta go|talk later)\b",
@@ -1538,24 +1573,33 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             bt_call_hangup()
             break
 
-        # LLM reply — inject IVR context if needed
-        prompt = f"{ivr_context}\n\n{transcript}".strip() if ivr_context else transcript
+        # LLM reply
+        prompt = f"{ivr_context}\n\nIVR said: {transcript}".strip() if ivr_context else transcript
         reply = llm_fn(prompt)
         if not reply:
             reply = "I'm sorry, I didn't catch that."
+
+        # IVR mode: if reply is a single digit send it as DTMF, skip TTS
+        if ivr_context:
+            digit_m = re.match(r'^\s*([0-9*#])\s*$', reply)
+            if digit_m:
+                digit = digit_m.group(1)
+                print(f"[call] Zeev DTMF: {digit}", flush=True)
+                bt_call_dtmf(mac, digit)
+                call_log.append({"role": "zeev", "text": f"[DTMF {digit}]"})
+                turn += 1
+                continue
+
         print(f"[call] Zeev: {reply}", flush=True)
         call_log.append({"role": "zeev", "text": reply})
 
         if record_dir:
-            # append reply text to a transcript file
             import os as _os
             log_path = _os.path.join(record_dir, "call_transcript.txt")
             with open(log_path, "a") as lf:
                 lf.write(f"[{turn}] Caller: {transcript}\n")
                 lf.write(f"[{turn}] Zeev:   {reply}\n\n")
 
-        # Speak reply back through SCO device (mutes recording implicitly since
-        # arecord is stopped before aplay starts — no echo cancellation needed)
         speak_fn(reply)
         turn += 1
 

@@ -1427,7 +1427,8 @@ def detect_call_type(transcript: str, llm_fn=None) -> str:
 
 
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
-                 record_dir: str | None = None) -> None:
+                 record_dir: str | None = None,
+                 call_intent: str = "") -> None:
     """
     Run the Zeev conversation loop over an active HFP call.
     speak_fn(text) — plays TTS through SCO device
@@ -1435,6 +1436,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     llm_fn(text) — returns Zeev's reply string
     record_dir — if set, saves each turn as WAV files
     mac — phone MAC for SCO device address
+    call_intent — why Alex is making this call (injected into IVR/voicemail context)
     """
     global _IN_CALL
     _IN_CALL = True
@@ -1488,9 +1490,11 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             print(f"[call] Detected: {call_type}", flush=True)
 
             if call_type == "voicemail":
+                intent_line = f" The reason for the call: {call_intent}." if call_intent else ""
                 msg = llm_fn(
-                    f"You are leaving a voicemail. The voicemail greeting said: \"{transcript}\". "
-                    "Leave a brief, natural voicemail message (2-3 sentences) on behalf of Alex."
+                    f"You are leaving a voicemail on behalf of Alex.{intent_line} "
+                    f"The voicemail greeting said: \"{transcript}\". "
+                    "Leave a brief, natural voicemail message (2-3 sentences)."
                 )
                 if not msg:
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance. Thank you."
@@ -1504,7 +1508,12 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 break
 
             elif call_type == "ivr":
-                ivr_context = "You are navigating an automated phone menu (IVR system). Listen to the options and respond with the appropriate choice or say the option aloud. Be concise."
+                intent_line = f" Goal: {call_intent}." if call_intent else ""
+                ivr_context = (
+                    f"You are navigating an automated phone menu (IVR system) on behalf of Alex.{intent_line} "
+                    "Listen to the options and choose the one that best matches the goal. "
+                    "Respond with only the spoken option or DTMF digit (e.g. '1', 'two', 'yes'). Be concise."
+                )
                 speak_fn("Navigating the menu.")
 
             else:
@@ -5035,10 +5044,11 @@ def run_device_mode():
             return
 
         if not _IN_CALL and _BT_CALL_RE.search(transcript):
-            # Extract number from transcript (digits only; "call 555-1234")
+            # Extract number and optional intent ("call 555-1234 to check my balance")
             number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', transcript)
             if number_m:
                 number = number_m.group(1).strip()
+                intent_text = transcript[number_m.end():].strip().lstrip("to ").strip()
                 phone_mac = bt_hfp_detect()
                 if not phone_mac:
                     reply = "No phone connected via Bluetooth. Please connect your phone first."
@@ -5078,7 +5088,7 @@ def run_device_mode():
                     _call_thread = threading.Thread(
                         target=bt_call_loop,
                         args=(_speak_device, _stt_from_pcm, _llm_reply, phone_mac),
-                        kwargs={"record_dir": record_dir},
+                        kwargs={"record_dir": record_dir, "call_intent": intent_text},
                         daemon=True,
                     )
                     _call_thread.start()
@@ -6044,11 +6054,14 @@ def main():
             number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', user_input)
             if number_m:
                 number = number_m.group(1).strip()
+                intent_text = user_input[number_m.end():].strip().lstrip("to ").strip()
                 phone_mac = bt_hfp_detect()
                 if not phone_mac:
                     print(f"\n{CYAN}{BOLD}Zeev:{RESET} No phone connected via HFP Bluetooth.\n")
                     continue
                 print(f"{DIM}[call] Dialing {number}...{RESET}", flush=True)
+                if intent_text:
+                    print(f"{DIM}[call] Intent: {intent_text}{RESET}", flush=True)
                 ok = bt_call_dial(number)
                 if ok:
                     import time as _time2
@@ -6081,7 +6094,7 @@ def main():
                     _call_thread = threading.Thread(
                         target=bt_call_loop,
                         args=(_term_speak, _term_stt, _term_llm, phone_mac),
-                        kwargs={"record_dir": record_dir},
+                        kwargs={"record_dir": record_dir, "call_intent": intent_text},
                         daemon=True,
                     )
                     _call_thread.start()

@@ -383,7 +383,7 @@ def _clean_for_tts(text, lang=None):
     return text
 
 
-def _piper_speak(clean, model):
+def _piper_speak(clean, model, adev=None):
     """Speak via a persistent Piper process → aplay, in a background thread.
     The process stays alive between calls so the model is only loaded once."""
     global _piper_term_proc
@@ -404,8 +404,11 @@ def _piper_speak(clean, model):
                 p.stdin.flush()
                 # Stream PCM from Piper → aplay as it arrives so playback
                 # starts immediately rather than waiting for full synthesis.
+                aplay_cmd = ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"]
+                if adev:
+                    aplay_cmd = ["aplay", "-D", adev, "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"]
                 aplay = subprocess.Popen(
-                    ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"],
+                    aplay_cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -688,11 +691,12 @@ def speak_terminal(text, lang=None):
     if not clean:
         return
 
+    adev = bt_audio_dev()
     _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
     if lang in _GTTS_LANGS and shutil.which("mpg123"):
-        _gtts_speak(clean, _GTTS_LANGS[lang])
+        _gtts_speak(clean, _GTTS_LANGS[lang], adev=adev)
     elif PIPER_BIN and PIPER_MODELS.get("en"):
-        _piper_speak(clean, PIPER_MODELS["en"])
+        _piper_speak(clean, PIPER_MODELS["en"], adev=adev)
     else:
         espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
         try:
@@ -927,6 +931,20 @@ def stt(wav_bytes):
     return groq_stt(wav_bytes)   # fallback
 
 
+_BT_AUDIO_DEV: str = ""   # set to bluealsa PCM when headphones are active
+_bt_scan_results: list[tuple[str, str]] = []  # [(mac, name)] from last /bt scan
+
+
+def bt_alsa_dev(mac: str) -> str:
+    """Return the BlueALSA ALSA PCM string for a connected A2DP device."""
+    return f"bluealsa:DEV={mac},PROFILE=a2dp"
+
+
+def bt_audio_dev() -> str:
+    """Return current audio output device — BT if connected, else WM8960."""
+    return _BT_AUDIO_DEV or "plughw:wm8960soundcard,0"
+
+
 def bt_list():
     """Return list of (mac, name, connected) for all paired BT devices."""
     try:
@@ -953,18 +971,67 @@ def bt_list():
         return []
 
 
-def bt_connect(mac):
+def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
+    """Scan for nearby Bluetooth devices. Returns list of (mac, name)."""
+    found: dict[str, str] = {}
+    try:
+        import select as _sel
+        proc = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        proc.stdin.write("scan on\n"); proc.stdin.flush()
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            r, _, _ = _sel.select([proc.stdout], [], [], 0.5)
+            if r:
+                line = proc.stdout.readline()
+                if "Device" in line and "NEW" in line:
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        mac, name = parts[2], " ".join(parts[3:])
+                        found[mac] = name
+        proc.stdin.write("scan off\nexit\n"); proc.stdin.flush()
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+    return list(found.items())
+
+
+def bt_pair(mac: str) -> bool:
+    """Pair and trust a Bluetooth device by MAC."""
+    try:
+        proc = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        proc.stdin.write(f"pair {mac}\ntrust {mac}\nexit\n"); proc.stdin.flush()
+        proc.wait(timeout=20)
+        return True
+    except Exception:
+        return False
+
+
+def bt_connect(mac: str) -> bool:
+    global _BT_AUDIO_DEV
     try:
         r = subprocess.run(
             ["bluetoothctl", "connect", mac],
             capture_output=True, timeout=15,
         )
-        return r.returncode == 0
+        if r.returncode == 0:
+            _BT_AUDIO_DEV = bt_alsa_dev(mac)
+            return True
+        return False
     except Exception:
         return False
 
 
-def bt_disconnect(mac):
+def bt_disconnect(mac: str) -> None:
+    global _BT_AUDIO_DEV
     try:
         subprocess.run(
             ["bluetoothctl", "disconnect", mac],
@@ -972,6 +1039,7 @@ def bt_disconnect(mac):
         )
     except Exception:
         pass
+    _BT_AUDIO_DEV = ""
 
 
 SYSTEM_PROMPT = (
@@ -5062,37 +5130,75 @@ def main():
 
         if user_input.lower().startswith("/bt"):
             parts = user_input.split()
-            devices = bt_list()
-            if not devices:
-                print(f"{DIM}No paired Bluetooth devices found.")
-                print(f"Run setup_bluetooth.sh to pair a device.{RESET}\n")
+            sub = parts[1].lower() if len(parts) > 1 else ""
+
+            if sub == "scan":
+                print(f"{DIM}Scanning for Bluetooth devices (10s)...{RESET}", flush=True)
+                found = bt_scan(10)
+                if not found:
+                    print(f"{DIM}No devices found.{RESET}\n")
+                else:
+                    print(f"{DIM}Found:{RESET}")
+                    for i, (mac, name) in enumerate(found, 1):
+                        print(f"  {i}) {name}  {DIM}{mac}{RESET}")
+                    print(f"\n{DIM}  /bt pair <number>   pair a device{RESET}\n")
+                    _bt_scan_results[:] = found
                 continue
-            if len(parts) == 1:
+
+            if sub == "pair":
+                if len(parts) < 3 or not parts[2].isdigit():
+                    print(f"{DIM}Usage: /bt pair <number>{RESET}\n")
+                    continue
+                idx = int(parts[2]) - 1
+                if not _bt_scan_results or not (0 <= idx < len(_bt_scan_results)):
+                    print(f"{DIM}Run /bt scan first.{RESET}\n")
+                    continue
+                mac, name = _bt_scan_results[idx]
+                print(f"{DIM}Pairing with {name}...{RESET}", end=" ", flush=True)
+                ok = bt_pair(mac)
+                print(f"{DIM}{'done' if ok else 'failed'}.{RESET}\n")
+                continue
+
+            devices = bt_list()
+            if sub == "":
                 # show status
-                print(f"{DIM}Paired devices:{RESET}")
-                for i, (mac, name, connected) in enumerate(devices, 1):
-                    dot = f"{CYAN}●{RESET}" if connected else f"{DIM}○{RESET}"
-                    status = f"{DIM} connected{RESET}" if connected else ""
-                    print(f"  {i}) {dot} {name}  {DIM}{mac}{RESET}{status}")
-                print(f"\n{DIM}  /bt <number>   connect a device")
-                print(f"  /bt off        disconnect all{RESET}\n")
-            elif parts[1].lower() == "off":
+                adev = bt_audio_dev()
+                bt_active = bool(_BT_AUDIO_DEV)
+                print(f"{DIM}Audio output: {'Bluetooth' if bt_active else 'WM8960 speaker'}{RESET}")
+                if not devices:
+                    print(f"{DIM}No paired devices. Use /bt scan to find headphones.{RESET}\n")
+                else:
+                    print(f"{DIM}Paired devices:{RESET}")
+                    for i, (mac, name, connected) in enumerate(devices, 1):
+                        dot = f"{CYAN}●{RESET}" if connected else f"{DIM}○{RESET}"
+                        status = f"{CYAN} ♪ audio{RESET}" if (connected and _BT_AUDIO_DEV and mac in _BT_AUDIO_DEV) else (f"{DIM} connected{RESET}" if connected else "")
+                        print(f"  {i}) {dot} {name}  {DIM}{mac}{RESET}{status}")
+                    print(f"\n{DIM}  /bt scan         scan for new devices")
+                    print(f"  /bt pair <N>     pair a scanned device")
+                    print(f"  /bt <number>     connect + route audio")
+                    print(f"  /bt off          disconnect all{RESET}\n")
+
+            elif sub == "off":
                 for mac, name, connected in devices:
                     if connected:
                         bt_disconnect(mac)
                         print(f"{DIM}Disconnected {name}.{RESET}")
-                print()
-            elif parts[1].isdigit():
-                idx = int(parts[1]) - 1
+                print(f"{DIM}Audio reverted to WM8960 speaker.{RESET}\n")
+
+            elif sub.isdigit():
+                idx = int(sub) - 1
                 if 0 <= idx < len(devices):
                     mac, name, _ = devices[idx]
                     print(f"{DIM}Connecting to {name}...{RESET}", end=" ", flush=True)
                     ok = bt_connect(mac)
-                    print(f"{DIM}{'done' if ok else 'failed'}.{RESET}\n")
+                    if ok:
+                        print(f"{DIM}done. Audio routed to {name}.{RESET}\n")
+                    else:
+                        print(f"{DIM}failed.{RESET}\n")
                 else:
-                    print(f"{DIM}No device #{parts[1]}.{RESET}\n")
+                    print(f"{DIM}No device #{sub}.{RESET}\n")
             else:
-                print(f"{DIM}Usage: /bt  /bt <number>  /bt off{RESET}\n")
+                print(f"{DIM}Usage: /bt  /bt scan  /bt pair <N>  /bt <N>  /bt off{RESET}\n")
             continue
 
         batt_level, batt_charging = get_battery()
@@ -5140,7 +5246,7 @@ def main():
 
         music_query = extract_music_query(user_input)
         if music_query:
-            _, err = youtube_play(music_query)
+            _, err = youtube_play(music_query, adev=bt_audio_dev())
             if err:
                 print(f"{DIM}[music] {err}{RESET}\n")
             continue

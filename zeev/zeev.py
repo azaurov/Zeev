@@ -1505,14 +1505,15 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = explicit_m.group(1).strip()
                     msg = re.sub(r',?\s*then\b.*$', '', msg, flags=re.IGNORECASE).strip()
                     msg = msg.strip('"\'.,')
-                else:
-                    intent_line = f" Reason for the call: {call_intent}." if call_intent else ""
+                elif call_intent:
                     msg = llm_fn(
-                        f"You are leaving a voicemail on behalf of Alex.{intent_line} "
+                        f"You are leaving a voicemail on behalf of Alex. Reason: {call_intent}. "
                         f"Voicemail greeting: \"{transcript}\". "
                         "Leave a brief natural voicemail (2-3 sentences). "
                         "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
                     )
+                else:
+                    msg = ""
                 if not msg:
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance. Thank you."
                 # Strip any LLM meta-commentary ("Beep.", "[pause]", etc.)

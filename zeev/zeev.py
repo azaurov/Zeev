@@ -1006,8 +1006,10 @@ def bt_list():
         return []
 
 
+_MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$')
+
 def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
-    """Scan for nearby Bluetooth devices. Returns list of (mac, name), named devices only."""
+    """Scan for nearby Bluetooth devices. Returns (mac, name) for named devices only."""
     found: dict[str, str] = {}
     try:
         import select as _sel
@@ -1028,33 +1030,16 @@ def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
                     if len(parts) >= 4:
                         mac = parts[2]
                         name = " ".join(parts[3:])
-                        # Update if we get a better (non-MAC) name
-                        if mac not in found or (name and name != mac):
+                        # Keep the best name seen — prefer non-MAC names
+                        existing = found.get(mac, "")
+                        if not existing or (_MAC_RE.match(existing) and not _MAC_RE.match(name)):
                             found[mac] = name
         proc.stdin.write("scan off\nexit\n"); proc.stdin.flush()
         proc.wait(timeout=3)
     except Exception:
         pass
-    # Resolve any still-unnamed devices via bluetoothctl info, filter out MAC-only entries
-    resolved = []
-    for mac, name in found.items():
-        if name == mac or not name:
-            try:
-                info = subprocess.check_output(
-                    ["bluetoothctl", "info", mac], stderr=subprocess.DEVNULL, timeout=3
-                ).decode()
-                for line in info.splitlines():
-                    if line.strip().startswith("Name:"):
-                        name = line.split(":", 1)[1].strip()
-                        break
-            except Exception:
-                pass
-        # Skip devices with no real name (still showing MAC or empty)
-        if name and name != mac and not name.replace(":", "").replace("-", "").isalnum():
-            resolved.append((mac, name))
-        elif name and name != mac:
-            resolved.append((mac, name))
-    return resolved
+    # Return only devices that have a real name (not a bare MAC address)
+    return [(mac, name) for mac, name in found.items() if name and not _MAC_RE.match(name)]
 
 
 _BT_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,

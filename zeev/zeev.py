@@ -984,6 +984,25 @@ def bt_audio_dev() -> str:
     return _BT_AUDIO_DEV or "plughw:wm8960soundcard,0"
 
 
+def bt_verify_connected():
+    """Clear _BT_AUDIO_DEV if the headphones are no longer listed by BlueALSA (physical disconnect)."""
+    global _BT_AUDIO_DEV, _BT_RATE, _BT_CHANNELS
+    if not _BT_AUDIO_DEV:
+        return
+    try:
+        result = subprocess.run(
+            ["bluealsa-aplay", "--list-pcms"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if _BT_AUDIO_DEV not in result.stdout:
+            print(f"[bt] headphones gone — routing audio back to speaker")
+            _BT_AUDIO_DEV = ""
+            _BT_RATE = 44100
+            _BT_CHANNELS = 1
+    except Exception:
+        pass
+
+
 def bt_detect_connected():
     """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
     global _BT_AUDIO_DEV, _BT_CHANNELS, _BT_RATE
@@ -4255,6 +4274,7 @@ def run_device_mode():
 
     def _speak_device(text):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
+        bt_verify_connected()
         lang = detect_lang(text)
         clean = _clean_for_tts(text, lang)
         if not clean:

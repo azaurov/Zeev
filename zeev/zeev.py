@@ -980,6 +980,25 @@ def bt_audio_dev() -> str:
     return _BT_AUDIO_DEV or "plughw:wm8960soundcard,0"
 
 
+def bt_detect_connected():
+    """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
+    global _BT_AUDIO_DEV
+    try:
+        result = subprocess.run(
+            ["bluealsa-aplay", "--list-pcms"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            # Lines look like: bluealsa:DEV=94:4B:F8:6B:08:08,PROFILE=a2dp,...
+            m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=a2dp', line)
+            if m:
+                _BT_AUDIO_DEV = f"bluealsa:DEV={m.group(1)},PROFILE=a2dp"
+                print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV}")
+                return
+    except Exception:
+        pass
+
+
 def bt_list():
     """Return list of (mac, name, connected) for all paired BT devices."""
     try:
@@ -3937,6 +3956,7 @@ def run_device_mode():
 
     init_learning()
     init_tts()
+    bt_detect_connected()
 
     # Set speaker volume to ~87% (raw 110 of 0–127)
     try:

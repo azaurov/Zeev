@@ -1012,33 +1012,28 @@ def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
     """Scan for nearby Bluetooth devices. Returns (mac, name) for named devices only."""
     found: dict[str, str] = {}
     try:
-        import select as _sel
-        proc = subprocess.Popen(
-            ["bluetoothctl"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True,
+        # Use OS-level timeout to avoid readline() blocking on partial ANSI lines
+        result = subprocess.run(
+            ["timeout", str(timeout), "bluetoothctl", "scan", "on"],
+            capture_output=True, text=True, timeout=timeout + 5,
         )
-        proc.stdin.write("scan on\n"); proc.stdin.flush()
-        import time as _time
-        deadline = _time.monotonic() + timeout
-        while _time.monotonic() < deadline:
-            r, _, _ = _sel.select([proc.stdout], [], [], 0.5)
-            if r:
-                line = proc.stdout.readline()
-                if "Device" in line and ("NEW" in line or "CHG" in line):
-                    parts = line.strip().split()
-                    if len(parts) >= 4:
-                        mac = parts[2]
-                        name = " ".join(parts[3:])
-                        # Keep the best name seen — prefer non-MAC names
+        for line in result.stdout.splitlines():
+            # Strip ANSI escape codes
+            clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+            if "Device" in clean_line and ("NEW" in clean_line or "CHG" in clean_line):
+                parts = clean_line.split()
+                try:
+                    idx = parts.index("Device")
+                    if idx + 2 < len(parts):
+                        mac = parts[idx + 1]
+                        name = " ".join(parts[idx + 2:])
                         existing = found.get(mac, "")
                         if not existing or (_MAC_RE.match(existing) and not _MAC_RE.match(name)):
                             found[mac] = name
-        proc.stdin.write("scan off\nexit\n"); proc.stdin.flush()
-        proc.wait(timeout=3)
+                except ValueError:
+                    pass
     except Exception:
         pass
-    # Return only devices that have a real name (not a bare MAC address)
     return [(mac, name) for mac, name in found.items() if name and not _MAC_RE.match(name)]
 
 

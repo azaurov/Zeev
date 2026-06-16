@@ -41,6 +41,7 @@ if _ENV_FILE.exists():
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
+_orpheus_429_until: float = 0.0   # epoch — skip Orpheus until this time after a 429
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
@@ -746,8 +747,11 @@ def speak_terminal(text, lang=None):
 
 def groq_tts(text, voice="daniel"):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
+    global _orpheus_429_until
     if not GROQ_API_KEY or not text.strip():
         return None
+    if time.time() < _orpheus_429_until:
+        return None   # rate-limited — skip until cooldown expires
     clean = _clean_for_tts(text, "en")
     if not clean or detect_lang(clean) != "en":
         return None
@@ -771,7 +775,11 @@ def groq_tts(text, voice="daniel"):
             except Exception:
                 pass
             return resp.content
-        print(f"[tts] Orpheus HTTP {resp.status_code}: {resp.text[:120]}", flush=True)
+        if resp.status_code == 429:
+            _orpheus_429_until = time.time() + 300  # back off for 5 minutes
+            print(f"[tts] Orpheus 429 — skipping for 5 min", flush=True)
+        else:
+            print(f"[tts] Orpheus HTTP {resp.status_code}: {resp.text[:120]}", flush=True)
         return None
     except Exception as e:
         print(f"[tts] Orpheus exception: {e}", flush=True)
@@ -4218,6 +4226,25 @@ def run_device_mode():
     _tts_p1 = None
     _tts_p2 = None
     _piper_dev_proc = None   # persistent piper process — kept alive between utterances
+
+    # Pre-warm Piper in the background so the ONNX model (~20s load on Pi Zero 2W)
+    # is ready before the first user interaction rather than blocking it.
+    def _prewarm_piper():
+        nonlocal _piper_dev_proc
+        model = (PIPER_MODELS.get("en")) if PIPER_BIN else None
+        if not model or _BT_AUDIO_DEV:
+            return  # BT uses one-shot path; no persistent process to pre-warm
+        try:
+            _piper_dev_proc = subprocess.Popen(
+                [PIPER_BIN, "--model", model, "--output_raw"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            print("[tts] Piper pre-warm started", flush=True)
+        except Exception as e:
+            print(f"[tts] Piper pre-warm failed: {e}", flush=True)
+
+    threading.Thread(target=_prewarm_piper, daemon=True).start()
 
     def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=2.0):
         """Read raw PCM from a live piper process until it goes quiet.

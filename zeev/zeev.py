@@ -771,8 +771,10 @@ def groq_tts(text, voice="daniel"):
             except Exception:
                 pass
             return resp.content
+        print(f"[tts] Orpheus HTTP {resp.status_code}: {resp.text[:120]}", flush=True)
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[tts] Orpheus exception: {e}", flush=True)
         return None
 
 
@@ -3984,11 +3986,11 @@ def run_device_mode():
     except Exception:
         pass
 
-    # Set BT headphone volume if connected (raw 85/127 ≈ 67%)
+    # Set BT headphone volume if connected (raw 50/127 ≈ 39%)
     if _BT_AUDIO_DEV:
         try:
             subprocess.run(
-                ["amixer", "-D", "bluealsa", "cset", "numid=2", "85"],
+                ["amixer", "-D", "bluealsa", "cset", "numid=2", "50"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except Exception:

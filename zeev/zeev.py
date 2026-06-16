@@ -1467,6 +1467,13 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     # Don't greet yet — wait to hear the other end first so we can classify it
     call_type = "unknown"
     ivr_context = ""
+    live_context = (
+        f"You are Zeev, Alex's AI assistant, on a phone call. {call_intent} "
+        "Keep replies short (1-2 sentences). Speak naturally and conversationally."
+    ) if call_intent else (
+        "You are Zeev, Alex's AI assistant, on a phone call. "
+        "Keep replies short (1-2 sentences). Speak naturally."
+    )
 
     turn = 0
     while _IN_CALL:
@@ -1590,8 +1597,13 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             bt_call_hangup()
             break
 
-        # LLM reply
-        prompt = f"{ivr_context}\n\nIVR said: {transcript}".strip() if ivr_context else transcript
+        # LLM reply — inject context based on call type
+        if ivr_context:
+            prompt = f"{ivr_context}\n\nIVR said: {transcript}"
+        elif call_type in ("live", "unknown"):
+            prompt = f"{live_context}\n\nThey said: {transcript}"
+        else:
+            prompt = transcript
         reply = llm_fn(prompt)
         if not reply:
             reply = "I'm sorry, I didn't catch that."

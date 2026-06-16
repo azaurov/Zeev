@@ -346,6 +346,8 @@ def init_tts():
     if PIPER_BIN:
         PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
             data_dir / "piper_voice.onnx",
+            piper_dir / "en_US-amy-medium.onnx",
+            share_dir / "en_US-amy-medium.onnx",
             piper_dir / "en_US-ryan-medium.onnx",
             share_dir / "en_US-ryan-medium.onnx",
             piper_dir / "en_US-lessac-medium.onnx",

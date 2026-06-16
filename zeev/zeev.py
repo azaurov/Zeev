@@ -4091,19 +4091,28 @@ def run_device_mode():
         model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
         try:
             if model:
-                # Reuse or (re)start the persistent piper process.
-                if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
-                    _piper_dev_proc = subprocess.Popen(
-                        [PIPER_BIN, "--model", model, "--output_raw"],
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                    )
-                p1 = _piper_dev_proc
-                _tts_p1, _tts_p2 = p1, None
-                # Write one line — piper synthesises, then waits for the next line.
-                p1.stdin.write(clean.encode() + b"\n")
-                p1.stdin.flush()
-                audio = _collect_piper_audio(p1)
+                audio = None
+                for attempt in range(2):
+                    # Reuse or (re)start the persistent piper process.
+                    if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
+                        _piper_dev_proc = subprocess.Popen(
+                            [PIPER_BIN, "--model", model, "--output_raw"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    p1 = _piper_dev_proc
+                    _tts_p1, _tts_p2 = p1, None
+                    try:
+                        p1.stdin.write(clean.encode() + b"\n")
+                        p1.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        _piper_dev_proc = None
+                        continue
+                    audio = _collect_piper_audio(p1)
+                    if audio:
+                        break
+                    # Empty output — process likely died mid-synthesis; reset and retry.
+                    _piper_dev_proc = None
                 if audio:
                     p2 = subprocess.Popen(
                         ["aplay", "-D", "plughw:wm8960soundcard,0",
@@ -4118,6 +4127,7 @@ def run_device_mode():
                     except BrokenPipeError:
                         pass
                     p2.wait()
+                    return
             else:
                 # 4. espeak-ng — last resort
                 espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")

@@ -1608,6 +1608,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
     print("[call] Loop ended", flush=True)
     _IN_CALL = False
+    bt_call_hangup()  # ensure call is terminated on the phone
 
 
 SYSTEM_PROMPT = (

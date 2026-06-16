@@ -213,7 +213,7 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 **TTS priority in device mode:**
 1. Groq Orpheus (cloud, English only, ~200ms)
 2. Google Translate TTS + mpg123 (he/es/ru, ~500ms)
-3. Piper local (English fallback)
+3. Piper local (English fallback) — retried once on process crash before falling through
 4. espeak-ng (last resort)
 
 ## Terminal commands

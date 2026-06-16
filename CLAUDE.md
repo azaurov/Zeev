@@ -10,6 +10,8 @@ This is a Raspberry Pi project (Zeev) using Python with hardware HATs (Whisplay 
 
 TTS uses Piper with a persistent process; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
 
+In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio by resetting `_piper_dev_proc = None` and restarting the process — only falls through to espeak-ng if both attempts fail.
+
 ## Version Control
 
 Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless explicitly asked. Add generated/data files to `.gitignore` by default and confirm before committing.

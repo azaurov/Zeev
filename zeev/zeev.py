@@ -4262,6 +4262,8 @@ def run_device_mode():
         # 1. Orpheus / OpenAI — WAV output via aplay
         wav = groq_tts(clean) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
+        if not wav:
+            print(f"[tts] Orpheus failed — falling back to Piper", flush=True)
         if wav:
             try:
                 # BT (bluealsa) requires exact format match; resample WAV via ffmpeg

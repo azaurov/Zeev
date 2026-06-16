@@ -4327,27 +4327,43 @@ def run_device_mode():
         try:
             if model:
                 audio = None
-                for attempt in range(2):
-                    # Reuse or (re)start the persistent piper process.
-                    if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
-                        _piper_dev_proc = subprocess.Popen(
-                            [PIPER_BIN, "--model", model, "--output_raw"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    p1 = _piper_dev_proc
-                    _tts_p1, _tts_p2 = p1, None
+                if _BT_AUDIO_DEV:
+                    # BT path: one-shot Piper invocation so we read until EOF (no timeout gaps
+                    # between sentences on slow Pi Zero 2W hardware)
+                    p1 = subprocess.Popen(
+                        [PIPER_BIN, "--model", model, "--output_raw"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    _tts_p1 = p1
                     try:
                         p1.stdin.write(clean.encode() + b"\n")
-                        p1.stdin.flush()
+                        p1.stdin.close()
                     except (BrokenPipeError, OSError):
+                        pass
+                    audio = p1.stdout.read()
+                    p1.wait()
+                else:
+                    for attempt in range(2):
+                        # Reuse or (re)start the persistent piper process.
+                        if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
+                            _piper_dev_proc = subprocess.Popen(
+                                [PIPER_BIN, "--model", model, "--output_raw"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        p1 = _piper_dev_proc
+                        _tts_p1, _tts_p2 = p1, None
+                        try:
+                            p1.stdin.write(clean.encode() + b"\n")
+                            p1.stdin.flush()
+                        except (BrokenPipeError, OSError):
+                            _piper_dev_proc = None
+                            continue
+                        audio = _collect_piper_audio(p1)
+                        if audio:
+                            break
                         _piper_dev_proc = None
-                        continue
-                    audio = _collect_piper_audio(p1)
-                    if audio:
-                        break
-                    # Empty output — process likely died mid-synthesis; reset and retry.
-                    _piper_dev_proc = None
                 if audio:
                     # BT needs exact format match; resample Piper 22050Hz mono via ffmpeg
                     if _BT_AUDIO_DEV and shutil.which("ffmpeg"):

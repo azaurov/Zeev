@@ -47,7 +47,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 
 - **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
 - **`load_prior()` / `append_message()`** — persistence via `data/zeev.db` SQLite (`messages` table, WAL mode). Loads the last `PRIOR_TURNS=15` turns (`ORDER BY id DESC LIMIT N`, reversed); caps in-session context at 60 messages.
-- **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–127). State stored in `_VOLUME` global (default 40).
+- **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–127). State stored in `_VOLUME` global (default 50).
 - **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
 - **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
 - **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Google Calendar events + optional Tavily results. `_with_search()` is an alias kept for compatibility.
@@ -249,7 +249,7 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 `python3 zeev/zeev.py --device` runs a push-to-talk voice companion on the PiSugar Whisplay HAT (1.96" ST7789 LCD 240×280, WM8960 audio codec, RGB LED, KEY button on GPIO17).
 
 - **TTS priority**: Groq Orpheus (cloud, English) → Google Translate TTS + mpg123 (he/es/ru) → Piper (en fallback) → espeak-ng (last resort)
-- **Speaker volume**: set to 40% via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control, raw range 0–127)
+- **Speaker volume**: set to 50% via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control, raw range 0–127)
 - **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
 - **STT**: Groq Whisper `whisper-large-v3-turbo`
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`

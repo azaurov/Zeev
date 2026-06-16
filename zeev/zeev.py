@@ -1487,7 +1487,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
         # STT
         transcript = stt_fn(pcm)
-        if not transcript:
+        # Filter Whisper noise artifacts (single punct, very short non-speech)
+        if not transcript or not re.search(r'\w{2,}', transcript):
             continue
         print(f"[call] Caller: {transcript}", flush=True)
         call_log.append({"role": "caller", "text": transcript})
@@ -1565,9 +1566,10 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             bt_call_hangup()
             break
 
-        # Hangup detection from caller's words
-        if re.search(r"\b(bye|goodbye|hang up|gotta go|talk later)\b",
-                     transcript, re.IGNORECASE):
+        # Hangup detection — only for live calls (IVR "Goodbye" is the IVR ending, not us)
+        if call_type != "ivr" and re.search(
+            r"\b(bye|goodbye|hang up|gotta go|talk later)\b", transcript, re.IGNORECASE
+        ):
             speak_fn("Goodbye!")
             _IN_CALL = False
             bt_call_hangup()

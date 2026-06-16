@@ -3980,6 +3980,16 @@ def run_device_mode():
         )
     except Exception:
         pass
+
+    # Set BT headphone volume if connected (raw 85/127 ≈ 67%)
+    if _BT_AUDIO_DEV:
+        try:
+            subprocess.run(
+                ["amixer", "-D", "bluealsa", "cset", "numid=2", "85"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
     init_mic()
 
     board  = WhisplayBoard()
@@ -4325,12 +4335,28 @@ def run_device_mode():
                     # Empty output — process likely died mid-synthesis; reset and retry.
                     _piper_dev_proc = None
                 if audio:
-                    p2 = subprocess.Popen(
-                        ["aplay", "-D", adev,
-                         "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
+                    # BT needs exact format match; resample Piper 22050Hz mono via ffmpeg
+                    if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
+                        ff = subprocess.Popen(
+                            ["ffmpeg", "-loglevel", "quiet",
+                             "-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0",
+                             "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        )
+                        audio, _ = ff.communicate(audio)
+                        p2 = subprocess.Popen(
+                            ["aplay", "-D", adev, "-f", "S16_LE",
+                             "-r", str(_BT_RATE), "-c", str(_BT_CHANNELS), "-q", "-"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        p2 = subprocess.Popen(
+                            ["aplay", "-D", adev,
+                             "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
                     _tts_p2 = p2
                     try:
                         p2.stdin.write(audio)

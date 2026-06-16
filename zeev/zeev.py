@@ -1274,6 +1274,69 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
     return 16000  # safe default — webrtcvad also accepts 16000
 
 
+def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
+    """
+    Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
+    Generates TTS as WAV/PCM then resamples via ffmpeg to match the SCO codec rate.
+    """
+    if not text:
+        return
+    wav = None
+    raw_pcm = None
+    raw_rate = samplerate
+
+    # Try Orpheus first (English WAV)
+    try:
+        wav = groq_tts(text, voice="daniel")
+    except Exception:
+        pass
+
+    # Piper fallback — one-shot, returns raw PCM at 22050Hz
+    if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
+        try:
+            p = subprocess.Popen(
+                [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            raw_pcm, _ = p.communicate(text.encode(), timeout=60)
+            raw_rate = 22050
+        except Exception:
+            raw_pcm = None
+
+    if not wav and not raw_pcm:
+        return
+
+    try:
+        if wav:
+            # Resample WAV → SCO rate/channels via ffmpeg
+            ff = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
+                 "-f", "s16le", "-ar", str(samplerate), "-ac", "1", "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            pcm_out, _ = ff.communicate(wav)
+        else:
+            # Resample raw PCM from Piper (22050Hz mono) → SCO rate
+            ff = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "quiet",
+                 "-f", "s16le", "-ar", str(raw_rate), "-ac", "1", "-i", "pipe:0",
+                 "-f", "s16le", "-ar", str(samplerate), "-ac", "1", "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            pcm_out, _ = ff.communicate(raw_pcm)
+
+        ap = subprocess.Popen(
+            ["aplay", "-D", sco_dev, "-f", "S16_LE",
+             "-r", str(samplerate), "-c", "1", "-q", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        ap.stdin.write(pcm_out)
+        ap.stdin.close()
+        ap.wait()
+    except Exception as e:
+        print(f"[call] SCO speak error: {e}", flush=True)
+
+
 def bt_call_at(mac: str, cmd: str) -> bool:
     """Send an AT command to the phone over HFP RFCOMM via BlueALSA D-Bus."""
     dbus_path = "/org/bluealsa/hci0/dev_" + mac.replace(":", "_") + "/rfcomm"
@@ -1463,6 +1526,10 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     samplerate = bt_sco_rate(mac)  # 16000 (mSBC) or 8000 (CVSD), queried live
     call_log: list[dict] = []
 
+    # Route outgoing speech through SCO so the caller can hear Zeev
+    def _sco_speak(text: str) -> None:
+        bt_speak_sco(text, sco_dev, samplerate)
+
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
     # Don't greet yet — wait to hear the other end first so we can classify it
     call_type = "unknown"
@@ -1540,7 +1607,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 # Strip any LLM meta-commentary ("Beep.", "[pause]", etc.)
                 msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
                 print(f"[call] Zeev (voicemail): {msg}", flush=True)
-                speak_fn(msg)
+                _sco_speak(msg)
                 if record_dir:
                     with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                         lf.write(f"[voicemail detected]\nGreeting: {transcript}\nMessage left: {msg}\n")
@@ -1559,7 +1626,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
             else:
                 # live or unknown — greet normally
-                speak_fn("Hello, this is Zeev. How can I help you?")
+                _sco_speak("Hello, this is Zeev. How can I help you?")
 
         # In IVR mode: re-check for voicemail greeting on every subsequent turn
         elif call_type == "ivr" and _CALL_VOICEMAIL_RE.search(transcript):
@@ -1580,7 +1647,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back. Thank you."
                 msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
             print(f"[call] Zeev (voicemail): {msg}", flush=True)
-            speak_fn(msg)
+            _sco_speak(msg)
             if record_dir:
                 with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                     lf.write(f"[voicemail detected at turn {turn}]\nGreeting: {transcript}\nMessage: {msg}\n")
@@ -1592,7 +1659,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         if call_type != "ivr" and re.search(
             r"\b(bye|goodbye|hang up|gotta go|talk later)\b", transcript, re.IGNORECASE
         ):
-            speak_fn("Goodbye!")
+            _sco_speak("Goodbye!")
             _IN_CALL = False
             bt_call_hangup()
             break
@@ -1629,7 +1696,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 lf.write(f"[{turn}] Caller: {transcript}\n")
                 lf.write(f"[{turn}] Zeev:   {reply}\n\n")
 
-        speak_fn(reply)
+        _sco_speak(reply)
         turn += 1
 
     print("[call] Loop ended", flush=True)

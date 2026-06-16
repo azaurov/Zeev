@@ -1481,13 +1481,19 @@ def detect_call_type(transcript: str, llm_fn=None) -> str:
     Classify the other end of a phone call from the first transcript.
     Returns 'live', 'voicemail', 'ivr', or 'unknown'.
     Fast regex first; LLM fallback for ambiguous cases.
+    Short/ambiguous transcripts (< 6 words) are treated as 'unknown' (→ live).
     """
+    # Regex patterns work on any length but short phrases are too ambiguous for LLM
     if _CALL_IVR_RE.search(transcript):
         return "ivr"
     if _CALL_VOICEMAIL_RE.search(transcript):
         return "voicemail"
     if _CALL_LIVE_RE.search(transcript):
         return "live"
+
+    # Fewer than 6 words — not enough context; treat as live
+    if len(transcript.split()) < 6:
+        return "unknown"
 
     if llm_fn:
         prompt = (
@@ -1531,6 +1537,20 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         bt_speak_sco(text, sco_dev, samplerate)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
+    # Pre-warm Piper so it's loaded before we need to speak (avoids 20s ONNX load mid-call)
+    if PIPER_BIN and PIPER_MODELS.get("en"):
+        try:
+            _pw = subprocess.Popen(
+                [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            _pw.stdin.write(b" ")
+            _pw.stdin.close()
+            _pw.stdout.read()
+            _pw.wait()
+            print("[call] Piper pre-warmed", flush=True)
+        except Exception:
+            pass
     # Don't greet yet — wait to hear the other end first so we can classify it
     call_type = "unknown"
     ivr_context = ""

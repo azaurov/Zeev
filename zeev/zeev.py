@@ -1491,12 +1491,11 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
             if call_type == "voicemail":
                 # If the intent contains explicit message text ("saying X"), extract it
-                explicit_m = re.search(
-                    r'\b(?:saying|say|record(?:ing)?|message\s+(?:saying|that)\s+)["\']?(.+?)["\']?\s*(?:,|$)',
-                    call_intent, re.IGNORECASE,
-                )
+                explicit_m = re.search(r'\bsay(?:ing)?\s+["\']?(.+)', call_intent, re.IGNORECASE)
                 if explicit_m:
-                    msg = explicit_m.group(1).strip().rstrip('.,')
+                    msg = explicit_m.group(1).strip()
+                    msg = re.sub(r',?\s*then\b.*$', '', msg, flags=re.IGNORECASE).strip()
+                    msg = msg.strip('"\'.,')
                 else:
                     intent_line = f" Reason for the call: {call_intent}." if call_intent else ""
                     msg = llm_fn(

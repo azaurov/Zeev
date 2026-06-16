@@ -4223,6 +4223,7 @@ def run_device_mode():
         clean = _clean_for_tts(text, lang)
         if not clean:
             return
+        adev = bt_audio_dev()
 
         # 1. Orpheus / OpenAI — WAV output via aplay
         wav = groq_tts(clean) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
@@ -4230,7 +4231,7 @@ def run_device_mode():
         if wav:
             try:
                 p2 = subprocess.Popen(
-                    ["aplay", "-D", "plughw:wm8960soundcard,0", "-q", "-"],
+                    ["aplay", "-D", adev, "-q", "-"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
@@ -4254,7 +4255,7 @@ def run_device_mode():
                 mp3 = _gtts_fetch_chunk(chunk, _GTTS_LANGS[lang])
                 if mp3:
                     p1 = subprocess.Popen(
-                        ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                        ["mpg123", "-q", "-a", adev, "-"],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
@@ -4295,7 +4296,7 @@ def run_device_mode():
                     _piper_dev_proc = None
                 if audio:
                     p2 = subprocess.Popen(
-                        ["aplay", "-D", "plughw:wm8960soundcard,0",
+                        ["aplay", "-D", adev,
                          "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -4316,7 +4317,7 @@ def run_device_mode():
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 p2 = subprocess.Popen(
-                    ["aplay", "-D", "plughw:wm8960soundcard,0",
+                    ["aplay", "-D", adev,
                      "-f", "S16_LE", "-r", "22050", "-t", "raw", "-c", "1", "-q", "-"],
                     stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )

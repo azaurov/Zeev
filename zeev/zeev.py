@@ -145,6 +145,37 @@ _BT_CALL_RE = re.compile(
     r"\b(call|phone|dial|ring)\b.{0,40}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b|\b\w+\b)",
     re.IGNORECASE,
 )
+_CALL_IVR_RE = re.compile(
+    r"\bpress\s+\d\b"
+    r"|\bfor\s+\w[\w\s]{0,20},?\s+press\b"
+    r"|\b(main\s+)?menu\b"
+    r"|\bplease\s+hold\b"
+    r"|\byour\s+call\s+is\s+important\b"
+    r"|\ball\s+(of\s+)?our\s+(representatives?|agents?|operators?)\b"
+    r"|\bbusiness\s+hours\b"
+    r"|\boffice\s+hours\b"
+    r"|\bto\s+repeat\s+this\s+(menu|message)\b"
+    r"|\blistened?\s+carefully\b",
+    re.IGNORECASE,
+)
+_CALL_VOICEMAIL_RE = re.compile(
+    r"\bcan'?t\s+(come|take|get|reach)\b"
+    r"|\bnot\s+(available|in|here)\b"
+    r"|\bunavailable\b"
+    r"|\bleave\s+a?\s*(message|voicemail)\b"
+    r"|\bafter\s+the\s+(beep|tone)\b"
+    r"|\bat\s+the\s+(beep|tone)\b"
+    r"|\brecord\s+(your\s+)?(message|voicemail)\b"
+    r"|\bvoicemail\s+box\b"
+    r"|\bplease\s+record\b"
+    r"|\byou\s+have\s+reached\b"
+    r"|\byou('ve|\s+have)\s+reached\b",
+    re.IGNORECASE,
+)
+_CALL_LIVE_RE = re.compile(
+    r"^(hello|hi|hey|yes|yeah|yep|speaking|this\s+is|who('s|\s+is)\s+this|how\s+can\s+I)\b",
+    re.IGNORECASE,
+)
 _BT_HANGUP_RE = re.compile(
     r"\b(hang up|end call|stop call|hangup|disconnect call|end the call)\b",
     re.IGNORECASE,
@@ -1358,6 +1389,38 @@ def bt_call_record_wav(audio_pcm: bytes, path: str, samplerate: int = 16000) -> 
         wf.writeframes(audio_pcm)
 
 
+def detect_call_type(transcript: str, llm_fn=None) -> str:
+    """
+    Classify the other end of a phone call from the first transcript.
+    Returns 'live', 'voicemail', 'ivr', or 'unknown'.
+    Fast regex first; LLM fallback for ambiguous cases.
+    """
+    if _CALL_IVR_RE.search(transcript):
+        return "ivr"
+    if _CALL_VOICEMAIL_RE.search(transcript):
+        return "voicemail"
+    if _CALL_LIVE_RE.search(transcript):
+        return "live"
+
+    if llm_fn:
+        prompt = (
+            'The following is the opening of a phone call. '
+            'Reply with exactly one word — "live", "voicemail", or "ivr" — '
+            'to classify whether the speaker is a live human, a voicemail system, '
+            'or an IVR/automated menu.\n\n'
+            f'Transcript: "{transcript}"'
+        )
+        result = llm_fn(prompt).strip().lower()
+        if "voicemail" in result:
+            return "voicemail"
+        if "ivr" in result or "automated" in result or "recording" in result:
+            return "ivr"
+        if "live" in result or "human" in result:
+            return "live"
+
+    return "unknown"
+
+
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None) -> None:
     """
@@ -1375,7 +1438,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     call_log: list[dict] = []
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
-    speak_fn("Hello, this is Zeev. How can I help you?")
+    # Don't greet yet — wait to hear the other end first so we can classify it
+    call_type = "unknown"
+    ivr_context = ""
 
     turn = 0
     while _IN_CALL:
@@ -1412,6 +1477,35 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         print(f"[call] Caller: {transcript}", flush=True)
         call_log.append({"role": "caller", "text": transcript})
 
+        # Turn 0: classify live vs voicemail vs IVR
+        if turn == 0:
+            call_type = detect_call_type(transcript, llm_fn)
+            print(f"[call] Detected: {call_type}", flush=True)
+
+            if call_type == "voicemail":
+                msg = llm_fn(
+                    f"You are leaving a voicemail. The voicemail greeting said: \"{transcript}\". "
+                    "Leave a brief, natural voicemail message (2-3 sentences) on behalf of Alex."
+                )
+                if not msg:
+                    msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance. Thank you."
+                print(f"[call] Zeev (voicemail): {msg}", flush=True)
+                speak_fn(msg)
+                if record_dir:
+                    with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
+                        lf.write(f"[voicemail detected]\nGreeting: {transcript}\nMessage left: {msg}\n")
+                _IN_CALL = False
+                bt_call_hangup()
+                break
+
+            elif call_type == "ivr":
+                ivr_context = "You are navigating an automated phone menu (IVR system). Listen to the options and respond with the appropriate choice or say the option aloud. Be concise."
+                speak_fn("Navigating the menu.")
+
+            else:
+                # live or unknown — greet normally
+                speak_fn("Hello, this is Zeev. How can I help you?")
+
         # Hangup detection from caller's words
         if re.search(r"\b(bye|goodbye|hang up|gotta go|talk later)\b",
                      transcript, re.IGNORECASE):
@@ -1420,8 +1514,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             bt_call_hangup()
             break
 
-        # LLM reply
-        reply = llm_fn(transcript)
+        # LLM reply — inject IVR context if needed
+        prompt = f"{ivr_context}\n\n{transcript}".strip() if ivr_context else transcript
+        reply = llm_fn(prompt)
         if not reply:
             reply = "I'm sorry, I didn't catch that."
         print(f"[call] Zeev: {reply}", flush=True)

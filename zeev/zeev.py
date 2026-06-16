@@ -1490,14 +1490,25 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             print(f"[call] Detected: {call_type}", flush=True)
 
             if call_type == "voicemail":
-                intent_line = f" The reason for the call: {call_intent}." if call_intent else ""
-                msg = llm_fn(
-                    f"You are leaving a voicemail on behalf of Alex.{intent_line} "
-                    f"The voicemail greeting said: \"{transcript}\". "
-                    "Leave a brief, natural voicemail message (2-3 sentences)."
+                # If the intent contains explicit message text ("saying X"), extract it
+                explicit_m = re.search(
+                    r'\b(?:saying|say|record(?:ing)?|message\s+(?:saying|that)\s+)["\']?(.+?)["\']?\s*(?:,|$)',
+                    call_intent, re.IGNORECASE,
                 )
+                if explicit_m:
+                    msg = explicit_m.group(1).strip().rstrip('.,')
+                else:
+                    intent_line = f" Reason for the call: {call_intent}." if call_intent else ""
+                    msg = llm_fn(
+                        f"You are leaving a voicemail on behalf of Alex.{intent_line} "
+                        f"Voicemail greeting: \"{transcript}\". "
+                        "Leave a brief natural voicemail (2-3 sentences). "
+                        "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
+                    )
                 if not msg:
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance. Thank you."
+                # Strip any LLM meta-commentary ("Beep.", "[pause]", etc.)
+                msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
                 print(f"[call] Zeev (voicemail): {msg}", flush=True)
                 speak_fn(msg)
                 if record_dir:

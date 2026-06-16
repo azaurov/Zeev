@@ -1007,7 +1007,7 @@ def bt_list():
 
 
 def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
-    """Scan for nearby Bluetooth devices. Returns list of (mac, name)."""
+    """Scan for nearby Bluetooth devices. Returns list of (mac, name), named devices only."""
     found: dict[str, str] = {}
     try:
         import select as _sel
@@ -1023,16 +1023,64 @@ def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
             r, _, _ = _sel.select([proc.stdout], [], [], 0.5)
             if r:
                 line = proc.stdout.readline()
-                if "Device" in line and "NEW" in line:
+                if "Device" in line and ("NEW" in line or "CHG" in line):
                     parts = line.strip().split()
                     if len(parts) >= 4:
-                        mac, name = parts[2], " ".join(parts[3:])
-                        found[mac] = name
+                        mac = parts[2]
+                        name = " ".join(parts[3:])
+                        # Update if we get a better (non-MAC) name
+                        if mac not in found or (name and name != mac):
+                            found[mac] = name
         proc.stdin.write("scan off\nexit\n"); proc.stdin.flush()
         proc.wait(timeout=3)
     except Exception:
         pass
-    return list(found.items())
+    # Resolve any still-unnamed devices via bluetoothctl info, filter out MAC-only entries
+    resolved = []
+    for mac, name in found.items():
+        if name == mac or not name:
+            try:
+                info = subprocess.check_output(
+                    ["bluetoothctl", "info", mac], stderr=subprocess.DEVNULL, timeout=3
+                ).decode()
+                for line in info.splitlines():
+                    if line.strip().startswith("Name:"):
+                        name = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+        # Skip devices with no real name (still showing MAC or empty)
+        if name and name != mac and not name.replace(":", "").replace("-", "").isalnum():
+            resolved.append((mac, name))
+        elif name and name != mac:
+            resolved.append((mac, name))
+    return resolved
+
+
+_BT_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+                "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5}
+
+def _bt_match_device(text: str) -> tuple[str, str] | None:
+    """Match a device from _bt_scan_results by name, number, or ordinal in text."""
+    if not _bt_scan_results:
+        return None
+    tl = text.lower()
+    # Name match
+    for mac, name in _bt_scan_results:
+        if name.lower() in tl:
+            return (mac, name)
+    # Ordinal word match ("first", "second", ...)
+    for word, n in _BT_ORDINALS.items():
+        if word in tl and 1 <= n <= len(_bt_scan_results):
+            return _bt_scan_results[n - 1]
+    # Digit match ("1", "2", ...)
+    for i, device in enumerate(_bt_scan_results, 1):
+        if re.search(rf'\b{i}\b', tl):
+            return device
+    # Single device — match anything
+    if len(_bt_scan_results) == 1:
+        return _bt_scan_results[0]
+    return None
 
 
 def bt_pair(mac: str) -> bool:
@@ -4422,13 +4470,7 @@ def run_device_mode():
             return
 
         if bt_intent == "pair" and _bt_scan_results:
-            matched = None
-            for mac, name in _bt_scan_results:
-                if name.lower() in transcript.lower():
-                    matched = (mac, name)
-                    break
-            if not matched and len(_bt_scan_results) == 1:
-                matched = _bt_scan_results[0]
+            matched = _bt_match_device(transcript)
             if matched:
                 mac, name = matched
                 _speak_device(f"Pairing with {name}.")
@@ -5375,14 +5417,7 @@ def main():
             continue
 
         if bt_intent == "pair" and _bt_scan_results:
-            # Try to match a device name from the user's message
-            matched = None
-            for i, (mac, name) in enumerate(_bt_scan_results):
-                if name.lower() in user_input.lower() or str(i + 1) in user_input:
-                    matched = (mac, name)
-                    break
-            if not matched and len(_bt_scan_results) == 1:
-                matched = _bt_scan_results[0]
+            matched = _bt_match_device(user_input)
             if matched:
                 mac, name = matched
                 print(f"{DIM}[bt] Pairing with {name}...{RESET}", flush=True)

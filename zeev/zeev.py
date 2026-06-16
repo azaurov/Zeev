@@ -119,6 +119,41 @@ def extract_music_query(text):
     m = _MUSIC_RE.match(text.strip())
     return m.group("query").strip() if m else None
 
+
+_BT_SCAN_RE = re.compile(
+    r"\b(scan|search|look|find|discover|detect)\b.{0,30}\b(bluetooth|headphones?|earbuds?|speakers?|devices?)\b"
+    r"|\b(bluetooth|headphones?|earbuds?)\b.{0,20}\b(scan|search|find|pair|connect)\b",
+    re.IGNORECASE,
+)
+_BT_PAIR_RE = re.compile(
+    r"\b(pair|trust|add)\b.{0,30}\b(bluetooth|headphones?|earbuds?|speakers?|device)?\b"
+    r"|\b(bluetooth|headphones?|earbuds?)\b.{0,20}\b(pair|trust)\b",
+    re.IGNORECASE,
+)
+_BT_CONNECT_RE = re.compile(
+    r"\b(connect|switch|use|route).{0,20}\b(bluetooth|headphones?|earbuds?|speakers?)\b"
+    r"|\b(bluetooth|headphones?|earbuds?)\b.{0,20}\b(connect|on|enable)\b",
+    re.IGNORECASE,
+)
+_BT_DISCONNECT_RE = re.compile(
+    r"\b(disconnect|turn off|disable|stop using)\b.{0,20}\b(bluetooth|headphones?|earbuds?)\b"
+    r"|\bswitch.{0,20}\b(speaker|wm8960|built.?in)\b",
+    re.IGNORECASE,
+)
+
+def extract_bt_intent(text):
+    """Return ('scan'|'pair'|'connect'|'disconnect'|None) for BT natural-language requests."""
+    t = text.strip()
+    if _BT_SCAN_RE.search(t):
+        return "scan"
+    if _BT_PAIR_RE.search(t):
+        return "pair"
+    if _BT_CONNECT_RE.search(t):
+        return "connect"
+    if _BT_DISCONNECT_RE.search(t):
+        return "disconnect"
+    return None
+
 _QUANTUM_RE = re.compile(
     r"^(?:quantum\s+(?:reasoning|analysis|circuit)[:\s]+|"
     r"run\s+(?:a\s+)?quantum\s+(?:circuit\s+)?(?:on\s+)?|"
@@ -4368,6 +4403,79 @@ def run_device_mode():
         session.append({"role": "user", "content": transcript})
         append_message("user", transcript)
 
+        # ── Bluetooth natural-language handling ───────────────────────────────
+        bt_intent = extract_bt_intent(transcript)
+        if bt_intent == "scan":
+            _speak_device("Scanning for Bluetooth devices. This will take about ten seconds.")
+            found = bt_scan(10)
+            _bt_scan_results[:] = found
+            if found:
+                names = ", ".join(n for _, n in found)
+                reply = f"I found {len(found)} device{'s' if len(found) != 1 else ''}: {names}. Say the name to pair."
+            else:
+                reply = "I didn't find any Bluetooth devices nearby. Make sure your headphones are in pairing mode and try again."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        if bt_intent == "pair" and _bt_scan_results:
+            matched = None
+            for mac, name in _bt_scan_results:
+                if name.lower() in transcript.lower():
+                    matched = (mac, name)
+                    break
+            if not matched and len(_bt_scan_results) == 1:
+                matched = _bt_scan_results[0]
+            if matched:
+                mac, name = matched
+                _speak_device(f"Pairing with {name}.")
+                bt_pair(mac)
+                ok = bt_connect(mac)
+                reply = f"Paired and connected to {name}. Audio is now coming through your headphones." if ok else f"Paired {name} but couldn't connect. Try saying connect bluetooth."
+            else:
+                names = ", ".join(n for _, n in _bt_scan_results)
+                reply = f"Which device? I found: {names}."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        if bt_intent == "connect":
+            devices = bt_list()
+            already = next(((m, n) for m, n, c in devices if c), None)
+            if already:
+                reply = f"Already connected to {already[1]}."
+            elif devices:
+                mac, name, _ = devices[0]
+                ok = bt_connect(mac)
+                reply = f"Connected to {name}." if ok else f"Couldn't connect to {name}."
+            else:
+                reply = "No paired devices found. Say scan for bluetooth first."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        if bt_intent == "disconnect":
+            for mac, name, connected in bt_list():
+                if connected:
+                    bt_disconnect(mac)
+            reply = "Disconnected. Audio back to the speaker."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
         model_id = route_model(transcript)
         short    = _MODEL_SHORT.get(model_id, "?")
 
@@ -5249,6 +5357,72 @@ def main():
             _, err = youtube_play(music_query, adev=bt_audio_dev())
             if err:
                 print(f"{DIM}[music] {err}{RESET}\n")
+            continue
+
+        bt_intent = extract_bt_intent(user_input)
+        if bt_intent == "scan":
+            print(f"{DIM}[bt] Scanning for Bluetooth devices (10s)...{RESET}", flush=True)
+            found = bt_scan(10)
+            _bt_scan_results[:] = found
+            if found:
+                lines = "\n".join(f"{i+1}) {name} ({mac})" for i, (mac, name) in enumerate(found))
+                reply = f"I found {len(found)} device{'s' if len(found) != 1 else ''}:\n{lines}\nSay the name or number to pair."
+            else:
+                reply = "I didn't find any Bluetooth devices nearby. Make sure your headphones are in pairing mode."
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
+            continue
+
+        if bt_intent == "pair" and _bt_scan_results:
+            # Try to match a device name from the user's message
+            matched = None
+            for i, (mac, name) in enumerate(_bt_scan_results):
+                if name.lower() in user_input.lower() or str(i + 1) in user_input:
+                    matched = (mac, name)
+                    break
+            if not matched and len(_bt_scan_results) == 1:
+                matched = _bt_scan_results[0]
+            if matched:
+                mac, name = matched
+                print(f"{DIM}[bt] Pairing with {name}...{RESET}", flush=True)
+                bt_pair(mac)
+                ok = bt_connect(mac)
+                reply = f"Paired and connected to {name}. Audio is now routed to your headphones." if ok else f"Paired {name} but couldn't connect yet. Try saying 'connect bluetooth'."
+            else:
+                names = ", ".join(n for _, n in _bt_scan_results)
+                reply = f"Which device should I pair? I found: {names}."
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
+            continue
+
+        if bt_intent == "connect":
+            devices = bt_list()
+            connected = next(((m, n) for m, n, c in devices if c), None)
+            if connected:
+                reply = f"Already connected to {connected[1]}."
+            elif devices:
+                mac, name, _ = devices[0]
+                ok = bt_connect(mac)
+                reply = f"Connected to {name}. Audio routed to your headphones." if ok else f"Couldn't connect to {name}."
+            else:
+                reply = "No paired Bluetooth devices found. Say 'scan for bluetooth' first."
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
+            continue
+
+        if bt_intent == "disconnect":
+            devices = bt_list()
+            disconnected = [n for m, n, c in devices if c and not bt_disconnect(m)]  # type: ignore
+            for mac, name, connected in devices:
+                if connected:
+                    bt_disconnect(mac)
+            reply = "Disconnected. Audio back to the speaker."
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
             continue
 
         model_id = locked_model if locked_model else route_model(user_input)

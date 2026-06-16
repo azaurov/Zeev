@@ -141,6 +141,18 @@ _BT_DISCONNECT_RE = re.compile(
     r"|\bswitch.{0,20}\b(speaker|wm8960|built.?in)\b",
     re.IGNORECASE,
 )
+_BT_CALL_RE = re.compile(
+    r"\b(call|phone|dial|ring)\b.{0,40}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b|\b\w+\b)",
+    re.IGNORECASE,
+)
+_BT_HANGUP_RE = re.compile(
+    r"\b(hang up|end call|stop call|hangup|disconnect call|end the call)\b",
+    re.IGNORECASE,
+)
+_BT_ANSWER_RE = re.compile(
+    r"\b(answer|pick up|accept).{0,20}\b(call|phone)?\b",
+    re.IGNORECASE,
+)
 
 def extract_bt_intent(text):
     """Return ('scan'|'pair'|'connect'|'disconnect'|None) for BT natural-language requests."""
@@ -980,6 +992,9 @@ _BT_AUDIO_DEV: str = ""   # set to bluealsa PCM when headphones are active
 _BT_RATE: int = 44100    # sample rate reported by bluealsa
 _BT_CHANNELS: int = 1    # channel count reported by bluealsa
 _bt_scan_results: list[tuple[str, str]] = []  # [(mac, name)] from last /bt scan
+_BT_PHONE_MAC: str = ""  # MAC of phone connected via HFP
+_IN_CALL: bool = False   # True while a phone call is active
+_call_thread: threading.Thread | None = None  # running call conversation loop
 
 
 def bt_alsa_dev(mac: str) -> str:
@@ -1168,6 +1183,265 @@ def bt_disconnect(mac: str) -> None:
     except Exception:
         pass
     _BT_AUDIO_DEV = ""
+
+
+# ---------------------------------------------------------------------------
+# Phone call support (BlueALSA HFP-HF profile)
+# ---------------------------------------------------------------------------
+
+def bt_hfp_dev(mac: str) -> str:
+    return f"bluealsa:DEV={mac},PROFILE=sco,SRV=org.bluealsa"
+
+
+def bt_hfp_detect() -> str:
+    """Return MAC of a phone connected via HFP-HF, or '' if none."""
+    try:
+        result = subprocess.run(
+            ["bluealsa-aplay", "--list-pcms"],
+            capture_output=True, text=True, timeout=5,
+        )
+        m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=sco', result.stdout)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
+    """
+    Query the negotiated SCO sample rate from BlueALSA.
+    Returns 16000 (mSBC) or 8000 (CVSD); retries while rate is 0 (pre-call).
+    """
+    import time as _t
+    mac_norm = mac.upper()
+    for _ in range(retries):
+        try:
+            result = subprocess.run(
+                ["bluealsa-aplay", "--list-pcms"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # Output groups: PCM line (has MAC), device name, format line (has Hz)
+            # Walk lines: when we see our MAC+SCO, the next format line has the rate
+            lines = result.stdout.splitlines()
+            for i, line in enumerate(lines):
+                if mac_norm in line.upper() and "sco" in line.lower():
+                    # format line is 2 lines below: "    SCO (): S16_LE 1 channel N Hz"
+                    for j in range(i + 1, min(i + 4, len(lines))):
+                        m = re.search(r'(\d+)\s+Hz', lines[j])
+                        if m:
+                            rate = int(m.group(1))
+                            if rate > 0:
+                                return rate
+                            break  # rate is 0 — call not yet active, retry
+        except Exception:
+            pass
+        _t.sleep(delay)
+    return 16000  # safe default — webrtcvad also accepts 16000
+
+
+def bt_call_at(mac: str, cmd: str) -> bool:
+    """Send an AT command to the phone over HFP RFCOMM via BlueALSA D-Bus."""
+    dbus_path = "/org/bluealsa/hci0/dev_" + mac.replace(":", "_") + "/rfcomm"
+    try:
+        import dbus
+        bus = dbus.SystemBus()
+        obj = bus.get_object("org.bluealsa", dbus_path)
+        iface = dbus.Interface(obj, "org.bluealsa.RFCOMM1")
+        fd_obj = iface.Open()
+        # dbus.UnixFd.take() returns the raw integer fd in this process
+        raw_fd = fd_obj.take() if hasattr(fd_obj, "take") else int(fd_obj)
+        with os.fdopen(raw_fd, "wb", closefd=True) as f:
+            f.write((cmd + "\r").encode())
+        return True
+    except ImportError:
+        print("[call] python3-dbus not installed — run: sudo apt install python3-dbus")
+        return False
+    except Exception as e:
+        print(f"[call] AT command failed ({cmd!r}): {e}")
+        return False
+
+
+def bt_call_dial(number: str) -> bool:
+    """Dial a number via HFP ATD. Returns True if AT command sent."""
+    global _BT_PHONE_MAC
+    if not _BT_PHONE_MAC:
+        _BT_PHONE_MAC = bt_hfp_detect()
+    if not _BT_PHONE_MAC:
+        print("[call] No phone connected via HFP")
+        return False
+    digits = re.sub(r"[^\d+]", "", number)
+    if not digits:
+        print(f"[call] No digits found in: {number!r}")
+        return False
+    print(f"[call] Dialing {digits} via {_BT_PHONE_MAC}")
+    return bt_call_at(_BT_PHONE_MAC, f"ATD{digits};")
+
+
+def bt_call_answer() -> bool:
+    """Answer an incoming call."""
+    global _BT_PHONE_MAC
+    if not _BT_PHONE_MAC:
+        _BT_PHONE_MAC = bt_hfp_detect()
+    if not _BT_PHONE_MAC:
+        return False
+    return bt_call_at(_BT_PHONE_MAC, "ATA")
+
+
+def bt_call_hangup() -> bool:
+    """Hang up the active call."""
+    global _BT_PHONE_MAC, _IN_CALL
+    if not _BT_PHONE_MAC:
+        _BT_PHONE_MAC = bt_hfp_detect()
+    _IN_CALL = False
+    if not _BT_PHONE_MAC:
+        return False
+    return bt_call_at(_BT_PHONE_MAC, "ATH")
+
+
+def _vad_collect(stream_proc: subprocess.Popen, samplerate: int = 16000,
+                 silence_ms: int = 900) -> bytes:
+    """
+    Read from an arecord process using energy-based VAD.
+    Returns raw PCM when silence_ms of silence follows speech, or after 30s max.
+    Falls back to simple energy threshold if webrtcvad is not installed.
+    """
+    try:
+        import webrtcvad
+        vad = webrtcvad.Vad(2)  # aggressiveness 0-3
+        use_webrtc = True
+    except ImportError:
+        use_webrtc = False
+
+    frame_ms = 30           # webrtcvad supports 10/20/30ms frames
+    frame_bytes = int(samplerate * frame_ms / 1000) * 2  # 16-bit mono
+    silence_frames = int(silence_ms / frame_ms)
+    max_frames = int(30_000 / frame_ms)  # 30s hard limit
+
+    audio = b""
+    speech_started = False
+    silent_count = 0
+    total_frames = 0
+
+    while total_frames < max_frames:
+        chunk = stream_proc.stdout.read(frame_bytes)
+        if not chunk or len(chunk) < frame_bytes:
+            break
+        audio += chunk
+        total_frames += 1
+
+        if use_webrtc:
+            is_speech = vad.is_speech(chunk[:frame_bytes], samplerate)
+        else:
+            # simple RMS energy threshold
+            samples = [int.from_bytes(chunk[i:i+2], "little", signed=True)
+                       for i in range(0, len(chunk), 2)]
+            rms = (sum(s*s for s in samples) / len(samples)) ** 0.5
+            is_speech = rms > 300
+
+        if is_speech:
+            speech_started = True
+            silent_count = 0
+        elif speech_started:
+            silent_count += 1
+            if silent_count >= silence_frames:
+                break
+
+    return audio if speech_started else b""
+
+
+def bt_call_record_wav(audio_pcm: bytes, path: str, samplerate: int = 16000) -> None:
+    """Save raw 16-bit mono PCM to a WAV file for logging."""
+    import wave
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(audio_pcm)
+
+
+def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
+                 record_dir: str | None = None) -> None:
+    """
+    Run the Zeev conversation loop over an active HFP call.
+    speak_fn(text) — plays TTS through SCO device
+    stt_fn(pcm_bytes) — returns transcript string
+    llm_fn(text) — returns Zeev's reply string
+    record_dir — if set, saves each turn as WAV files
+    mac — phone MAC for SCO device address
+    """
+    global _IN_CALL
+    _IN_CALL = True
+    sco_dev = bt_hfp_dev(mac)
+    samplerate = bt_sco_rate(mac)  # 16000 (mSBC) or 8000 (CVSD), queried live
+    call_log: list[dict] = []
+
+    print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
+    speak_fn("Hello, this is Zeev. How can I help you?")
+
+    turn = 0
+    while _IN_CALL:
+        # Record caller's voice via SCO capture device
+        rec = subprocess.Popen(
+            ["arecord", "-D", sco_dev, "-f", "S16_LE",
+             "-r", str(samplerate), "-c", "1", "-q", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        print("[call] Listening...", flush=True)
+        pcm = _vad_collect(rec, samplerate=samplerate)
+        rec.terminate()
+        rec.wait()
+
+        if not pcm:
+            # Silence or caller hung up — check if still in call
+            mac_check = bt_hfp_detect()
+            if not mac_check:
+                print("[call] Call ended (HFP disconnected)", flush=True)
+                _IN_CALL = False
+                break
+            continue
+
+        if record_dir:
+            import os as _os
+            wav_path = _os.path.join(record_dir, f"call_turn{turn:03d}_caller.wav")
+            bt_call_record_wav(pcm, wav_path, samplerate)
+            print(f"[call] Saved caller audio → {wav_path}", flush=True)
+
+        # STT
+        transcript = stt_fn(pcm)
+        if not transcript:
+            continue
+        print(f"[call] Caller: {transcript}", flush=True)
+        call_log.append({"role": "caller", "text": transcript})
+
+        # Hangup detection from caller's words
+        if re.search(r"\b(bye|goodbye|hang up|gotta go|talk later)\b",
+                     transcript, re.IGNORECASE):
+            speak_fn("Goodbye!")
+            _IN_CALL = False
+            bt_call_hangup()
+            break
+
+        # LLM reply
+        reply = llm_fn(transcript)
+        if not reply:
+            reply = "I'm sorry, I didn't catch that."
+        print(f"[call] Zeev: {reply}", flush=True)
+        call_log.append({"role": "zeev", "text": reply})
+
+        if record_dir:
+            # append reply text to a transcript file
+            import os as _os
+            log_path = _os.path.join(record_dir, "call_transcript.txt")
+            with open(log_path, "a") as lf:
+                lf.write(f"[{turn}] Caller: {transcript}\n")
+                lf.write(f"[{turn}] Zeev:   {reply}\n\n")
+
+        # Speak reply back through SCO device (mutes recording implicitly since
+        # arecord is stopped before aplay starts — no echo cancellation needed)
+        speak_fn(reply)
+        turn += 1
+
+    print("[call] Loop ended", flush=True)
+    _IN_CALL = False
 
 
 SYSTEM_PROMPT = (
@@ -4650,6 +4924,73 @@ def run_device_mode():
             _speak_device(reply)
             _go_ready() if _busy.is_set() else _go_idle()
             return
+
+        # ── Phone call handling ───────────────────────────────────────────────
+        if _IN_CALL and _BT_HANGUP_RE.search(transcript):
+            bt_call_hangup()
+            reply = "Hanging up."
+            print(f"Zeev: {reply}")
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        if not _IN_CALL and _BT_CALL_RE.search(transcript):
+            # Extract number from transcript (digits only; "call 555-1234")
+            number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', transcript)
+            if number_m:
+                number = number_m.group(1).strip()
+                phone_mac = bt_hfp_detect()
+                if not phone_mac:
+                    reply = "No phone connected via Bluetooth. Please connect your phone first."
+                    _speak_device(reply)
+                    _go_ready() if _busy.is_set() else _go_idle()
+                    return
+                reply = f"Calling {number}."
+                _speak_device(reply)
+                ok = bt_call_dial(number)
+                if ok:
+                    import time as _time
+                    _time.sleep(3)  # give the call a moment to connect
+                    record_dir = str(BASE_DIR / "data" / "call_recordings")
+                    import os as _os
+                    _os.makedirs(record_dir, exist_ok=True)
+
+                    def _stt_from_pcm(pcm: bytes) -> str:
+                        import wave, io as _io, struct as _struct
+                        buf = _io.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(16000)
+                            wf.writeframes(pcm)
+                        return groq_stt(buf.getvalue())
+
+                    def _llm_reply(text: str) -> str:
+                        msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
+                        msgs += session[-10:]
+                        msgs.append({"role": "user", "content": text})
+                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                        if err or not resp:
+                            return ""
+                        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+                    global _call_thread
+                    _call_thread = threading.Thread(
+                        target=bt_call_loop,
+                        args=(_speak_device, _stt_from_pcm, _llm_reply, phone_mac),
+                        kwargs={"record_dir": record_dir},
+                        daemon=True,
+                    )
+                    _call_thread.start()
+                else:
+                    _speak_device("Sorry, I couldn't place the call.")
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+            else:
+                reply = "What number should I call?"
+                _speak_device(reply)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
         # ─────────────────────────────────────────────────────────────────────
 
         model_id = route_model(transcript)
@@ -5592,6 +5933,63 @@ def main():
             print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
             if tts_on:
                 speak_terminal(reply)
+            continue
+
+        if _IN_CALL and _BT_HANGUP_RE.search(user_input):
+            bt_call_hangup()
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} Hanging up.\n")
+            continue
+
+        if not _IN_CALL and _BT_CALL_RE.search(user_input):
+            number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', user_input)
+            if number_m:
+                number = number_m.group(1).strip()
+                phone_mac = bt_hfp_detect()
+                if not phone_mac:
+                    print(f"\n{CYAN}{BOLD}Zeev:{RESET} No phone connected via HFP Bluetooth.\n")
+                    continue
+                print(f"{DIM}[call] Dialing {number}...{RESET}", flush=True)
+                ok = bt_call_dial(number)
+                if ok:
+                    import time as _time2
+                    _time2.sleep(3)
+                    record_dir = str(BASE_DIR / "data" / "call_recordings")
+                    import os as _os2
+                    _os2.makedirs(record_dir, exist_ok=True)
+
+                    def _term_stt(pcm: bytes) -> str:
+                        import wave, io as _io2
+                        buf = _io2.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+                            wf.writeframes(pcm)
+                        return groq_stt(buf.getvalue())
+
+                    def _term_llm(text: str) -> str:
+                        msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
+                        msgs += session[-10:]
+                        msgs.append({"role": "user", "content": text})
+                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                        if err or not resp:
+                            return ""
+                        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+                    def _term_speak(text: str) -> None:
+                        speak_terminal(text)
+
+                    global _call_thread
+                    _call_thread = threading.Thread(
+                        target=bt_call_loop,
+                        args=(_term_speak, _term_stt, _term_llm, phone_mac),
+                        kwargs={"record_dir": record_dir},
+                        daemon=True,
+                    )
+                    _call_thread.start()
+                    print(f"{DIM}[call] Call loop started. Say 'hang up' to end.{RESET}\n")
+                else:
+                    print(f"\n{CYAN}{BOLD}Zeev:{RESET} Couldn't place the call.\n")
+            else:
+                print(f"\n{CYAN}{BOLD}Zeev:{RESET} What number should I call?\n")
             continue
 
         model_id = locked_model if locked_model else route_model(user_input)

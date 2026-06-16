@@ -223,6 +223,8 @@ Say `scan for bluetooth` → Zeev scans 10s and lists nearby devices. Say the de
 
 At startup, if headphones are already connected, Zeev auto-detects them via `bluealsa-aplay --list-pcms` and sets BT volume to raw 50/127 (~39%). Speaker volume is always set to raw 110/127 (~87%) regardless of BT state.
 
+Physical disconnects (headphones powered off or out of range) are handled automatically: before each TTS call Zeev re-checks `bluealsa-aplay --list-pcms` and falls back to the wired speaker if the BT device is no longer present.
+
 ## Terminal commands
 
 | Command | Action |

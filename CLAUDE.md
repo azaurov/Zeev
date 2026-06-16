@@ -27,6 +27,7 @@ All audio output (TTS, music) routes through `bt_audio_dev()` which returns the 
 - `_BT_AUDIO_DEV` global holds the active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`) when headphones are connected.
 - `_BT_RATE` / `_BT_CHANNELS` globals — store the negotiated A2DP format (e.g. 44100Hz, 1ch), queried from `bluealsa-aplay --list-pcms` at connect/startup.
 - `bt_detect_connected()` — called at device mode startup; queries `bluealsa-aplay --list-pcms`, sets `_BT_AUDIO_DEV`/`_BT_RATE`/`_BT_CHANNELS`. Retries 4× with 2s sleep to handle bluealsa registration delay after service start.
+- `bt_verify_connected()` — called at the top of `_speak_device()` on every TTS call; re-queries `bluealsa-aplay --list-pcms` and clears `_BT_AUDIO_DEV`/resets rate+channels if the device is no longer listed. Handles physical disconnects (headphones powered off/out of range) that `bt_disconnect()` would not catch.
 - `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])` (parses all output after completion — avoids readline hang on partial ANSI escape sequences from bluetoothctl); results stored in `_bt_scan_results`.
 - `bt_pair(mac)` — pairs and trusts a device via bluetoothctl.
 - `bt_connect(mac)` / `bt_disconnect(mac)` — connect/disconnect; calls `bt_detect_connected()` after connect to refresh `_BT_AUDIO_DEV`/format.

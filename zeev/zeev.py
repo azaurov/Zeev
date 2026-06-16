@@ -4198,7 +4198,7 @@ def run_device_mode():
     _tts_p2 = None
     _piper_dev_proc = None   # persistent piper process — kept alive between utterances
 
-    def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=0.5):
+    def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=2.0):
         """Read raw PCM from a live piper process until it goes quiet.
 
         Uses a longer first_timeout to allow Piper to load its model on slow

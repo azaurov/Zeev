@@ -1283,11 +1283,18 @@ def bt_call_at(mac: str, cmd: str) -> bool:
         obj = bus.get_object("org.bluealsa", dbus_path)
         iface = dbus.Interface(obj, "org.bluealsa.RFCOMM1")
         fd_obj = iface.Open()
-        # dbus.UnixFd.take() returns the raw integer fd in this process
         raw_fd = fd_obj.take() if hasattr(fd_obj, "take") else int(fd_obj)
-        with os.fdopen(raw_fd, "wb", closefd=True) as f:
+        import select as _sel
+        with os.fdopen(raw_fd, "r+b", closefd=True, buffering=0) as f:
             f.write((cmd + "\r").encode())
-        return True
+            # Read response (up to 1s) to confirm phone processed the command
+            ready, _, _ = _sel.select([f], [], [], 1.0)
+            if ready:
+                resp = f.read(64).decode(errors="replace").strip()
+                ok = "OK" in resp
+                print(f"[call] AT {cmd} → {resp!r}", flush=True)
+                return ok
+        return True  # no response but no error either
     except ImportError:
         print("[call] python3-dbus not installed — run: sudo apt install python3-dbus")
         return False
@@ -1331,14 +1338,18 @@ def bt_call_answer() -> bool:
 
 
 def bt_call_hangup() -> bool:
-    """Hang up the active call."""
+    """Hang up the active call via AT+CHUP (HFP spec) with ATH fallback."""
     global _BT_PHONE_MAC, _IN_CALL
     if not _BT_PHONE_MAC:
         _BT_PHONE_MAC = bt_hfp_detect()
     _IN_CALL = False
     if not _BT_PHONE_MAC:
         return False
-    return bt_call_at(_BT_PHONE_MAC, "ATH")
+    # AT+CHUP is the proper HFP call-termination command
+    ok = bt_call_at(_BT_PHONE_MAC, "AT+CHUP")
+    if not ok:
+        ok = bt_call_at(_BT_PHONE_MAC, "ATH")
+    return ok
 
 
 def _vad_collect(stream_proc: subprocess.Popen, samplerate: int = 16000,
@@ -1610,8 +1621,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         turn += 1
 
     print("[call] Loop ended", flush=True)
-    _IN_CALL = False
-    bt_call_hangup()  # ensure call is terminated on the phone
+    if _IN_CALL:  # not already hung up via break path
+        _IN_CALL = False
+        bt_call_hangup()
 
 
 SYSTEM_PROMPT = (

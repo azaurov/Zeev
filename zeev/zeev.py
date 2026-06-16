@@ -4230,14 +4230,29 @@ def run_device_mode():
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if wav:
             try:
-                p2 = subprocess.Popen(
-                    ["aplay", "-D", adev, "-q", "-"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                # BT (bluealsa) requires 44100Hz stereo; resample WAV via ffmpeg
+                if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
+                    ff = subprocess.Popen(
+                        ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
+                         "-f", "s16le", "-ar", "44100", "-ac", "2", "pipe:1"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    )
+                    raw, _ = ff.communicate(wav)
+                    p2 = subprocess.Popen(
+                        ["aplay", "-D", adev, "-f", "S16_LE", "-r", "44100", "-c", "2", "-q", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    p2 = subprocess.Popen(
+                        ["aplay", "-D", adev, "-q", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    raw = wav
                 _tts_p1, _tts_p2 = None, p2
                 try:
-                    p2.stdin.write(wav)
+                    p2.stdin.write(raw)
                     p2.stdin.close()
                 except BrokenPipeError:
                     pass
@@ -4753,7 +4768,7 @@ def run_device_mode():
         mp3 = elevenlabs_tts(_greeting)
         if mp3 and shutil.which("mpg123"):
             proc = subprocess.Popen(
-                ["mpg123", "-q", "-a", "plughw:wm8960soundcard,0", "-"],
+                ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             proc.stdin.write(mp3)

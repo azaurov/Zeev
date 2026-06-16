@@ -411,7 +411,12 @@ def detect_lang(text):
 
 def init_tts():
     global TTS_AVAILABLE, PIPER_BIN, PIPER_MODELS
-    PIPER_BIN = shutil.which("piper") or ""
+    _piper_candidates = [
+        shutil.which("piper"),
+        str(Path.home() / ".local" / "bin" / "piper"),
+        str(Path.home() / "piper" / "piper"),
+    ]
+    PIPER_BIN = next((p for p in _piper_candidates if p and Path(p).is_file()), "")
     piper_dir = Path.home() / "piper"
     data_dir  = BASE_DIR / "data"
     share_dir = Path.home() / ".local" / "share" / "piper"

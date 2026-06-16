@@ -3992,13 +3992,27 @@ def run_device_mode():
     threading.Thread(target=_face_loop, daemon=True).start()
 
     # ── WM8960 keepalive — prevents codec power-save after ~30s of silence ──
-    # The WM8960 auto-powers-down when the ALSA device is idle; subsequent
-    # playback fails silently. Streaming /dev/zero keeps the device open.
-    _keepalive_proc = subprocess.Popen(
-        ["aplay", "-D", "plughw:wm8960soundcard,0",
-         "-f", "S16_LE", "-r", "44100", "-c", "1", "/dev/zero"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    # Plays a brief silent buffer every 20s to keep the codec awake without
+    # holding the device open (which would block TTS playback).
+    _KEEPALIVE_SILENCE = b'\x00' * (44100 * 2 * 1)  # 1s silence, 44100Hz S16_LE mono
+    _keepalive_stop = threading.Event()
+
+    def _keepalive_loop():
+        while not _keepalive_stop.wait(timeout=20):
+            try:
+                p = subprocess.Popen(
+                    ["aplay", "-D", "plughw:wm8960soundcard,0",
+                     "-f", "S16_LE", "-r", "44100", "-c", "1", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                p.stdin.write(_KEEPALIVE_SILENCE)
+                p.stdin.close()
+                p.wait(timeout=5)
+            except Exception:
+                pass
+
+    threading.Thread(target=_keepalive_loop, daemon=True).start()
 
     # ── TTS (interruptible, blocking) ────────────────────────────────────────
 
@@ -4608,10 +4622,7 @@ def run_device_mode():
     threading.Thread(target=_battery_shutdown_monitor, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
-        try:
-            _keepalive_proc.terminate()
-        except Exception:
-            pass
+        _keepalive_stop.set()
         zeev_cleanup()
         board.cleanup()
         sys.exit(0)

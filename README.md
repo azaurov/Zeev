@@ -219,7 +219,9 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 
 **Bluetooth audio** (requires `sudo apt install bluez-alsa-utils libasound2-plugin-bluez`):
 
-Say `scan for bluetooth` → Zeev scans 10s and lists nearby devices. Say the device name (or `pair it` if only one) → Zeev pairs, trusts, and connects. All TTS and music then routes through the headphones. Say `disconnect bluetooth` to revert to the speaker. Manual control via `/bt scan`, `/bt pair <N>`, `/bt <N>`, `/bt off`.
+Say `scan for bluetooth` → Zeev scans 10s and lists nearby devices. Say the device name (or `pair it` if only one) → Zeev pairs, trusts, and connects. All TTS and music then routes through the headphones automatically, resampled via ffmpeg to match the A2DP negotiated format. Say `disconnect bluetooth` to revert to the speaker. Manual control via `/bt scan`, `/bt pair <N>`, `/bt <N>`, `/bt off`.
+
+At startup, if headphones are already connected, Zeev auto-detects them via `bluealsa-aplay --list-pcms` and sets BT volume to raw 50/127 (~39%). Speaker volume is always set to raw 110/127 (~87%) regardless of BT state.
 
 ## Terminal commands
 

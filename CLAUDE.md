@@ -8,9 +8,15 @@ This is a Raspberry Pi project (Zeev) using Python with hardware HATs (Whisplay 
 
 ## TTS / Audio
 
-TTS uses Piper with a persistent process; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
+TTS uses Piper with a persistent process for the wired speaker path; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
 
 In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio by resetting `_piper_dev_proc = None` and restarting the process — only falls through to espeak-ng if both attempts fail.
+
+**BT vs speaker Piper path**: when BT headphones are connected, `_speak_device()` uses a **one-shot** Piper subprocess (close stdin after writing, read stdout until EOF). This guarantees the full multi-sentence response is captured before playback, avoiding the timeout-truncation problem on the Pi Zero 2W (~2s synthesis per sentence). The persistent process path is only used for the wired speaker.
+
+**BT audio resampling**: all audio going to BlueALSA must match the negotiated A2DP format (`_BT_RATE` / `_BT_CHANNELS`, queried from `bluealsa-aplay --list-pcms`). Both Orpheus (24000Hz mono WAV) and Piper (22050Hz mono raw PCM) are resampled via an inline `ffmpeg` pipeline before `aplay`. Do NOT use `plug:bluealsa:...` ALSA syntax — the parser cannot handle colons in nested params; pass explicit `-f S16_LE -r _BT_RATE -c _BT_CHANNELS` flags to `aplay` instead.
+
+`_collect_piper_audio(p, first_timeout=30.0, idle_timeout=2.0)` — reads from the Piper subprocess with a 30s first-chunk timeout (covers cold ONNX model load on Pi Zero 2W, ~20s) then 2s idle timeout between chunks.
 
 WM8960 auto-powers-down after ~30s of ALSA inactivity. Device mode runs a keepalive thread that plays a 1s silent buffer every 20s to prevent this.
 
@@ -19,9 +25,12 @@ All audio output (TTS, music) routes through `bt_audio_dev()` which returns the 
 ## Bluetooth
 
 - `_BT_AUDIO_DEV` global holds the active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`) when headphones are connected.
-- `bt_scan()` — 10s scan for nearby devices; results stored in `_bt_scan_results`.
+- `_BT_RATE` / `_BT_CHANNELS` globals — store the negotiated A2DP format (e.g. 44100Hz, 1ch), queried from `bluealsa-aplay --list-pcms` at connect/startup.
+- `bt_detect_connected()` — called at device mode startup; queries `bluealsa-aplay --list-pcms`, sets `_BT_AUDIO_DEV`/`_BT_RATE`/`_BT_CHANNELS`. Retries 4× with 2s sleep to handle bluealsa registration delay after service start.
+- `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])` (parses all output after completion — avoids readline hang on partial ANSI escape sequences from bluetoothctl); results stored in `_bt_scan_results`.
 - `bt_pair(mac)` — pairs and trusts a device via bluetoothctl.
-- `bt_connect(mac)` / `bt_disconnect(mac)` — connect/disconnect and update `_BT_AUDIO_DEV`.
+- `bt_connect(mac)` / `bt_disconnect(mac)` — connect/disconnect; calls `bt_detect_connected()` after connect to refresh `_BT_AUDIO_DEV`/format.
+- Startup BT volume: raw 50/127 (~39%) via `amixer -D bluealsa cset numid=2 50` when headphones are detected at startup.
 - `extract_bt_intent(text)` — detects 'scan'/'pair'/'connect'/'disconnect' from natural language.
 - Natural language handled before LLM routing in both terminal and device mode.
 - `/bt` slash command: `scan`, `pair <N>`, `<N>` to connect, `off` to disconnect.
@@ -264,8 +273,9 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 
 `python3 zeev/zeev.py --device` runs a push-to-talk voice companion on the PiSugar Whisplay HAT (1.96" ST7789 LCD 240×280, WM8960 audio codec, RGB LED, KEY button on GPIO17).
 
-- **TTS priority**: Groq Orpheus (cloud, English) → Google Translate TTS + mpg123 (he/es/ru) → Piper (en fallback) → espeak-ng (last resort)
+- **TTS priority**: Groq Orpheus (cloud, English) → Google Translate TTS + mpg123 (he/es/ru) → Piper (en fallback, one-shot when BT connected, persistent for speaker) → espeak-ng (last resort)
 - **Speaker volume**: set to raw 110 (~87%) via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control, raw range 0–127)
+- **BT headphone volume**: set to raw 50/127 (~39%) via `amixer -D bluealsa` at startup when headphones are detected
 - **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
 - **STT**: Groq Whisper `whisper-large-v3-turbo`
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`

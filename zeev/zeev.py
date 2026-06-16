@@ -4198,10 +4198,16 @@ def run_device_mode():
     _tts_p2 = None
     _piper_dev_proc = None   # persistent piper process — kept alive between utterances
 
-    def _collect_piper_audio(p, timeout=5.0):
-        """Read raw PCM from a live piper process until it goes quiet (line done)."""
+    def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=0.5):
+        """Read raw PCM from a live piper process until it goes quiet.
+
+        Uses a longer first_timeout to allow Piper to load its model on slow
+        hardware (Pi Zero 2W takes ~20s on cold start), then a short idle_timeout
+        to detect when generation is complete.
+        """
         audio = bytearray()
         fd = p.stdout.fileno()
+        timeout = first_timeout
         while True:
             ready, _, _ = select.select([fd], [], [], timeout)
             if not ready:
@@ -4213,6 +4219,7 @@ def run_device_mode():
             if not chunk:
                 break
             audio.extend(chunk)
+            timeout = idle_timeout  # switch to short timeout after first chunk
         return bytes(audio)
 
     def _drain_piper(p):

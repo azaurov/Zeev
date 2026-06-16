@@ -363,6 +363,10 @@ def init_tts():
     TTS_AVAILABLE = bool(
         (PIPER_BIN and PIPER_MODELS.get("en")) or shutil.which("espeak-ng")
     )
+    if PIPER_BIN:
+        print(f"[tts] Piper: {PIPER_BIN}  en={PIPER_MODELS.get('en') or 'NOT FOUND'}")
+    else:
+        print("[tts] Piper: NOT FOUND — will use espeak-ng")
 
 
 _YHWH_RE = re.compile(r"י[ְ-ׇ]*ה[ְ-ׇ]*ו[ְ-ׇ]*ה[ְ-ׇ]*|ה[ְ-ׇ]*ו[ְ-ׇ]*י[ְ-ׇ]*|הוהיְ")

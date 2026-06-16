@@ -985,29 +985,32 @@ def bt_audio_dev() -> str:
 def bt_detect_connected():
     """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
     global _BT_AUDIO_DEV, _BT_CHANNELS, _BT_RATE
-    try:
-        result = subprocess.run(
-            ["bluealsa-aplay", "--list-pcms"],
-            capture_output=True, text=True, timeout=5,
-        )
-        lines = result.stdout.splitlines()
-        for i, line in enumerate(lines):
-            m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=a2dp', line)
-            if m:
-                _BT_AUDIO_DEV = f"bluealsa:DEV={m.group(1)},PROFILE=a2dp"
-                # Parse format from next few lines, e.g. "A2DP (SBC): S16_LE 2 channels 44100 Hz"
-                for j in range(i+1, min(i+4, len(lines))):
-                    fmt = lines[j]
-                    mc = re.search(r'(\d+) channel', fmt)
-                    mr = re.search(r'(\d+) Hz', fmt)
-                    if mc:
-                        _BT_CHANNELS = int(mc.group(1))
-                    if mr:
-                        _BT_RATE = int(mr.group(1))
-                print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV} ({_BT_RATE}Hz {_BT_CHANNELS}ch)")
-                return
-    except Exception:
-        pass
+    import time as _t
+    for attempt in range(4):  # retry up to 4×2s = 8s for bluealsa to register
+        try:
+            result = subprocess.run(
+                ["bluealsa-aplay", "--list-pcms"],
+                capture_output=True, text=True, timeout=5,
+            )
+            lines = result.stdout.splitlines()
+            for i, line in enumerate(lines):
+                m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=a2dp', line)
+                if m:
+                    _BT_AUDIO_DEV = f"bluealsa:DEV={m.group(1)},PROFILE=a2dp"
+                    for j in range(i+1, min(i+4, len(lines))):
+                        fmt = lines[j]
+                        mc = re.search(r'(\d+) channel', fmt)
+                        mr = re.search(r'(\d+) Hz', fmt)
+                        if mc:
+                            _BT_CHANNELS = int(mc.group(1))
+                        if mr:
+                            _BT_RATE = int(mr.group(1))
+                    print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV} ({_BT_RATE}Hz {_BT_CHANNELS}ch)")
+                    return
+        except Exception:
+            pass
+        if attempt < 3:
+            _t.sleep(2)
 
 
 def bt_list():

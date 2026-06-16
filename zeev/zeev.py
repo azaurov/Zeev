@@ -172,7 +172,7 @@ THERMAL_AVAILABLE = False   # set by init_thermal()
 CAMERA_FLIP       = False   # set by load_settings()
 FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
 _MUSIC_PROC       = None    # active mpg123 playback process
-_VOLUME           = 40      # 0–100; applied via amixer
+_VOLUME           = 50      # 0–100; applied via amixer
 
 
 def route_model(text):
@@ -3801,10 +3801,10 @@ def run_device_mode():
     init_learning()
     init_tts()
 
-    # Set speaker volume to 40% (raw 51 of 0–127)
+    # Set speaker volume to 50% (raw 64 of 0–127)
     try:
         subprocess.run(
-            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", "51"],
+            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", "64"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:

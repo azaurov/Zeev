@@ -1401,6 +1401,47 @@ def bt_call_dtmf(mac: str, digit: str) -> bool:
     return bt_call_at(mac, f"AT+VTS={digit}")
 
 
+def twilio_call(to_number: str) -> tuple[str, str]:
+    """
+    Initiate a call via Twilio API.
+    Returns (call_sid, error_msg) — call_sid is non-empty on success.
+    """
+    twilio_account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    twilio_auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    twilio_phone = os.environ.get("TWILIO_PHONE_NUMBER", "")
+
+    if not all([twilio_account_sid, twilio_auth_token, twilio_phone]):
+        return "", "Twilio credentials not configured"
+
+    # Normalize phone number
+    to_number = re.sub(r'\D', '', to_number)
+    if len(to_number) == 10:
+        to_number = f"+1{to_number}"
+    elif not to_number.startswith("+"):
+        to_number = f"+{to_number}"
+
+    try:
+        resp = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{twilio_account_sid}/Calls",
+            auth=(twilio_account_sid, twilio_auth_token),
+            data={
+                "From": twilio_phone,
+                "To": to_number,
+                "Url": "http://twimlets.com/echo?Twiml=%3CResponse%3E%3CSay%3EPlease%20wait%20while%20we%20connect%20you.%3C%2FSay%3E%3C%2FResponse%3E"
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            call_sid = data.get("sid", "")
+            if call_sid:
+                print(f"[call] Twilio: dialing {to_number}", flush=True)
+                return call_sid, ""
+        return "", f"Twilio HTTP {resp.status_code}: {resp.text[:100]}"
+    except Exception as e:
+        return "", f"Twilio error: {e}"
+
+
 def bt_ensure_hfp_connected(timeout: int = 15) -> str:
     """
     Ensure a phone is connected via HFP. If already connected, return MAC.
@@ -1486,18 +1527,30 @@ def bt_ensure_hfp_connected(timeout: int = 15) -> str:
 
 
 def bt_call_dial(number: str) -> bool:
-    """Dial a number via HFP ATD. Auto-connects phone if needed. Returns True if AT command sent."""
+    """Dial via Twilio (preferred) or HFP (fallback). Returns True if call initiated."""
+    digits = re.sub(r"[^\d+]", "", number)
+    if not digits:
+        print(f"[call] No digits found in: {number!r}")
+        return False
+
+    # Try Twilio first
+    twilio_sid, twilio_err = twilio_call(digits)
+    if twilio_sid:
+        print(f"[call] Twilio call initiated: {twilio_sid}", flush=True)
+        return True
+
+    if twilio_err and "not configured" not in twilio_err:
+        print(f"[call] Twilio error: {twilio_err}", flush=True)
+
+    # Fallback to HFP
+    print("[call] Attempting HFP fallback...", flush=True)
     global _BT_PHONE_MAC
     if not _BT_PHONE_MAC:
         _BT_PHONE_MAC = bt_ensure_hfp_connected(timeout=20)
     if not _BT_PHONE_MAC:
         print("[call] Failed to connect phone via HFP")
         return False
-    digits = re.sub(r"[^\d+]", "", number)
-    if not digits:
-        print(f"[call] No digits found in: {number!r}")
-        return False
-    print(f"[call] Dialing {digits} via {_BT_PHONE_MAC}")
+    print(f"[call] Dialing {digits} via HFP {_BT_PHONE_MAC}", flush=True)
     return bt_call_at(_BT_PHONE_MAC, f"ATD{digits};")
 
 

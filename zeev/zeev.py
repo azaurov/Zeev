@@ -5387,12 +5387,6 @@ def run_device_mode():
             if number_m:
                 number = number_m.group(1).strip()
                 intent_text = transcript[number_m.end():].strip().lstrip("to ").strip()
-                phone_mac = bt_hfp_detect()
-                if not phone_mac:
-                    reply = "No phone connected via Bluetooth. Please connect your phone first."
-                    _speak_device(reply)
-                    _go_ready() if _busy.is_set() else _go_idle()
-                    return
                 reply = f"Calling {number}."
                 _speak_device(reply)
                 ok = bt_call_dial(number)
@@ -6399,10 +6393,6 @@ def main():
             if number_m:
                 number = number_m.group(1).strip()
                 intent_text = user_input[number_m.end():].strip().lstrip("to ").strip()
-                phone_mac = bt_hfp_detect()
-                if not phone_mac:
-                    print(f"\n{CYAN}{BOLD}Zeev:{RESET} No phone connected via HFP Bluetooth.\n")
-                    continue
                 print(f"{DIM}[call] Dialing {number}...{RESET}", flush=True)
                 if intent_text:
                     print(f"{DIM}[call] Intent: {intent_text}{RESET}", flush=True)

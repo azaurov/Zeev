@@ -1771,7 +1771,13 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         )
         print("[call] Listening...", flush=True)
         # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
-        silence_ms = 3000 if call_type == "ivr" else 900
+        # Turn 0: use 2s silence window so voicemail greeting + beep are captured together
+        if call_type == "ivr":
+            silence_ms = 3000
+        elif turn == 0:
+            silence_ms = 2000
+        else:
+            silence_ms = 900
         pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
         rec.terminate()
         rec.wait()

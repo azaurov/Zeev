@@ -1718,8 +1718,30 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         "Keep replies short (1-2 sentences). Speak naturally."
     )
 
+    import time as _ct
+    _call_start = _ct.time()
+    _VOICEMAIL_TIMEOUT = 25  # seconds — if still unclassified, assume voicemail
+
     turn = 0
     while _IN_CALL:
+        # If we haven't classified the call after 25s, the greeting was missed — treat as voicemail
+        if call_type == "unknown" and turn > 0 and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
+            print("[call] Timeout — assuming voicemail (greeting missed)", flush=True)
+            if call_intent:
+                msg = llm_fn(
+                    f"Leave a brief casual voicemail on behalf of Alex. Reason: {call_intent}. "
+                    "Keep the tone friendly and relaxed — not passionate or emotional. "
+                    "Output ONLY the spoken message (1 sentence) — no stage directions, no quotes."
+                )
+            else:
+                msg = ""
+            if not msg:
+                msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance."
+            print(f"[call] Zeev (voicemail/timeout): {msg}", flush=True)
+            _sco_speak(msg)
+            _IN_CALL = False
+            bt_call_hangup()
+            break
         # Record caller's voice via SCO capture device
         rec = subprocess.Popen(
             ["arecord", "-D", sco_dev, "-f", "S16_LE",

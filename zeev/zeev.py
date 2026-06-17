@@ -1401,13 +1401,97 @@ def bt_call_dtmf(mac: str, digit: str) -> bool:
     return bt_call_at(mac, f"AT+VTS={digit}")
 
 
+def bt_ensure_hfp_connected(timeout: int = 15) -> str:
+    """
+    Ensure a phone is connected via HFP. If already connected, return MAC.
+    If not, try to auto-connect a paired device, or scan & pair if needed.
+    Returns MAC on success, '' on failure.
+    """
+    import time as _t
+    start = _t.time()
+
+    # 1. Check if already connected
+    mac = bt_hfp_detect()
+    if mac:
+        print(f"[bt] HFP phone already connected: {mac}", flush=True)
+        return mac
+
+    # 2. Get list of paired devices
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "paired-devices"],
+            capture_output=True, text=True, timeout=5,
+        )
+        paired = re.findall(r'([0-9A-Fa-f:]{17})\s+(.+)', result.stdout)
+    except Exception as e:
+        print(f"[bt] Failed to list paired devices: {e}", flush=True)
+        paired = []
+
+    # 3. Try to connect each paired device until one connects via HFP
+    for device_mac, device_name in paired:
+        if _t.time() - start > timeout:
+            break
+        print(f"[bt] Attempting HFP connect: {device_name} ({device_mac})", flush=True)
+        try:
+            subprocess.run(
+                ["bluetoothctl", "connect", device_mac],
+                capture_output=True, text=True, timeout=10,
+            )
+            _t.sleep(1)
+            mac = bt_hfp_detect()
+            if mac:
+                print(f"[bt] Connected via HFP: {device_mac}", flush=True)
+                return mac
+        except Exception:
+            pass
+
+    # 4. No paired device worked — scan for a new one
+    print(f"[bt] No paired devices connected. Scanning for {timeout}s...", flush=True)
+    try:
+        subprocess.run(
+            ["timeout", str(timeout), "bluetoothctl", "scan", "on"],
+            capture_output=True, text=True, timeout=timeout + 2,
+        )
+        result = subprocess.run(
+            ["bluetoothctl", "devices"],
+            capture_output=True, text=True, timeout=5,
+        )
+        scanned = re.findall(r'([0-9A-Fa-f:]{17})\s+(.+)', result.stdout)
+        if scanned:
+            device_mac, device_name = scanned[0]
+            print(f"[bt] Found device: {device_name} ({device_mac}). Pairing...", flush=True)
+            subprocess.run(
+                ["bluetoothctl", "pair", device_mac],
+                capture_output=True, text=True, timeout=15,
+            )
+            subprocess.run(
+                ["bluetoothctl", "trust", device_mac],
+                capture_output=True, text=True, timeout=5,
+            )
+            _t.sleep(1)
+            subprocess.run(
+                ["bluetoothctl", "connect", device_mac],
+                capture_output=True, text=True, timeout=10,
+            )
+            _t.sleep(1)
+            mac = bt_hfp_detect()
+            if mac:
+                print(f"[bt] Paired and connected: {device_mac}", flush=True)
+                return mac
+    except Exception as e:
+        print(f"[bt] Scan/pair failed: {e}", flush=True)
+
+    print("[bt] Failed to establish HFP connection", flush=True)
+    return ""
+
+
 def bt_call_dial(number: str) -> bool:
-    """Dial a number via HFP ATD. Returns True if AT command sent."""
+    """Dial a number via HFP ATD. Auto-connects phone if needed. Returns True if AT command sent."""
     global _BT_PHONE_MAC
     if not _BT_PHONE_MAC:
-        _BT_PHONE_MAC = bt_hfp_detect()
+        _BT_PHONE_MAC = bt_ensure_hfp_connected(timeout=20)
     if not _BT_PHONE_MAC:
-        print("[call] No phone connected via HFP")
+        print("[call] Failed to connect phone via HFP")
         return False
     digits = re.sub(r"[^\d+]", "", number)
     if not digits:

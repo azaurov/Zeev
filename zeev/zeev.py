@@ -1725,7 +1725,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     turn = 0
     while _IN_CALL:
         # If we haven't classified the call after 25s, the greeting was missed — treat as voicemail
-        if call_type == "unknown" and turn > 0 and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
+        if call_type == "unknown" and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
             print("[call] Timeout — assuming voicemail (greeting missed)", flush=True)
             if call_intent:
                 msg = llm_fn(

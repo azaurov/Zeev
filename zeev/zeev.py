@@ -76,6 +76,10 @@ OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY",  "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 
+# Cartesia TTS — ~100ms latency, high quality, male voice for calls
+CARTESIA_API_KEY   = os.environ.get("CARTESIA_API_KEY",   "")
+CARTESIA_VOICE_ID  = os.environ.get("CARTESIA_VOICE_ID",  "efa653e5-314d-46ca-9f90-70ac7d6ca71e")  # Kurt - Phone Support
+
 # Wake-word (openwakeword)
 WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
 WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep names/paths
@@ -838,6 +842,30 @@ def groq_tts(text, voice="daniel"):
         return None
 
 
+def cartesia_tts(text, voice_id=None):
+    """Call Cartesia TTS (sonic-2). Returns WAV bytes or None. ~100ms latency."""
+    if not CARTESIA_API_KEY or not text.strip():
+        return None
+    clean = _clean_for_tts(text, "en")
+    if not clean or detect_lang(clean) != "en":
+        return None
+    try:
+        resp = requests.post(
+            "https://api.cartesia.ai/tts/bytes",
+            headers={"X-API-Key": CARTESIA_API_KEY,
+                     "Cartesia-Version": "2024-06-10",
+                     "Content-Type": "application/json"},
+            json={"model_id": "sonic-2",
+                  "transcript": clean[:4000],
+                  "voice": {"mode": "id", "id": voice_id or CARTESIA_VOICE_ID},
+                  "output_format": {"container": "wav", "encoding": "pcm_s16le", "sample_rate": 22050}},
+            timeout=15,
+        )
+        return resp.content if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
 def elevenlabs_tts(text, voice_id=None):
     """Call ElevenLabs TTS. Returns MP3 bytes or None."""
     if not ELEVENLABS_API_KEY or not text.strip():
@@ -1300,7 +1328,17 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     except Exception:
         pass
 
-    # 2. Piper (Ryan, male) — local synthesis, consistent male voice for calls
+    # 2. Cartesia (Kurt, male) — ~100ms cloud TTS, best latency after Orpheus
+    if not wav:
+        try:
+            wav = cartesia_tts(text)
+            if wav:
+                src_fmt = "wav"
+                print("[call] SCO TTS via Cartesia", flush=True)
+        except Exception as e:
+            print(f"[call] Cartesia error: {e}", flush=True)
+
+    # 3. Piper (Ryan, male) — local synthesis, works offline
     if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
         try:
             p = subprocess.Popen(

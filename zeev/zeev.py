@@ -5762,6 +5762,10 @@ def main():
             continue
 
         if source == "exit":
+            # Don't exit while a call is active — wait for it to finish
+            if _IN_CALL:
+                while _IN_CALL:
+                    time.sleep(0.5)
             break
         if source == "voice":
             print(f"\r{BOLD}You:{RESET} {DIM}[voice]{RESET} {user_input}")
@@ -6281,11 +6285,17 @@ def main():
                             wf.writeframes(pcm)
                         return groq_stt(buf.getvalue())
 
+                    _call_sys = (
+                        f"You are Zeev, Alex's AI assistant, on a live phone call. "
+                        f"{intent_text + ' ' if intent_text else ''}"
+                        "Keep replies short — 1-2 sentences maximum. "
+                        "Speak naturally and conversationally. Do NOT mention unrelated topics."
+                    )
+
                     def _term_llm(text: str) -> str:
-                        msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
-                        msgs += session[-10:]
+                        msgs = [{"role": "system", "content": _call_sys}]
                         msgs.append({"role": "user", "content": text})
-                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                        resp, err, _ = _llm_post(msgs, "llama-3.1-8b-instant", stream=False, max_tokens=150)
                         if err or not resp:
                             return ""
                         return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()

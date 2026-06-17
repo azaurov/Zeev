@@ -80,26 +80,53 @@ ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMa
 CARTESIA_API_KEY   = os.environ.get("CARTESIA_API_KEY",   "")
 CARTESIA_VOICE_ID  = os.environ.get("CARTESIA_VOICE_ID",  "efa653e5-314d-46ca-9f90-70ac7d6ca71e")  # Kurt - Phone Support
 
-# Voice personas — each entry: {orpheus, cartesia, piper_model (optional)}
+# Voice personas — each entry: {orpheus, cartesia, label}
 # orpheus: Groq Orpheus voice name; cartesia: Cartesia voice ID
+# Override cartesia voice IDs via .env: CARTESIA_VOICE_<PERSONA>=<id>
 _CALL_VOICES: dict[str, dict] = {
     "assistant": {
         "orpheus": "daniel",
-        "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - male, phone support
+        "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - neutral male, phone support
+        "label": "AI assistant",
     },
     "friendly": {
         "orpheus": "zac",
-        "cartesia": "00a77add-48d5-4ef6-8157-71e5437b6f95",  # Liam - warm, casual male
+        "cartesia": "00a77add-48d5-4ef6-8157-71e5437b6f95",  # Liam - warm casual male
+        "label": "friendly acquaintance",
     },
     "professional": {
         "orpheus": "dan",
-        "cartesia": "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e",  # Barbora - clear, neutral female
+        "cartesia": "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e",  # Barbora - clear neutral female
+        "label": "professional colleague",
     },
     "calm": {
         "orpheus": "leo",
-        "cartesia": "5c42302c-194b-4d0c-ba1a-8cb485c84ab9",  # Reading - calm male
+        "cartesia": "5c42302c-194b-4d0c-ba1a-8cb485c84ab9",  # Reading - calm measured male
+        "label": "calm/meditative",
+    },
+    "authoritative": {
+        "orpheus": "dan",
+        "cartesia": os.environ.get("CARTESIA_VOICE_AUTHORITATIVE", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "label": "irate boss / authority figure",
+    },
+    "intimate": {
+        "orpheus": "zac",
+        "cartesia": os.environ.get("CARTESIA_VOICE_INTIMATE", "00a77add-48d5-4ef6-8157-71e5437b6f95"),
+        "label": "lover / close partner",
+    },
+    "nurturing": {
+        "orpheus": "leo",
+        "cartesia": os.environ.get("CARTESIA_VOICE_NURTURING", "5c42302c-194b-4d0c-ba1a-8cb485c84ab9"),
+        "label": "parent / caregiver",
     },
 }
+
+# Allow per-persona Cartesia voice ID overrides via .env at runtime
+for _p, _cfg in _CALL_VOICES.items():
+    _env_key = f"CARTESIA_VOICE_{_p.upper()}"
+    _env_val = os.environ.get(_env_key, "")
+    if _env_val:
+        _cfg["cartesia"] = _env_val
 
 # Wake-word (openwakeword)
 WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
@@ -230,11 +257,17 @@ def extract_bt_intent(text):
 def extract_call_persona(intent_text: str) -> str:
     """Return a persona key from _CALL_VOICES based on keywords in the call intent."""
     t = intent_text.lower()
-    if re.search(r'\b(professional|formal|business|official|serious)\b', t):
+    if re.search(r'\b(irate|angry|furious|frustrated|boss|authority|demanding|assertive|stern)\b', t):
+        return "authoritative"
+    if re.search(r'\b(lover|mistress|romantic|intimate|darling|sweetheart|babe|honey|miss you)\b', t):
+        return "intimate"
+    if re.search(r'\b(parent|mom|dad|mother|father|nurturing|caring|child|son|daughter)\b', t):
+        return "nurturing"
+    if re.search(r'\b(professional|formal|business|official|serious|colleague|coworker|meeting)\b', t):
         return "professional"
-    if re.search(r'\b(calm|soft|gentle|relaxed|soothing)\b', t):
+    if re.search(r'\b(calm|soft|gentle|relaxed|soothing|meditat)\b', t):
         return "calm"
-    if re.search(r'\b(friendly|casual|warm|fun|cheerful|upbeat)\b', t):
+    if re.search(r'\b(friendly|casual|warm|fun|cheerful|upbeat|buddy|pal|friend)\b', t):
         return "friendly"
     return "assistant"  # default
 

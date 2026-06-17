@@ -1066,7 +1066,7 @@ def bt_detect_connected():
     """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
     global _BT_AUDIO_DEV, _BT_CHANNELS, _BT_RATE
     import time as _t
-    for attempt in range(4):  # retry up to 4×2s = 8s for bluealsa to register
+    for attempt in range(2):  # retry up to 2×1s = 2s for bluealsa to register (headphones are optional at boot)
         try:
             result = subprocess.run(
                 ["bluealsa-aplay", "--list-pcms"],
@@ -1089,8 +1089,8 @@ def bt_detect_connected():
                     return
         except Exception:
             pass
-        if attempt < 3:
-            _t.sleep(2)
+        if attempt < 1:
+            _t.sleep(1)
 
 
 def bt_list():

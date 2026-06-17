@@ -1771,23 +1771,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         )
         print("[call] Listening...", flush=True)
         # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
-        if call_type == "ivr":
-            silence_ms = 3000
-        else:
-            silence_ms = 900
-        # Turn 0: fixed 5s capture so the voicemail greeting (plays right at pickup) is
-        # always included — VAD may end too early and miss it entirely
-        if turn == 0 and call_type != "ivr":
-            total_bytes = int(samplerate * 5) * 2  # 5s of S16_LE mono
-            pcm = b""
-            while len(pcm) < total_bytes:
-                chunk = rec.stdout.read(total_bytes - len(pcm))
-                if not chunk:
-                    break
-                pcm += chunk
-            print("[call] Turn 0: fixed 5s capture", flush=True)
-        else:
-            pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
+        silence_ms = 3000 if call_type == "ivr" else 900
+        pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
         rec.terminate()
         rec.wait()
 

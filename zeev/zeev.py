@@ -1862,7 +1862,9 @@ def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
     call_type = detect_call_type(transcript)
 
     # Additional heuristic: early onset + short transcript = real person
-    if call_type == "unknown" and early_exit and len(transcript.split()) <= 5:
+    # Require onset > 100ms to skip pickup click/noise at 0ms
+    onset = _speech_onset_ms(pcm, samplerate)
+    if call_type == "unknown" and early_exit and len(transcript.split()) <= 5 and onset is not None and onset > 100:
         call_type = "live"
         print("[call] Short early burst — classified as live", flush=True)
 

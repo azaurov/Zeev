@@ -1945,8 +1945,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
     turn = 0
     while _IN_CALL:
-        # If we haven't classified the call after 25s, the greeting was missed — treat as voicemail
-        if call_type == "unknown" and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
+        # If we haven't classified the call after 25s AND haven't spoken yet, assume voicemail.
+        # Once Zeev has replied (turn > 0) the caller is real — never fire the voicemail timeout.
+        if call_type == "unknown" and turn == 0 and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
             print("[call] Timeout — assuming voicemail (greeting missed)", flush=True)
             if _pregen_msg:
                 msg = _pregen_msg[0]
@@ -2151,6 +2152,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 turn += 1
                 continue
 
+        # Once Zeev replies to a live/unknown call, lock type to live — prevents voicemail timeout
+        if call_type == "unknown":
+            call_type = "live"
         print(f"[call] Zeev: {reply}", flush=True)
         call_log.append({"role": "zeev", "text": reply})
 

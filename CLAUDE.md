@@ -57,6 +57,8 @@ Zeev can make and receive phone calls via Bluetooth HFP (Hands-Free Profile) on 
 - **`--no-greeting` flag** — suppresses startup TTS greeting (useful for testing calls via piped stdin without audio distraction).
 - **Process lifecycle during calls**: If stdin closes (e.g., piped command), the REPL's exit handler waits for `_IN_CALL` to clear before exiting — ensures call loop runs to completion even if the user's input stream ends.
 - **HFP guard**: Both terminal and device mode call paths call `bt_hfp_detect()` after the post-dial sleep; if it returns empty (phone not connected via HFP), the call is hung up and an error is spoken/printed instead of entering `bt_call_loop` with an invalid SCO device (which previously caused a hard hang).
+- **Whisper hallucination filter**: `bt_call_loop` filters known Whisper hallucinations on ring tone / hold music ("Thank you.", "thanks", "please", "goodbye", etc.) before incrementing `turn` — prevents the call loop from treating ring noise as real speech. No upfront delay; recording starts immediately after dial so the voicemail greeting (which plays right at pickup) is captured on turn 0.
+- **Greeting deferred**: "Hello, this is Zeev, Alex's AI assistant." is spoken only when the call is classified as live/unknown — not before call type is known (voicemail and IVR don't need it).
 
 ## Version Control
 

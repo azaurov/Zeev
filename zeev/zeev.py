@@ -1277,38 +1277,61 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
 def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
-    Generates TTS as WAV/PCM then resamples via ffmpeg to match the SCO codec rate.
+    TTS chain: Orpheus WAV → Piper raw PCM → gTTS MP3 (all resampled via ffmpeg to SCO rate).
     """
     if not text:
         return
     wav = None
     raw_pcm = None
     raw_rate = samplerate
+    src_fmt = None  # "wav", "raw", or "mp3"
 
-    # Try Orpheus first (English WAV)
+    # 1. Try Orpheus (cloud WAV, best quality)
     try:
         wav = groq_tts(text, voice="daniel")
+        if wav:
+            src_fmt = "wav"
     except Exception:
         pass
 
-    # Piper fallback — one-shot, returns raw PCM at 22050Hz
+    # 2. Piper fallback — one-shot subprocess, raw S16LE at 22050Hz
     if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
         try:
             p = subprocess.Popen(
                 [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-            raw_pcm, _ = p.communicate(text.encode(), timeout=60)
-            raw_rate = 22050
-        except Exception:
+            raw_pcm, piper_err = p.communicate(text.encode(), timeout=60)
+            if raw_pcm:
+                raw_rate = 22050
+                src_fmt = "raw"
+                print(f"[call] SCO TTS via Piper ({len(raw_pcm)} bytes)", flush=True)
+            else:
+                print(f"[call] Piper produced no audio: {piper_err[:120]}", flush=True)
+                raw_pcm = None
+        except Exception as e:
+            print(f"[call] Piper error: {e}", flush=True)
             raw_pcm = None
 
+    # 3. gTTS fallback — fetch MP3 and decode via ffmpeg
     if not wav and not raw_pcm:
+        try:
+            mp3_chunks = [_gtts_fetch_chunk(c, "en") for c in _gtts_chunks(text)]
+            mp3_data = b"".join(c for c in mp3_chunks if c)
+            if mp3_data:
+                wav = mp3_data   # treat as opaque audio; ffmpeg will decode
+                src_fmt = "mp3"
+                print("[call] SCO TTS via gTTS", flush=True)
+        except Exception as e:
+            print(f"[call] gTTS error: {e}", flush=True)
+
+    if not wav and not raw_pcm:
+        print("[call] SCO TTS: all engines failed, no audio", flush=True)
         return
 
     try:
-        if wav:
-            # Resample WAV → SCO rate/channels via ffmpeg
+        if src_fmt in ("wav", "mp3"):
+            # Let ffmpeg auto-detect format from the stream header
             ff = subprocess.Popen(
                 ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
                  "-f", "s16le", "-ar", str(samplerate), "-ac", "1", "pipe:1"],
@@ -1316,7 +1339,7 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
             )
             pcm_out, _ = ff.communicate(wav)
         else:
-            # Resample raw PCM from Piper (22050Hz mono) → SCO rate
+            # Piper raw S16LE at 22050Hz → SCO rate
             ff = subprocess.Popen(
                 ["ffmpeg", "-loglevel", "quiet",
                  "-f", "s16le", "-ar", str(raw_rate), "-ac", "1", "-i", "pipe:0",
@@ -1324,6 +1347,10 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
             pcm_out, _ = ff.communicate(raw_pcm)
+
+        if not pcm_out:
+            print("[call] SCO TTS: ffmpeg produced no PCM", flush=True)
+            return
 
         ap = subprocess.Popen(
             ["aplay", "-D", sco_dev, "-f", "S16_LE",
@@ -1551,7 +1578,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             print("[call] Piper pre-warmed", flush=True)
         except Exception:
             pass
-    # Don't greet yet — wait to hear the other end first so we can classify it
+
+    # Greet immediately so the caller hears Zeev the moment they pick up
+    _sco_speak("Hello, this is Zeev, Alex's AI assistant.")
     call_type = "unknown"
     ivr_context = ""
     live_context = (
@@ -1645,8 +1674,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 # don't speak anything; wait for IVR to continue
 
             else:
-                # live or unknown — greet normally
-                _sco_speak("Hello, this is Zeev. How can I help you?")
+                # live or unknown — already greeted at call start; let LLM handle next reply
+                pass
 
         # In IVR mode: re-check for voicemail greeting on every subsequent turn
         elif call_type == "ivr" and _CALL_VOICEMAIL_RE.search(transcript):

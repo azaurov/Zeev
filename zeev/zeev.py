@@ -123,7 +123,7 @@ _CALL_VOICES: dict[str, dict] = {
     },
     "nurturing": {
         "orpheus": "julia",           # female
-        "cartesia": "c323c793-41f9-47b8-99dc-9b44b0440b84",  # Katrine - Calm Caregiver (female)
+        "cartesia": "bf0a246a-8642-498a-9950-80c35e9276b5",  # Sophie - Teacher (female, en)
         "gender": "female",
         "label": "parent / caregiver",
     },

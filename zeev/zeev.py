@@ -1281,7 +1281,9 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
 def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
-    TTS chain: Orpheus WAV → Piper raw PCM → gTTS MP3 (all resampled via ffmpeg to SCO rate).
+    TTS chain: Orpheus WAV → gTTS MP3 → Piper raw PCM (all resampled via ffmpeg to SCO rate).
+    gTTS is tried before Piper because SCO is already 8/16kHz and gTTS (~1-2s network fetch)
+    is far faster than Piper on the Pi Zero 2W (~20s local synthesis).
     """
     if not text:
         return
@@ -1298,7 +1300,19 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     except Exception:
         pass
 
-    # 2. Piper fallback — one-shot subprocess, raw S16LE at 22050Hz
+    # 2. gTTS — fast network fetch (~1-2s); preferred over Piper for SCO latency
+    if not wav:
+        try:
+            mp3_chunks = [_gtts_fetch_chunk(c, "en") for c in _gtts_chunks(text)]
+            mp3_data = b"".join(c for c in mp3_chunks if c)
+            if mp3_data:
+                wav = mp3_data
+                src_fmt = "mp3"
+                print("[call] SCO TTS via gTTS", flush=True)
+        except Exception as e:
+            print(f"[call] gTTS error: {e}", flush=True)
+
+    # 3. Piper fallback — local synthesis, slow on Pi Zero 2W (~20s) but works offline
     if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
         try:
             p = subprocess.Popen(
@@ -1316,18 +1330,6 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
         except Exception as e:
             print(f"[call] Piper error: {e}", flush=True)
             raw_pcm = None
-
-    # 3. gTTS fallback — fetch MP3 and decode via ffmpeg
-    if not wav and not raw_pcm:
-        try:
-            mp3_chunks = [_gtts_fetch_chunk(c, "en") for c in _gtts_chunks(text)]
-            mp3_data = b"".join(c for c in mp3_chunks if c)
-            if mp3_data:
-                wav = mp3_data   # treat as opaque audio; ffmpeg will decode
-                src_fmt = "mp3"
-                print("[call] SCO TTS via gTTS", flush=True)
-        except Exception as e:
-            print(f"[call] gTTS error: {e}", flush=True)
 
     if not wav and not raw_pcm:
         print("[call] SCO TTS: all engines failed, no audio", flush=True)
@@ -1741,7 +1743,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = llm_fn(
                         f"You are leaving a voicemail on behalf of Alex. Reason: {call_intent}. "
                         f"Voicemail greeting: \"{transcript}\". "
-                        "Leave a brief natural voicemail (2-3 sentences). "
+                        "Leave a brief natural voicemail (1 sentence only). "
                         "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
                     )
                 else:
@@ -1787,7 +1789,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 msg = llm_fn(
                     f"Leave a brief voicemail on behalf of Alex.{intent_line} "
                     f"Greeting: \"{transcript}\". "
-                    "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
+                    "Output ONLY the spoken message (1 sentence) — no stage directions, no 'Beep.', no quotes."
                 )
                 if not msg:
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back. Thank you."

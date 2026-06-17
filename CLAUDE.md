@@ -26,7 +26,7 @@ All audio output (TTS, music) routes through `bt_audio_dev()` which returns the 
 
 - `_BT_AUDIO_DEV` global holds the active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`) when headphones are connected.
 - `_BT_RATE` / `_BT_CHANNELS` globals — store the negotiated A2DP format (e.g. 44100Hz, 1ch), queried from `bluealsa-aplay --list-pcms` at connect/startup.
-- `bt_detect_connected()` — called at device mode startup; queries `bluealsa-aplay --list-pcms`, sets `_BT_AUDIO_DEV`/`_BT_RATE`/`_BT_CHANNELS`. Retries 4× with 2s sleep to handle bluealsa registration delay after service start.
+- `bt_detect_connected()` — called at device mode startup; queries `bluealsa-aplay --list-pcms`, sets `_BT_AUDIO_DEV`/`_BT_RATE`/`_BT_CHANNELS`. Retries 2× with 1s sleep (BT headphones are optional at boot; users can connect after startup).
 - `bt_verify_connected()` — called at the top of `_speak_device()` on every TTS call; re-queries `bluealsa-aplay --list-pcms` and clears `_BT_AUDIO_DEV`/resets rate+channels if the device is no longer listed. Handles physical disconnects (headphones powered off/out of range) that `bt_disconnect()` would not catch.
 - `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])` (parses all output after completion — avoids readline hang on partial ANSI escape sequences from bluetoothctl); results stored in `_bt_scan_results`.
 - `bt_pair(mac)` — pairs and trusts a device via bluetoothctl.
@@ -35,6 +35,27 @@ All audio output (TTS, music) routes through `bt_audio_dev()` which returns the 
 - `extract_bt_intent(text)` — detects 'scan'/'pair'/'connect'/'disconnect' from natural language.
 - Natural language handled before LLM routing in both terminal and device mode.
 - `/bt` slash command: `scan`, `pair <N>`, `<N>` to connect, `off` to disconnect.
+
+## Phone Calls (HFP)
+
+Zeev can make and receive phone calls via Bluetooth HFP (Hands-Free Profile) on the Pi. The phone acts as the source; the Pi acts as a hands-free unit.
+
+- **HFP vs A2DP**: HFP is for bidirectional phone calls (uses SCO narrowband audio at 8 or 16 kHz); A2DP is for audio streaming headphones.
+- **SCO audio device**: `bluealsa:DEV=<mac>,PROFILE=sco,SRV=org.bluealsa` — exposed by BlueALSA v4.3.1+ as ALSA PCM for both recording (capture) and playback.
+- **`bt_speak_sco(text, sco_dev, samplerate)`** — speak text through the SCO device so the caller hears Zeev. Tries TTS in order: Groq Orpheus WAV → Piper one-shot raw PCM → gTTS MP3. All outputs are resampled via ffmpeg to the negotiated SCO rate and format (S16_LE, mono).
+- **`bt_hfp_dev(mac)` / `bt_sco_rate(mac)` / `bt_hfp_detect()`** — query the SCO device string and sample rate; detect the phone's MAC from bluealsa output.
+- **`bt_call_dial(number)` / `bt_call_hangup()`** — dial and hang up via AT commands (`ATD`, `AT+CHUP`) sent over D-Bus RFCOMM.
+- **`bt_call_dtmf(mac, digit)`** — send DTMF tone (`AT+VTS=<digit>`) for IVR menu navigation instead of TTS speech.
+- **`bt_call_loop(speak_fn, stt_fn, llm_fn, mac, record_dir, call_intent)`** — main call conversation loop:
+  - Records caller audio via SCO capture + VAD (voice activity detection)
+  - Detects call type on first turn: **voicemail** (voicemail greeting regex) → leave message + hangup; **IVR** (menu prompt regex) → wait for menu, reply with DTMF or listen for next prompt; **live/unknown** → normal conversation
+  - For voicemail: extracts explicit message from call intent ("saying X") or generates via LLM; includes neutral default if neither
+  - For IVR: uses focused system prompt ("reply ONLY with a single digit"); sends DTMF if LLM returns a digit; re-checks for voicemail mid-call (e.g., IVR → voicemail transfer)
+  - For live calls: greeted with "Hello, this is Zeev, Alex's AI assistant." at call start (before listening); uses focused LLM prompt with only call_intent context (no memory facts injected)
+  - Hangup detection skipped in IVR mode (IVR "Goodbye" is part of the menu, not call end)
+  - Call recordings saved to `call_recordings/` dir per turn
+- **`--no-greeting` flag** — suppresses startup TTS greeting (useful for testing calls via piped stdin without audio distraction).
+- **Process lifecycle during calls**: If stdin closes (e.g., piped command), the REPL's exit handler waits for `_IN_CALL` to clear before exiting — ensures call loop runs to completion even if the user's input stream ends.
 
 ## Version Control
 

@@ -169,7 +169,11 @@ _CALL_VOICEMAIL_RE = re.compile(
     r"|\bvoicemail\s+box\b"
     r"|\bplease\s+record\b"
     r"|\byou\s+have\s+reached\b"
-    r"|\byou('ve|\s+have)\s+reached\b",
+    r"|\byou('ve|\s+have)\s+reached\b"
+    r"|\bi('ve|\s+have)\s+reached\b"
+    r"|\bplease\s+leave\s+a\s+message\b"
+    r"|\bi'll\s+get\s+back\s+to\s+you\b"
+    r"|\bget\s+back\s+to\s+you\s+as\s+soon\b",
     re.IGNORECASE,
 )
 _CALL_LIVE_RE = re.compile(
@@ -1762,8 +1766,10 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 # live or unknown — already greeted at call start; let LLM handle next reply
                 pass
 
-        # In IVR mode: re-check for voicemail greeting on every subsequent turn
-        elif call_type == "ivr" and _CALL_VOICEMAIL_RE.search(transcript):
+        # Re-check for voicemail on subsequent turns — covers cases where turn 0 captured
+        # hold music/noise (Whisper hallucination) and the real greeting comes on turn 1+.
+        # For unknown/live, only re-check on the first 3 turns to avoid false positives.
+        elif (call_type == "ivr" or (call_type in ("unknown", "live") and turn <= 3)) and _CALL_VOICEMAIL_RE.search(transcript):
             call_type = "voicemail"
             print("[call] Voicemail detected mid-call", flush=True)
             explicit_m = re.search(r'say(?:ing)?\s+(.+)', call_intent, re.IGNORECASE)

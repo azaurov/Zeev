@@ -80,43 +80,51 @@ ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMa
 CARTESIA_API_KEY   = os.environ.get("CARTESIA_API_KEY",   "")
 CARTESIA_VOICE_ID  = os.environ.get("CARTESIA_VOICE_ID",  "efa653e5-314d-46ca-9f90-70ac7d6ca71e")  # Kurt - Phone Support
 
-# Voice personas — each entry: {orpheus, cartesia, label}
-# orpheus: Groq Orpheus voice name; cartesia: Cartesia voice ID
-# Override cartesia voice IDs via .env: CARTESIA_VOICE_<PERSONA>=<id>
+# Voice personas — each entry: {orpheus, cartesia, gender, label}
+# orpheus voices: daniel/dan/zac/leo (male), zoe/jess/mia/julia (female)
+# cartesia voice IDs: set via .env CARTESIA_VOICE_<PERSONA>=<id> to customise
+# Confirmed working: Kurt efa653e5-... (male). Others fall back to Kurt until overridden.
 _CALL_VOICES: dict[str, dict] = {
     "assistant": {
-        "orpheus": "daniel",
-        "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - neutral male, phone support
+        "orpheus": "daniel",          # male
+        "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - neutral male
+        "gender": "male",
         "label": "AI assistant",
     },
     "friendly": {
-        "orpheus": "zac",
-        "cartesia": "00a77add-48d5-4ef6-8157-71e5437b6f95",  # Liam - warm casual male
+        "orpheus": "zac",             # male
+        "cartesia": os.environ.get("CARTESIA_VOICE_FRIENDLY", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "male",
         "label": "friendly acquaintance",
     },
     "professional": {
-        "orpheus": "dan",
-        "cartesia": "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e",  # Barbora - clear neutral female
+        "orpheus": "jess",            # female — colleague could be any gender; female adds variety
+        "cartesia": os.environ.get("CARTESIA_VOICE_PROFESSIONAL", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "female",
         "label": "professional colleague",
     },
     "calm": {
-        "orpheus": "leo",
-        "cartesia": "5c42302c-194b-4d0c-ba1a-8cb485c84ab9",  # Reading - calm measured male
+        "orpheus": "leo",             # male
+        "cartesia": os.environ.get("CARTESIA_VOICE_CALM", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "male",
         "label": "calm/meditative",
     },
     "authoritative": {
-        "orpheus": "dan",
+        "orpheus": "mia",             # female — powerful female authority voice
         "cartesia": os.environ.get("CARTESIA_VOICE_AUTHORITATIVE", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "female",
         "label": "irate boss / authority figure",
     },
     "intimate": {
-        "orpheus": "zac",
-        "cartesia": os.environ.get("CARTESIA_VOICE_INTIMATE", "00a77add-48d5-4ef6-8157-71e5437b6f95"),
+        "orpheus": "zoe",             # female — lover/mistress voice
+        "cartesia": os.environ.get("CARTESIA_VOICE_INTIMATE", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "female",
         "label": "lover / close partner",
     },
     "nurturing": {
-        "orpheus": "leo",
-        "cartesia": os.environ.get("CARTESIA_VOICE_NURTURING", "5c42302c-194b-4d0c-ba1a-8cb485c84ab9"),
+        "orpheus": "julia",           # female — maternal, warm
+        "cartesia": os.environ.get("CARTESIA_VOICE_NURTURING", "efa653e5-314d-46ca-9f90-70ac7d6ca71e"),
+        "gender": "female",
         "label": "parent / caregiver",
     },
 }

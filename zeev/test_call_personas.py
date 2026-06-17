@@ -112,11 +112,12 @@ def run_tts_test(scenarios: list[dict]) -> None:
         else:
             failed += 1
 
-        print(f"[{status}] {s['label']}")
-        print(f"  intent   : {intent[:70]}...")
-        print(f"  expected : {expected}")
-        print(f"  detected : {detected}  ({cfg.get('label', '?')})")
-        print(f"  voice ID : {cartesia_id}")
+        gender = cfg.get("gender", "?")
+        orpheus_voice = cfg.get("orpheus", "?")
+        print(f"[{status}] {s['label']}  [{gender}]")
+        print(f"  intent   : {intent[:70]}")
+        print(f"  expected : {expected}  →  detected: {detected}  ({cfg.get('label', '?')})")
+        print(f"  orpheus  : {orpheus_voice}  |  cartesia: {cartesia_id}")
 
         # Synthesise sample phrase
         wav = cartesia_tts(s["sample_phrase"], persona=detected)

@@ -86,43 +86,43 @@ CARTESIA_VOICE_ID  = os.environ.get("CARTESIA_VOICE_ID",  "efa653e5-314d-46ca-9f
 # Confirmed working: Kurt efa653e5-... (male). Others fall back to Kurt until overridden.
 _CALL_VOICES: dict[str, dict] = {
     "assistant": {
-        "orpheus": "daniel",          # male
+        "orpheus": "daniel",          # male   (valid: autumn diana hannah austin daniel troy)
         "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - Phone Support (male)
         "gender": "male",
         "label": "AI assistant",
     },
     "friendly": {
-        "orpheus": "zac",             # male
+        "orpheus": "austin",          # male
         "cartesia": "b2222537-1561-4425-8c3c-e1aca96ad853",  # Dylan - Chill Companion (male)
         "gender": "male",
         "label": "friendly acquaintance",
     },
     "professional": {
-        "orpheus": "jess",            # female
+        "orpheus": "diana",           # female
         "cartesia": "643f5eee-459d-4b41-b4fc-0b8407139be6",  # Vicky - Businesswoman (female)
         "gender": "female",
         "label": "professional colleague",
     },
     "calm": {
-        "orpheus": "leo",             # male
+        "orpheus": "troy",            # male
         "cartesia": "177df681-25b1-48c2-bb47-03ca5fa27f0a",  # Ren - Calm Navigator (male)
         "gender": "male",
         "label": "calm/meditative",
     },
     "authoritative": {
-        "orpheus": "mia",             # female
+        "orpheus": "autumn",          # female
         "cartesia": "d3e03deb-5439-4203-add1-ca9a7501eaa7",  # Samantha - Yelling Support Leader (female)
         "gender": "female",
         "label": "irate boss / authority figure",
     },
     "intimate": {
-        "orpheus": "zoe",             # female
+        "orpheus": "hannah",          # female
         "cartesia": "e3827ec5-697a-4b7c-9704-1a23041bbc51",  # Dottie - Sweet Gal (female)
         "gender": "female",
         "label": "lover / close partner",
     },
     "nurturing": {
-        "orpheus": "julia",           # female
+        "orpheus": "diana",           # female
         "cartesia": "bf0a246a-8642-498a-9950-80c35e9276b5",  # Sophie - Teacher (female, en)
         "gender": "female",
         "label": "parent / caregiver",

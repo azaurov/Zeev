@@ -5636,13 +5636,16 @@ def run_device_mode():
         def _speak_greeting():
             mp3 = elevenlabs_tts(_greeting)
             if mp3 and shutil.which("mpg123"):
-                proc = subprocess.Popen(
-                    ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                proc.stdin.write(mp3)
-                proc.stdin.close()
-                proc.wait()
+                try:
+                    proc = subprocess.Popen(
+                        ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    proc.stdin.write(mp3)
+                    proc.stdin.close()
+                    proc.wait()
+                except BrokenPipeError:
+                    _speak_device(_greeting)  # BT not ready yet, fall back to device speaker
             else:
                 _speak_device(_greeting)   # fallback if ElevenLabs unavailable
 

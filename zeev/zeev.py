@@ -5341,37 +5341,42 @@ def run_device_mode():
                 if ok:
                     import time as _time
                     _time.sleep(3)  # give the call a moment to connect
-                    record_dir = str(BASE_DIR / "data" / "call_recordings")
-                    import os as _os
-                    _os.makedirs(record_dir, exist_ok=True)
+                    phone_mac = bt_hfp_detect()
+                    if not phone_mac:
+                        _speak_device("Call dialed but phone isn't connected via HFP. Make sure your phone is paired and nearby.")
+                        bt_call_hangup()
+                    else:
+                        record_dir = str(BASE_DIR / "data" / "call_recordings")
+                        import os as _os
+                        _os.makedirs(record_dir, exist_ok=True)
 
-                    def _stt_from_pcm(pcm: bytes) -> str:
-                        import wave, io as _io, struct as _struct
-                        buf = _io.BytesIO()
-                        with wave.open(buf, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(16000)
-                            wf.writeframes(pcm)
-                        return groq_stt(buf.getvalue())
+                        def _stt_from_pcm(pcm: bytes) -> str:
+                            import wave, io as _io, struct as _struct
+                            buf = _io.BytesIO()
+                            with wave.open(buf, "wb") as wf:
+                                wf.setnchannels(1)
+                                wf.setsampwidth(2)
+                                wf.setframerate(16000)
+                                wf.writeframes(pcm)
+                            return groq_stt(buf.getvalue())
 
-                    def _llm_reply(text: str) -> str:
-                        msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
-                        msgs += session[-10:]
-                        msgs.append({"role": "user", "content": text})
-                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
-                        if err or not resp:
-                            return ""
-                        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                        def _llm_reply(text: str) -> str:
+                            msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
+                            msgs += session[-10:]
+                            msgs.append({"role": "user", "content": text})
+                            resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                            if err or not resp:
+                                return ""
+                            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
-                    global _call_thread
-                    _call_thread = threading.Thread(
-                        target=bt_call_loop,
-                        args=(_speak_device, _stt_from_pcm, _llm_reply, phone_mac),
-                        kwargs={"record_dir": record_dir, "call_intent": intent_text},
-                        daemon=True,
-                    )
-                    _call_thread.start()
+                        global _call_thread
+                        _call_thread = threading.Thread(
+                            target=bt_call_loop,
+                            args=(_speak_device, _stt_from_pcm, _llm_reply, phone_mac),
+                            kwargs={"record_dir": record_dir, "call_intent": intent_text},
+                            daemon=True,
+                        )
+                        _call_thread.start()
                 else:
                     _speak_device("Sorry, I couldn't place the call.")
                 _go_ready() if _busy.is_set() else _go_idle()
@@ -6349,45 +6354,49 @@ def main():
                     import time as _time2
                     _time2.sleep(3)
                     phone_mac = bt_hfp_detect()
-                    record_dir = str(BASE_DIR / "data" / "call_recordings")
-                    import os as _os2
-                    _os2.makedirs(record_dir, exist_ok=True)
+                    if not phone_mac:
+                        print(f"\n{CYAN}{BOLD}Zeev:{RESET} Call dialed but HFP not connected — is your phone paired and nearby?\n")
+                        bt_call_hangup()
+                    else:
+                        record_dir = str(BASE_DIR / "data" / "call_recordings")
+                        import os as _os2
+                        _os2.makedirs(record_dir, exist_ok=True)
 
-                    def _term_stt(pcm: bytes) -> str:
-                        import wave, io as _io2
-                        buf = _io2.BytesIO()
-                        with wave.open(buf, "wb") as wf:
-                            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-                            wf.writeframes(pcm)
-                        return groq_stt(buf.getvalue())
+                        def _term_stt(pcm: bytes) -> str:
+                            import wave, io as _io2
+                            buf = _io2.BytesIO()
+                            with wave.open(buf, "wb") as wf:
+                                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+                                wf.writeframes(pcm)
+                            return groq_stt(buf.getvalue())
 
-                    _call_sys = (
-                        f"You are Zeev, Alex's AI assistant, on a live phone call. "
-                        f"{intent_text + ' ' if intent_text else ''}"
-                        "Keep replies short — 1-2 sentences maximum. "
-                        "Speak naturally and conversationally. Do NOT mention unrelated topics."
-                    )
+                        _call_sys = (
+                            f"You are Zeev, Alex's AI assistant, on a live phone call. "
+                            f"{intent_text + ' ' if intent_text else ''}"
+                            "Keep replies short — 1-2 sentences maximum. "
+                            "Speak naturally and conversationally. Do NOT mention unrelated topics."
+                        )
 
-                    def _term_llm(text: str) -> str:
-                        msgs = [{"role": "system", "content": _call_sys}]
-                        msgs.append({"role": "user", "content": text})
-                        resp, err, _ = _llm_post(msgs, "llama-3.1-8b-instant", stream=False, max_tokens=150)
-                        if err or not resp:
-                            return ""
-                        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                        def _term_llm(text: str) -> str:
+                            msgs = [{"role": "system", "content": _call_sys}]
+                            msgs.append({"role": "user", "content": text})
+                            resp, err, _ = _llm_post(msgs, "llama-3.1-8b-instant", stream=False, max_tokens=150)
+                            if err or not resp:
+                                return ""
+                            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
-                    def _term_speak(text: str) -> None:
-                        speak_terminal(text)
+                        def _term_speak(text: str) -> None:
+                            speak_terminal(text)
 
-                    global _call_thread
-                    _call_thread = threading.Thread(
-                        target=bt_call_loop,
-                        args=(_term_speak, _term_stt, _term_llm, phone_mac),
-                        kwargs={"record_dir": record_dir, "call_intent": intent_text},
-                        daemon=True,
-                    )
-                    _call_thread.start()
-                    print(f"{DIM}[call] Call loop started. Say 'hang up' to end.{RESET}\n")
+                        global _call_thread
+                        _call_thread = threading.Thread(
+                            target=bt_call_loop,
+                            args=(_term_speak, _term_stt, _term_llm, phone_mac),
+                            kwargs={"record_dir": record_dir, "call_intent": intent_text},
+                            daemon=True,
+                        )
+                        _call_thread.start()
+                        print(f"{DIM}[call] Call loop started. Say 'hang up' to end.{RESET}\n")
                 else:
                     print(f"\n{CYAN}{BOLD}Zeev:{RESET} Couldn't place the call.\n")
             else:

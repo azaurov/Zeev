@@ -1668,9 +1668,6 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         except Exception:
             pass
 
-    # Wait briefly for ringing to end and the call to be answered before listening.
-    # (Ring tone / hold music causes Whisper hallucinations on turn 0 otherwise.)
-    import time as _ct; _ct.sleep(3)
     call_type = "unknown"
     ivr_context = ""
     live_context = (

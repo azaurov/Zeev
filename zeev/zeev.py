@@ -1693,6 +1693,24 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         bt_speak_sco(text, sco_dev, samplerate)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
+
+    # Speculatively pre-generate voicemail message while ringing, so it's ready at the beep
+    _pregen_msg: list[str] = []  # list used as mutable container for thread result
+    if call_intent:
+        def _pregen():
+            msg = llm_fn(
+                f"Leave a brief casual voicemail on behalf of Alex. Reason: {call_intent}. "
+                "Keep the tone friendly and relaxed — not passionate or emotional. "
+                "Output ONLY the spoken message (1 sentence) — no stage directions, no quotes."
+            )
+            if msg:
+                _pregen_msg.append(msg)
+                print(f"[call] Pre-generated voicemail: {msg}", flush=True)
+        _pregen_thread = threading.Thread(target=_pregen, daemon=True)
+        _pregen_thread.start()
+    else:
+        _pregen_thread = None
+
     # Pre-warm Piper so it's loaded before we need to speak (avoids 20s ONNX load mid-call)
     if PIPER_BIN and PIPER_MODELS.get("en"):
         try:
@@ -1727,7 +1745,10 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         # If we haven't classified the call after 25s, the greeting was missed — treat as voicemail
         if call_type == "unknown" and (_ct.time() - _call_start) > _VOICEMAIL_TIMEOUT:
             print("[call] Timeout — assuming voicemail (greeting missed)", flush=True)
-            if call_intent:
+            if _pregen_msg:
+                msg = _pregen_msg[0]
+                print("[call] Using pre-generated message", flush=True)
+            elif call_intent:
                 msg = llm_fn(
                     f"Leave a brief casual voicemail on behalf of Alex. Reason: {call_intent}. "
                     "Keep the tone friendly and relaxed — not passionate or emotional. "
@@ -1800,6 +1821,20 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = explicit_m.group(1).strip()
                     msg = re.sub(r',?\s*then\b.*$', '', msg, flags=re.IGNORECASE).strip()
                     msg = msg.strip('"\'.,')
+                elif _pregen_msg or (_pregen_thread and _pregen_thread.is_alive()):
+                    # Wait up to 5s for pre-gen to finish, then use it (or fall back to LLM)
+                    if _pregen_thread and _pregen_thread.is_alive():
+                        _pregen_thread.join(timeout=5)
+                    if _pregen_msg:
+                        msg = _pregen_msg[0]
+                        print("[call] Using pre-generated message", flush=True)
+                    else:
+                        msg = llm_fn(
+                            f"You are leaving a voicemail on behalf of Alex. Reason: {call_intent}. "
+                            f"Voicemail greeting: \"{transcript}\". "
+                            "Leave a brief casual voicemail (1 sentence only). Keep the tone friendly and relaxed — not passionate or emotional. "
+                            "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
+                        )
                 elif call_intent:
                     msg = llm_fn(
                         f"You are leaving a voicemail on behalf of Alex. Reason: {call_intent}. "
@@ -1845,6 +1880,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if explicit_m:
                 msg = explicit_m.group(1).strip()
                 msg = re.sub(r',?\s*then\b.*$', '', msg, flags=re.IGNORECASE).strip().strip('.,')
+            elif _pregen_msg:
+                msg = _pregen_msg[0]
+                print("[call] Using pre-generated message", flush=True)
             else:
                 intent_line = f" Reason: {call_intent}." if call_intent else ""
                 msg = llm_fn(

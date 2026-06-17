@@ -1743,7 +1743,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = llm_fn(
                         f"You are leaving a voicemail on behalf of Alex. Reason: {call_intent}. "
                         f"Voicemail greeting: \"{transcript}\". "
-                        "Leave a brief natural voicemail (1 sentence only). "
+                        "Leave a brief casual voicemail (1 sentence only). Keep the tone friendly and relaxed — not passionate or emotional. "
                         "Output ONLY the spoken message — no stage directions, no 'Beep.', no quotes."
                     )
                 else:
@@ -1787,8 +1787,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             else:
                 intent_line = f" Reason: {call_intent}." if call_intent else ""
                 msg = llm_fn(
-                    f"Leave a brief voicemail on behalf of Alex.{intent_line} "
+                    f"Leave a brief casual voicemail on behalf of Alex.{intent_line} "
                     f"Greeting: \"{transcript}\". "
+                    "Keep the tone friendly and relaxed — not passionate or emotional. "
                     "Output ONLY the spoken message (1 sentence) — no stage directions, no 'Beep.', no quotes."
                 )
                 if not msg:

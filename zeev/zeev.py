@@ -1668,8 +1668,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         except Exception:
             pass
 
-    # Greet immediately so the caller hears Zeev the moment they pick up
-    _sco_speak("Hello, this is Zeev, Alex's AI assistant.")
+    # Wait briefly for ringing to end and the call to be answered before listening.
+    # (Ring tone / hold music causes Whisper hallucinations on turn 0 otherwise.)
+    import time as _ct; _ct.sleep(3)
     call_type = "unknown"
     ivr_context = ""
     live_context = (
@@ -1708,6 +1709,14 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         transcript = stt_fn(pcm)
         # Filter Whisper noise artifacts (single punct, very short non-speech)
         if not transcript or not re.search(r'\w{2,}', transcript):
+            continue
+        # Filter known Whisper hallucinations on hold music / ring tones
+        _hallu = re.sub(r'[^\w\s]', '', transcript.lower()).strip()
+        if _hallu in ("thank you", "thanks", "you", "please", "goodbye", "bye",
+                      "thank you for watching", "thank you for listening",
+                      "thanks for watching", "thanks for listening",
+                      "i dont know", "i don't know", ""):
+            print(f"[call] Filtered hallucination: {transcript!r}", flush=True)
             continue
 
         if record_dir:
@@ -1763,8 +1772,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 # don't speak anything; wait for IVR to continue
 
             else:
-                # live or unknown — already greeted at call start; let LLM handle next reply
-                pass
+                # live or unknown — greet now that we know a human picked up
+                _sco_speak("Hello, this is Zeev, Alex's AI assistant.")
 
         # Re-check for voicemail on subsequent turns — covers cases where turn 0 captured
         # hold music/noise (Whisper hallucination) and the real greeting comes on turn 1+.

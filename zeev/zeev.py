@@ -1772,6 +1772,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         # Filter known Whisper hallucinations on hold music / ring tones
         _hallu = re.sub(r'[^\w\s]', '', transcript.lower()).strip()
         if _hallu in ("thank you", "thanks", "you", "please", "goodbye", "bye",
+                      "beep", "beep beep", "bing", "bong",
                       "thank you for watching", "thank you for listening",
                       "thanks for watching", "thanks for listening",
                       "i dont know", "i don't know", ""):

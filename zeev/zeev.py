@@ -80,6 +80,27 @@ ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMa
 CARTESIA_API_KEY   = os.environ.get("CARTESIA_API_KEY",   "")
 CARTESIA_VOICE_ID  = os.environ.get("CARTESIA_VOICE_ID",  "efa653e5-314d-46ca-9f90-70ac7d6ca71e")  # Kurt - Phone Support
 
+# Voice personas — each entry: {orpheus, cartesia, piper_model (optional)}
+# orpheus: Groq Orpheus voice name; cartesia: Cartesia voice ID
+_CALL_VOICES: dict[str, dict] = {
+    "assistant": {
+        "orpheus": "daniel",
+        "cartesia": "efa653e5-314d-46ca-9f90-70ac7d6ca71e",  # Kurt - male, phone support
+    },
+    "friendly": {
+        "orpheus": "zac",
+        "cartesia": "00a77add-48d5-4ef6-8157-71e5437b6f95",  # Liam - warm, casual male
+    },
+    "professional": {
+        "orpheus": "dan",
+        "cartesia": "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e",  # Barbora - clear, neutral female
+    },
+    "calm": {
+        "orpheus": "leo",
+        "cartesia": "5c42302c-194b-4d0c-ba1a-8cb485c84ab9",  # Reading - calm male
+    },
+}
+
 # Wake-word (openwakeword)
 WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
 WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep names/paths
@@ -205,6 +226,18 @@ def extract_bt_intent(text):
     if _BT_DISCONNECT_RE.search(t):
         return "disconnect"
     return None
+
+def extract_call_persona(intent_text: str) -> str:
+    """Return a persona key from _CALL_VOICES based on keywords in the call intent."""
+    t = intent_text.lower()
+    if re.search(r'\b(professional|formal|business|official|serious)\b', t):
+        return "professional"
+    if re.search(r'\b(calm|soft|gentle|relaxed|soothing)\b', t):
+        return "calm"
+    if re.search(r'\b(friendly|casual|warm|fun|cheerful|upbeat)\b', t):
+        return "friendly"
+    return "assistant"  # default
+
 
 _QUANTUM_RE = re.compile(
     r"^(?:quantum\s+(?:reasoning|analysis|circuit)[:\s]+|"
@@ -842,13 +875,19 @@ def groq_tts(text, voice="daniel"):
         return None
 
 
-def cartesia_tts(text, voice_id=None):
-    """Call Cartesia TTS (sonic-2). Returns WAV bytes or None. ~100ms latency."""
+def cartesia_tts(text, voice_id=None, persona=None):
+    """Call Cartesia TTS (sonic-2). Returns WAV bytes or None. ~100ms latency.
+    persona: key from _CALL_VOICES (e.g. 'friendly', 'professional'); overrides voice_id.
+    """
     if not CARTESIA_API_KEY or not text.strip():
         return None
     clean = _clean_for_tts(text, "en")
     if not clean or detect_lang(clean) != "en":
         return None
+    if persona and persona in _CALL_VOICES:
+        vid = _CALL_VOICES[persona].get("cartesia", CARTESIA_VOICE_ID)
+    else:
+        vid = voice_id or CARTESIA_VOICE_ID
     try:
         resp = requests.post(
             "https://api.cartesia.ai/tts/bytes",
@@ -857,7 +896,7 @@ def cartesia_tts(text, voice_id=None):
                      "Content-Type": "application/json"},
             json={"model_id": "sonic-2",
                   "transcript": clean[:4000],
-                  "voice": {"mode": "id", "id": voice_id or CARTESIA_VOICE_ID},
+                  "voice": {"mode": "id", "id": vid},
                   "output_format": {"container": "wav", "encoding": "pcm_s16le", "sample_rate": 22050}},
             timeout=15,
         )
@@ -1306,12 +1345,11 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
     return 16000  # safe default — webrtcvad also accepts 16000
 
 
-def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
+def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assistant") -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
-    TTS chain: Orpheus WAV → gTTS MP3 → Piper raw PCM (all resampled via ffmpeg to SCO rate).
-    gTTS is tried before Piper because SCO is already 8/16kHz and gTTS (~1-2s network fetch)
-    is far faster than Piper on the Pi Zero 2W (~20s local synthesis).
+    TTS chain: Orpheus WAV → Cartesia WAV → Piper raw PCM → gTTS MP3.
+    persona: key from _CALL_VOICES — selects voice across Orpheus and Cartesia.
     """
     if not text:
         return
@@ -1320,21 +1358,24 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     raw_rate = samplerate
     src_fmt = None  # "wav", "raw", or "mp3"
 
+    voice_cfg = _CALL_VOICES.get(persona, _CALL_VOICES["assistant"])
+    orpheus_voice = voice_cfg.get("orpheus", "daniel")
+
     # 1. Try Orpheus (cloud WAV, best quality)
     try:
-        wav = groq_tts(text, voice="daniel")
+        wav = groq_tts(text, voice=orpheus_voice)
         if wav:
             src_fmt = "wav"
     except Exception:
         pass
 
-    # 2. Cartesia (Kurt, male) — ~100ms cloud TTS, best latency after Orpheus
+    # 2. Cartesia (~100ms cloud TTS) — voice selected by persona
     if not wav:
         try:
-            wav = cartesia_tts(text)
+            wav = cartesia_tts(text, persona=persona)
             if wav:
                 src_fmt = "wav"
-                print("[call] SCO TTS via Cartesia", flush=True)
+                print(f"[call] SCO TTS via Cartesia ({persona})", flush=True)
         except Exception as e:
             print(f"[call] Cartesia error: {e}", flush=True)
 
@@ -1672,7 +1713,8 @@ def detect_call_type(transcript: str, llm_fn=None) -> str:
 
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
-                 call_intent: str = "") -> None:
+                 call_intent: str = "",
+                 persona: str = "assistant") -> None:
     """
     Run the Zeev conversation loop over an active HFP call.
     speak_fn(text) — plays TTS through SCO device
@@ -1681,6 +1723,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     record_dir — if set, saves each turn as WAV files
     mac — phone MAC for SCO device address
     call_intent — why Alex is making this call (injected into IVR/voicemail context)
+    persona — voice persona from _CALL_VOICES ('assistant', 'friendly', 'professional', 'calm')
     """
     global _IN_CALL
     _IN_CALL = True
@@ -1690,7 +1733,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
     # Route outgoing speech through SCO so the caller can hear Zeev
     def _sco_speak(text: str) -> None:
-        bt_speak_sco(text, sco_dev, samplerate)
+        bt_speak_sco(text, sco_dev, samplerate, persona=persona)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
 
@@ -5487,7 +5530,8 @@ def run_device_mode():
                         _call_thread = threading.Thread(
                             target=bt_call_loop,
                             args=(_speak_device, _stt_from_pcm, _llm_reply, phone_mac),
-                            kwargs={"record_dir": record_dir, "call_intent": intent_text},
+                            kwargs={"record_dir": record_dir, "call_intent": intent_text,
+                                    "persona": extract_call_persona(intent_text)},
                             daemon=True,
                         )
                         _call_thread.start()
@@ -6509,7 +6553,8 @@ def main():
                         _call_thread = threading.Thread(
                             target=bt_call_loop,
                             args=(_term_speak, _term_stt, _term_llm, phone_mac),
-                            kwargs={"record_dir": record_dir, "call_intent": intent_text},
+                            kwargs={"record_dir": record_dir, "call_intent": intent_text,
+                                    "persona": extract_call_persona(intent_text)},
                             daemon=True,
                         )
                         _call_thread.start()

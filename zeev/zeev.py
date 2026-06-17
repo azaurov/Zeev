@@ -434,12 +434,12 @@ def init_tts():
     if PIPER_BIN:
         PIPER_MODELS["en"] = os.environ.get("PIPER_MODEL", "") or _find([
             data_dir / "piper_voice.onnx",
-            piper_dir / "en_US-amy-medium.onnx",
-            share_dir / "en_US-amy-medium.onnx",
             piper_dir / "en_US-ryan-medium.onnx",
             share_dir / "en_US-ryan-medium.onnx",
             piper_dir / "en_US-lessac-medium.onnx",
             share_dir / "en_US-lessac-medium.onnx",
+            piper_dir / "en_US-amy-medium.onnx",
+            share_dir / "en_US-amy-medium.onnx",
         ])
         PIPER_MODELS["es"] = _find([
             piper_dir / "es_MX-ald-medium.onnx",
@@ -1300,19 +1300,7 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
     except Exception:
         pass
 
-    # 2. gTTS — fast network fetch (~1-2s); preferred over Piper for SCO latency
-    if not wav:
-        try:
-            mp3_chunks = [_gtts_fetch_chunk(c, "en") for c in _gtts_chunks(text)]
-            mp3_data = b"".join(c for c in mp3_chunks if c)
-            if mp3_data:
-                wav = mp3_data
-                src_fmt = "mp3"
-                print("[call] SCO TTS via gTTS", flush=True)
-        except Exception as e:
-            print(f"[call] gTTS error: {e}", flush=True)
-
-    # 3. Piper fallback — local synthesis, slow on Pi Zero 2W (~20s) but works offline
+    # 2. Piper (Ryan, male) — local synthesis, consistent male voice for calls
     if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
         try:
             p = subprocess.Popen(
@@ -1330,6 +1318,18 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int) -> None:
         except Exception as e:
             print(f"[call] Piper error: {e}", flush=True)
             raw_pcm = None
+
+    # 3. gTTS fallback — female voice, no gender selection, last resort
+    if not wav and not raw_pcm:
+        try:
+            mp3_chunks = [_gtts_fetch_chunk(c, "en") for c in _gtts_chunks(text)]
+            mp3_data = b"".join(c for c in mp3_chunks if c)
+            if mp3_data:
+                wav = mp3_data
+                src_fmt = "mp3"
+                print("[call] SCO TTS via gTTS", flush=True)
+        except Exception as e:
+            print(f"[call] gTTS error: {e}", flush=True)
 
     if not wav and not raw_pcm:
         print("[call] SCO TTS: all engines failed, no audio", flush=True)

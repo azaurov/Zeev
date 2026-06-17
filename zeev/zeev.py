@@ -1044,7 +1044,7 @@ def tts_web(text, lang=None):
     return None, None
 
 
-def _whisper_multipart(url, api_key, wav_bytes, model):
+def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
     """POST WAV to an OpenAI-compatible /audio/transcriptions endpoint."""
     boundary = b"--boundary\r\n"
     cd = b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'
@@ -1053,7 +1053,14 @@ def _whisper_multipart(url, api_key, wav_bytes, model):
         b'Content-Disposition: form-data; name="model"\r\n\r\n'
         + model.encode() + b"\r\n"
     )
-    multipart = boundary + cd + wav_bytes + b"\r\n" + model_part + b"--boundary--\r\n"
+    multipart = boundary + cd + wav_bytes + b"\r\n" + model_part
+    if prompt:
+        multipart += (
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="prompt"\r\n\r\n'
+            + prompt.encode() + b"\r\n"
+        )
+    multipart += b"--boundary--\r\n"
     try:
         r = requests.post(
             url,
@@ -1073,6 +1080,24 @@ def groq_stt(wav_bytes):
     if not GROQ_API_KEY or not wav_bytes:
         return ""
     return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes, "whisper-large-v3-turbo")
+
+
+# Phone-context Whisper prompt — biases transcription toward call vocabulary,
+# suppresses hallucinations on silence/ring tone.
+_CALL_WHISPER_PROMPT = (
+    "Hello? Hi, who's this? You've reached. I'm not available right now. "
+    "Please leave a message after the beep. Press 1 for. Thank you for calling."
+)
+
+
+def groq_stt_call(wav_bytes):
+    """Groq Whisper with phone-context prompt to reduce hallucinations on SCO audio."""
+    if not GROQ_API_KEY or not wav_bytes:
+        return ""
+    return _whisper_multipart(
+        GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
+        "whisper-large-v3-turbo", prompt=_CALL_WHISPER_PROMPT,
+    )
 
 
 def _stt_vosk(wav_bytes):
@@ -1752,6 +1777,98 @@ def detect_call_type(transcript: str, llm_fn=None) -> str:
     return "unknown"
 
 
+def _pcm_to_wav_bytes(pcm: bytes, samplerate: int) -> bytes:
+    """Wrap raw 16-bit mono PCM in a WAV header, return bytes."""
+    import wave, io
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _speech_onset_ms(pcm: bytes, samplerate: int, threshold: int = 400) -> int | None:
+    """Return millisecond offset of first speech-energy frame, or None if silent throughout."""
+    frame_ms = 30
+    frame_bytes = int(samplerate * frame_ms / 1000) * 2
+    for i in range(0, len(pcm) - frame_bytes, frame_bytes):
+        chunk = pcm[i:i + frame_bytes]
+        rms = (sum(
+            int.from_bytes(chunk[j:j+2], "little", signed=True) ** 2
+            for j in range(0, len(chunk), 2)
+        ) / (len(chunk) // 2)) ** 0.5
+        if rms > threshold:
+            return i * 1000 // (samplerate * 2)
+    return None
+
+
+def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
+    """
+    Smart turn-0 capture for call type detection.
+
+    Strategy:
+    - Record up to 6s of SCO audio.
+    - After 2s, check for early speech onset (< 1.5s into audio) — real people say
+      "Hello?" immediately; if found, extend by 1s to capture their full phrase then stop.
+    - Transcribe the full capture with a phone-context Whisper prompt to reduce
+      hallucinations on silence/ring noise.
+    - Classify: voicemail (long greeting regex), IVR, live (short burst ≤5 words, early onset).
+
+    Returns (pcm, call_type, transcript).
+    """
+    max_bytes  = int(samplerate * 6) * 2   # 6s hard cap
+    early_bytes = int(samplerate * 2) * 2  # check after 2s
+    extra_bytes = int(samplerate * 1) * 2  # 1s extension after early speech found
+
+    rec = subprocess.Popen(
+        ["arecord", "-D", sco_dev, "-f", "S16_LE",
+         "-r", str(samplerate), "-c", "1", "-q", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+    pcm = b""
+    early_exit = False
+    try:
+        # Read up to 6s in chunks; check for early speech at the 2s mark
+        chunk_bytes = int(samplerate * 0.5) * 2  # 500ms chunks
+        while len(pcm) < max_bytes:
+            chunk = rec.stdout.read(chunk_bytes)
+            if not chunk:
+                break
+            pcm += chunk
+            if not early_exit and len(pcm) >= early_bytes:
+                onset = _speech_onset_ms(pcm, samplerate)
+                if onset is not None and onset < 1500:
+                    # Speech started early — read 1 more second then stop
+                    extra = rec.stdout.read(extra_bytes)
+                    if extra:
+                        pcm += extra
+                    early_exit = True
+                    print(f"[call] Early speech onset at {onset}ms — capturing phrase", flush=True)
+                    break
+    finally:
+        rec.terminate()
+        rec.wait()
+
+    if not pcm:
+        return b"", "unknown", ""
+
+    wav = _pcm_to_wav_bytes(pcm, samplerate)
+    transcript = groq_stt_call(wav)
+    print(f"[call] Fast-detect ({len(pcm)//2//samplerate}s): {transcript!r}", flush=True)
+
+    call_type = detect_call_type(transcript)
+
+    # Additional heuristic: early onset + short transcript = real person
+    if call_type == "unknown" and early_exit and len(transcript.split()) <= 5:
+        call_type = "live"
+        print("[call] Short early burst — classified as live", flush=True)
+
+    return pcm, call_type, transcript
+
+
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
                  call_intent: str = "",
@@ -1847,30 +1964,43 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             _IN_CALL = False
             bt_call_hangup()
             break
-        # Record caller's voice via SCO capture device
-        rec = subprocess.Popen(
-            ["arecord", "-D", sco_dev, "-f", "S16_LE",
-             "-r", str(samplerate), "-c", "1", "-q", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        )
-        print("[call] Listening...", flush=True)
-        # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
-        silence_ms = 3000 if call_type == "ivr" else 900
-        pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
-        rec.terminate()
-        rec.wait()
+        # Turn 0: use fast detector (6s smart capture + phone-context STT + onset heuristic)
+        # Subsequent turns: normal VAD capture
+        if turn == 0:
+            print("[call] Listening (fast detect)...", flush=True)
+            pcm, detected_type, transcript = bt_fast_detect(sco_dev, samplerate)
+            if not pcm:
+                mac_check = bt_hfp_detect()
+                if not mac_check:
+                    print("[call] Call ended (HFP disconnected)", flush=True)
+                    _IN_CALL = False
+                    break
+                continue
+            if detected_type != "unknown":
+                call_type = detected_type
+                print(f"[call] Detected: {call_type}", flush=True)
+        else:
+            # Record caller's voice via SCO capture device
+            rec = subprocess.Popen(
+                ["arecord", "-D", sco_dev, "-f", "S16_LE",
+                 "-r", str(samplerate), "-c", "1", "-q", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            print("[call] Listening...", flush=True)
+            # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
+            silence_ms = 3000 if call_type == "ivr" else 900
+            pcm = _vad_collect(rec, samplerate=samplerate, silence_ms=silence_ms)
+            rec.terminate()
+            rec.wait()
+            if not pcm:
+                mac_check = bt_hfp_detect()
+                if not mac_check:
+                    print("[call] Call ended (HFP disconnected)", flush=True)
+                    _IN_CALL = False
+                    break
+                continue
+            transcript = stt_fn(pcm)
 
-        if not pcm:
-            # Silence or caller hung up — check if still in call
-            mac_check = bt_hfp_detect()
-            if not mac_check:
-                print("[call] Call ended (HFP disconnected)", flush=True)
-                _IN_CALL = False
-                break
-            continue
-
-        # STT first — skip saving noise artifacts
-        transcript = stt_fn(pcm)
         # Filter Whisper noise artifacts (single punct, very short non-speech)
         if not transcript or not re.search(r'\w{2,}', transcript):
             continue
@@ -1893,10 +2023,11 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         print(f"[call] Caller: {transcript}", flush=True)
         call_log.append({"role": "caller", "text": transcript})
 
-        # Turn 0: classify live vs voicemail vs IVR
+        # Turn 0: call_type already set by bt_fast_detect; run LLM fallback if still unknown
         if turn == 0:
-            call_type = detect_call_type(transcript, llm_fn)
-            print(f"[call] Detected: {call_type}", flush=True)
+            if call_type == "unknown":
+                call_type = detect_call_type(transcript, llm_fn)
+                print(f"[call] Detected (LLM fallback): {call_type}", flush=True)
 
             if call_type == "voicemail":
                 # If the intent contains explicit message text ("saying X"), extract it

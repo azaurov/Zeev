@@ -6348,6 +6348,7 @@ def main():
                 if ok:
                     import time as _time2
                     _time2.sleep(3)
+                    phone_mac = bt_hfp_detect()
                     record_dir = str(BASE_DIR / "data" / "call_recordings")
                     import os as _os2
                     _os2.makedirs(record_dir, exist_ok=True)

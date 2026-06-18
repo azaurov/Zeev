@@ -1859,14 +1859,14 @@ def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
     transcript = groq_stt_call(wav)
     print(f"[call] Fast-detect ({len(pcm)//2//samplerate}s): {transcript!r}", flush=True)
 
-    call_type = detect_call_type(transcript)
-
-    # Additional heuristic: early onset + short transcript = real person
-    # Require onset > 100ms to skip pickup click/noise at 0ms
+    # Early onset + short phrase wins over regex — a person saying "Hello?" in the first ~1.5s
+    # is live by definition even if Whisper hallucinated a voicemail-sounding phrase on 8kHz audio.
     onset = _speech_onset_ms(pcm, samplerate)
-    if call_type == "unknown" and early_exit and len(transcript.split()) <= 5 and onset is not None and onset > 100:
+    if early_exit and onset is not None and onset > 100 and len(transcript.split()) <= 5:
         call_type = "live"
         print("[call] Short early burst — classified as live", flush=True)
+    else:
+        call_type = detect_call_type(transcript)
 
     return pcm, call_type, transcript
 
@@ -2134,7 +2134,14 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         if ivr_context:
             prompt = f"{ivr_context}\n\nIVR said: {transcript}"
         elif call_type in ("live", "unknown"):
-            prompt = f"{live_context}\n\nThey said: {transcript}"
+            if call_log:
+                history = "\n".join(
+                    f"{'Caller' if e['role'] == 'caller' else 'Zeev'}: {e['text']}"
+                    for e in call_log[-8:]
+                )
+                prompt = f"{live_context}\n\n[Conversation so far]\n{history}\n\nThey say: {transcript}"
+            else:
+                prompt = f"{live_context}\n\nThey said: {transcript}"
         else:
             prompt = transcript
         reply = llm_fn(prompt)

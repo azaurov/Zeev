@@ -59,11 +59,13 @@ Zeev can make and receive phone calls via Bluetooth HFP (Hands-Free Profile) on 
 - **HFP guard**: Both terminal and device mode call paths call `bt_hfp_detect()` after the post-dial sleep; if it returns empty (phone not connected via HFP), the call is hung up and an error is spoken/printed instead of entering `bt_call_loop` with an invalid SCO device (which previously caused a hard hang).
 - **Whisper hallucination filter**: `bt_call_loop` filters known Whisper hallucinations on ring tone / hold music ("Thank you.", "thanks", "please", "goodbye", etc.) before incrementing `turn` — prevents the call loop from treating ring noise as real speech.
 - **Greeting deferred**: "Hello, this is Zeev, Alex's AI assistant." is spoken only when the call is classified as live/unknown — not before call type is known (voicemail and IVR don't need it).
-- **Fast call detection** (`bt_fast_detect`): replaces VAD on turn 0. Records up to 6s; early-exits at ~3s if speech onset detected within 1.5s (real person said "Hello"). Transcribes with `groq_stt_call()` using `_CALL_WHISPER_PROMPT` (phone vocabulary bias) to suppress hallucinations. Early burst + short transcript (≤5 words, onset >100ms) → classified `live` immediately. Falls back to `detect_call_type()` LLM if still unknown. Cuts voicemail detection from 25s timeout to ~6-9s direct.
+- **Fast call detection** (`bt_fast_detect`): replaces VAD on turn 0. Records up to 6s; early-exits at ~3s if speech onset detected within 1.5s (real person said "Hello"). Transcribes with `groq_stt_call()` using `_CALL_WHISPER_PROMPT` (phone vocabulary bias) to suppress hallucinations. **Live-person check runs before voicemail regex**: early onset + short transcript (≤5 words, onset >100ms) → classified `live` immediately without consulting `detect_call_type()` — prevents Whisper hallucinations on 8kHz SCO audio from misclassifying a real pickup as voicemail. Only longer transcripts fall through to regex + LLM. Cuts voicemail detection from 25s timeout to ~6-9s direct.
 - **`_speech_onset_ms(pcm, samplerate)`** — finds millisecond offset of first speech-energy frame (RMS > 400). Onset at 0ms = pickup click/noise, not speech; threshold >100ms required for live-person heuristic.
 - **`groq_stt_call(wav_bytes)`** — Whisper with `_CALL_WHISPER_PROMPT`: "Hello? Hi, who's this? You've reached. Please leave a message after the beep. Press 1 for. Thank you for calling." Biases transcription toward call vocabulary on 8kHz SCO audio.
 - **Speculative pre-generation**: `bt_call_loop` starts a background thread immediately after dialing that pre-generates the voicemail message via `llm_fn` while the phone is ringing. Result stored in `_pregen_msg` list. All three voicemail message sites (turn 0 detection, mid-call IVR→voicemail transition, 25s timeout) check `_pregen_msg` first — if the message is ready, no LLM call is needed at speak time. Turn 0 site does `_pregen_thread.join(timeout=5)` to wait up to 5s if still generating. Cuts post-beep TTS latency from ~14s to ~5s.
 - **SCO TTS chain order**: Groq Orpheus (daniel, male, WAV) → Cartesia (Kurt, male, ~100ms, WAV) → Piper Ryan (male, raw PCM) → gTTS (last resort). Cartesia uses `sonic-2` model via `https://api.cartesia.ai/tts/bytes`. Config: `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` in `.env`.
+- **Live call history**: `bt_call_loop` injects the last 4 exchanges from `call_log` into each live-call LLM prompt, enabling topic continuity across turns.
+- **`zeev/quantum_convo.py`** — generates quantum-weighted conversation topics for calls. Runs a quantum circuit over conversation directions (empathy/vulnerability, playful tone, small talk, depth), decodes top interference outcomes into lead topics, and builds a call intent string. Usage: `python3 zeev/quantum_convo.py --name NAME [--about TOPIC] [--call NUMBER]`. Standalone (prints scenarios) or dials directly.
 
 ## Version Control
 
@@ -269,6 +271,7 @@ zeev/
   migrate_to_sqlite.py           # idempotent flat-file → zeev.db import (run once)
   test_sqlite_migration.py       # 38-test regression harness (flat-file vs SQLite parity)
   quantum_daily.py               # daily quantum teaching: 8 scenarios, cron 0 6 * * *
+  quantum_convo.py               # quantum-weighted conversation topics for phone calls
   data/                          # runtime files (git-ignored)
     zeev.db                      # WAL-mode SQLite: messages, facts, notes, settings, quantum_insights
     quantum_daily.log            # stdout from cron runs of quantum_daily.py

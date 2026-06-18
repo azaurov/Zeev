@@ -17,3 +17,6 @@ __pycache__/
 
 # Environment secrets — never commit the real .env
 .env
+
+# Personal call scripts
+zeev/quantum_convo.py

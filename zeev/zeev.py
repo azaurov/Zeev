@@ -5871,9 +5871,22 @@ def run_device_mode():
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
         if err or resp is None or resp.status_code != 200:
+            status_code = resp.status_code if resp is not None else "no resp"
             detail = err or (resp.text if resp is not None else "no response")
-            print(f"LLM error [{resp.status_code if resp is not None else 'no resp'}]: {detail}", flush=True)
-            _set_face("error", "LLM error")
+            print(f"LLM error [{status_code}]: {detail}", flush=True)
+            import datetime as _dt
+            try:
+                with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
+                    _ef.write(f"{_dt.datetime.now().isoformat()} LLM [{status_code}]: {detail[:300]}\n")
+            except Exception:
+                pass
+            if status_code == 429:
+                display_msg = "Rate limited"
+            elif err and ("resolve" in err.lower() or "connection" in err.lower() or "timeout" in err.lower()):
+                display_msg = "No network"
+            else:
+                display_msg = f"LLM err {status_code}"
+            _set_face("error", display_msg)
             board.set_rgb(*_LED_ERROR)
             time.sleep(2)
             _go_ready() if _busy.is_set() else _go_idle()

@@ -306,7 +306,7 @@ _REASONING_RE = re.compile(
 _SMART_RE = re.compile(
     r"\b(write|implement|code|function|class|debug|refactor|"
     r"script|program|python|javascript|typescript|rust|golang|java|sql|"
-    r"explain|summarize|compare|analyze|analyse|essay|report|draft|"
+    r"explain|summarize|compare|analyze|analyse|essay|report|draft|recite|"
     r"architecture|design|difference between|how does|how do|regex|"
     r"tell me about|what is|what are|why does|why is|why are|"
     r"history of|overview of|describe|definition|meaning of|"
@@ -2404,8 +2404,9 @@ def build_rag_index():
     global _HISTORY_ENTRIES, _HISTORY_INDEX
     with _db_lock:
         rows = _db().execute(
-            "SELECT role, content, ts FROM messages ORDER BY id"
+            "SELECT role, content, ts FROM messages ORDER BY id DESC LIMIT 500"
         ).fetchall()
+        rows = list(reversed(rows))
     entries = [{"role": r["role"], "content": r["content"], "ts": r["ts"]} for r in rows]
     index = {}
     for i, entry in enumerate(entries):
@@ -2459,7 +2460,7 @@ def retrieve_relevant(query, k=2, min_score=2):
 _TORAH_RE = re.compile(
     r"\b("
     r"torah|tanakh|talmud|gemara|gemorah|mishna|mishnah|chumash|"
-    r"bible|biblical|verse|pasuk|passuk|parasha|parashat|"
+    r"bible|biblical|verse|pasuk|passuk|parasha|parashat|parsha|parshah|"
     r"halacha|halakha|midrash|rashi|rambam|maimonides|"
     r"daf|folio|tractate|masechet|seder|sefer|"
     r"genesis|bereshit|beresheet|exodus|shemot|leviticus|vayikra|"
@@ -2509,7 +2510,8 @@ def torah_search(query, k=3):
         words = re.findall(r"\b\w{3,}\b", query.lower())
         # FTS5 query: OR over content words, skip common stop words
         skip = {"the", "and", "for", "what", "does", "how", "who", "was",
-                "are", "this", "that", "with", "from", "have"}
+                "are", "this", "that", "with", "from", "have",
+                "recite", "tell", "week", "today", "week's", "read", "say"}
         fts_words = [w for w in words if w not in skip][:12]
         if not fts_words:
             return []

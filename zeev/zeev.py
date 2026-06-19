@@ -2802,10 +2802,10 @@ def gcal_fetch(days=1) -> str:
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_post(msgs, model, stream=True, max_tokens=400):
+def _groq_post(msgs, model, stream=True, max_tokens=400, _bypass_cooldown=False):
     """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
     global _groq_post_rate_limited_until
-    if time.time() < _groq_post_rate_limited_until:
+    if not _bypass_cooldown and time.time() < _groq_post_rate_limited_until:
         return None, "rate-limited"   # skip until cooldown expires
     last_err = ""
     for attempt in range(3):
@@ -5877,7 +5877,8 @@ def run_device_mode():
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
             tok_limit = 600
-            resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
+            resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit,
+                                   _bypass_cooldown=True)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
         if err or resp is None or resp.status_code != 200:

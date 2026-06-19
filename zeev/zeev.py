@@ -5832,6 +5832,7 @@ def run_device_mode():
 
     def _wake_listener():
         """Listen for 'Miss Minutes' when idle, then record and process follow-up."""
+        _greeting_done.wait()  # don't process mic audio while greeting is playing
         _floor = []
         for _ in range(3):
             w = _record_chunk(1.0, _MIC_DEV)
@@ -5963,8 +5964,12 @@ def run_device_mode():
     _greeting = _miss_minutes_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
 
+    _greeting_done = threading.Event()
+
     if "--no-greeting" not in sys.argv:
         def _speak_greeting():
+            _set_face("speaking", _greeting)
+            board.set_rgb(*_LED_SPEAKING)
             mp3 = elevenlabs_tts(_greeting)
             if mp3 and shutil.which("mpg123"):
                 try:
@@ -5979,8 +5984,12 @@ def run_device_mode():
                     _speak_device(_greeting)  # BT not ready yet, fall back to device speaker
             else:
                 _speak_device(_greeting)   # fallback if ElevenLabs unavailable
+            _go_idle()
+            _greeting_done.set()
 
         threading.Thread(target=_speak_greeting, daemon=True).start()
+    else:
+        _greeting_done.set()
 
     def _keyboard_listener():
         import tty, termios

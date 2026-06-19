@@ -308,7 +308,7 @@ _SMART_RE = re.compile(
     r"script|program|python|javascript|typescript|rust|golang|java|sql|"
     r"explain|summarize|compare|analyze|analyse|essay|report|draft|recite|"
     r"architecture|design|difference between|how does|how do|regex|"
-    r"tell me about|what is|what are|why does|why is|why are|"
+    r"tell me about|what is|what's|what are|why does|why is|why are|"
     r"history of|overview of|describe|definition|meaning of|"
     r"pros and cons|advantages|disadvantages|recommend|suggest|"
     r"how to|tutorial|guide|best practice|strategy|approach)\b",
@@ -5735,6 +5735,9 @@ def run_device_mode():
         # ─────────────────────────────────────────────────────────────────────
 
         model_id = route_model(transcript)
+        if needs_torah(transcript):
+            # Torah payload injects large passages; 8B's 6k TPM limit is too small
+            model_id = MODELS["2"][0]
         short    = _MODEL_SHORT.get(model_id, "?")
 
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)

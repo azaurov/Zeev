@@ -311,6 +311,7 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 - **BT headphone volume**: set to raw 50/127 (~39%) via `amixer -D bluealsa` at startup when headphones are detected
 - **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
 - **STT**: Groq Whisper `whisper-large-v3-turbo`
+- **Startup greeting**: played via ElevenLabs + mpg123 (or `_speak_device` fallback). A `_greeting_done` threading.Event gates the wake listener — `_wake_listener` blocks on `_greeting_done.wait()` so it cannot pick up the greeting audio through the mic and self-trigger (the greeting text contains "Miss Minutes", the wake word). `--no-greeting` sets the event immediately.
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
 
 ## Hardware context

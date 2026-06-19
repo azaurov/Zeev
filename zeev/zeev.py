@@ -4650,7 +4650,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 vision_payload = _build_vision_msgs(img, question)
                 snap_reply = ""
                 try:
-                    resp, err = _groq_post(vision_payload, VISION_MODEL)
+                    resp, err = _groq_post(vision_payload, VISION_MODEL, max_tokens=600)
                     if err:
                         snap_sse({"error": err})
                     else:
@@ -6508,7 +6508,7 @@ def main():
                 print(f"{DIM}Capture failed.{RESET}\n")
                 continue
             vision_msgs = _build_vision_msgs(img, question)
-            resp, err = _groq_post(vision_msgs, VISION_MODEL, stream=True)
+            resp, err = _groq_post(vision_msgs, VISION_MODEL, stream=True, max_tokens=600)
             if err:
                 print(f"Error: {err}\n")
                 continue
@@ -6874,6 +6874,8 @@ def main():
             continue
 
         model_id = locked_model if locked_model else route_model(user_input)
+        if locked_model is None and (needs_parsha_reading(user_input) or needs_torah(user_input)):
+            model_id = MODELS["2"][0]  # Torah/parsha payload exceeds 8B 6k TPM limit
         if locked_model is None:
             print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
 

@@ -5259,12 +5259,13 @@ def run_device_mode():
 
     threading.Thread(target=_prewarm_piper, daemon=True).start()
 
-    def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=2.0):
+    def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=5.0):
         """Read raw PCM from a live piper process until it goes quiet.
 
         Uses a longer first_timeout to allow Piper to load its model on slow
-        hardware (Pi Zero 2W takes ~20s on cold start), then a short idle_timeout
-        to detect when generation is complete.
+        hardware (Pi Zero 2W takes ~20s on cold start), then idle_timeout between
+        chunks. 5s is required: Pi Zero 2W takes ~2s to synthesize each sentence,
+        so 2s was racing the synthesis and truncating after sentence one.
         """
         audio = bytearray()
         fd = p.stdout.fileno()

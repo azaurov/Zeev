@@ -16,7 +16,7 @@ In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSErr
 
 **BT audio resampling**: all audio going to BlueALSA must match the negotiated A2DP format (`_BT_RATE` / `_BT_CHANNELS`, queried from `bluealsa-aplay --list-pcms`). Both Orpheus (24000Hz mono WAV) and Piper (22050Hz mono raw PCM) are resampled via an inline `ffmpeg` pipeline before `aplay`. Do NOT use `plug:bluealsa:...` ALSA syntax — the parser cannot handle colons in nested params; pass explicit `-f S16_LE -r _BT_RATE -c _BT_CHANNELS` flags to `aplay` instead.
 
-`_collect_piper_audio(p, first_timeout=30.0, idle_timeout=2.0)` — reads from the Piper subprocess with a 30s first-chunk timeout (covers cold ONNX model load on Pi Zero 2W, ~20s) then 2s idle timeout between chunks.
+`_collect_piper_audio(p, first_timeout=30.0, idle_timeout=5.0)` — reads from the Piper subprocess with a 30s first-chunk timeout (covers cold ONNX model load on Pi Zero 2W, ~20s) then 5s idle timeout between chunks. 5s is needed because Pi Zero 2W takes ~2s to synthesize each sentence; the previous 2s was racing synthesis and truncating after the first sentence.
 
 WM8960 auto-powers-down after ~30s of ALSA inactivity. Device mode runs a keepalive thread that plays a 1s silent buffer every 20s to prevent this.
 

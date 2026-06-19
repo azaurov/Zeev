@@ -41,7 +41,7 @@ if _ENV_FILE.exists():
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
-_orpheus_429_until: float = 0.0   # epoch — skip Orpheus until this time after a 429
+_groq_tts_rate_limited_until: float = 0.0   # epoch — skip Orpheus TTS until this time after a 429
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
@@ -877,10 +877,10 @@ def speak_terminal(text, lang=None):
 
 def groq_tts(text, voice="daniel"):
     """Call Groq Orpheus TTS (English only). Returns WAV bytes or None."""
-    global _orpheus_429_until
+    global _groq_tts_rate_limited_until
     if not GROQ_API_KEY or not text.strip():
         return None
-    if time.time() < _orpheus_429_until:
+    if time.time() < _groq_tts_rate_limited_until:
         return None   # rate-limited — skip until cooldown expires
     clean = _clean_for_tts(text, "en")
     if not clean or detect_lang(clean) != "en":
@@ -906,7 +906,7 @@ def groq_tts(text, voice="daniel"):
                 pass
             return resp.content
         if resp.status_code == 429:
-            _orpheus_429_until = time.time() + 300  # back off for 5 minutes
+            _groq_tts_rate_limited_until = time.time() + 300  # back off for 5 minutes
             print(f"[tts] Orpheus 429 — skipping for 5 min", flush=True)
         else:
             print(f"[tts] Orpheus HTTP {resp.status_code}: {resp.text[:120]}", flush=True)
@@ -3093,6 +3093,8 @@ def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
             headers=headers,
             timeout=180,   # CPU inference is slow
         )
+        if r.status_code == 429:
+            return None, "rate-limited"
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"], None
     except Exception as e:

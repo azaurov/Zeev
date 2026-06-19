@@ -179,7 +179,7 @@ Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SS
 Facts about the user are extracted from conversations and stored in `data/zeev.db` (`facts` table). Injected into every system prompt under `## What I know about Alex:`.
 
 - **`load_memory()` / `save_memory()`** — read/write the `facts` table in `zeev.db` (unique text rows, ordered by insertion `id`).
-- **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit.
+- **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit. Both `_bosgame_complete` and `_llm_complete` (Groq) recognize HTTP 429 and return `(None, "rate-limited")`; the caller short-circuits to `None` so the quit-handler shows the rate-limit warning instead of a fake success.
 - Extraction runs automatically on `quit` in terminal mode. Can also be triggered with `/memorize` (terminal) or the 🧠 → "Memorize this session" button (web UI).
 - Remove individual facts with `/forget-fact N` (terminal) or via the memory panel (web UI).
 

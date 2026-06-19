@@ -423,6 +423,17 @@ def test_groq_tts_200_returns_valid_wav(zeev):
 
     zeev._groq_tts_rate_limited_until = 0.0
 
+    # Clear any stale cache from a prior real-API run that may have written
+    # bytes under this key — we want the test to exercise the mocked API
+    # path, not the cache-read path.
+    import hashlib as _hl
+    _key = _hl.md5(
+        f"daniel:{zeev._clean_for_tts('Hello, this is a test.', 'en')[:4096]}".encode()
+    ).hexdigest()
+    _cp = zeev.TTS_CACHE_DIR / f"{_key}.wav"
+    if _cp.exists():
+        _cp.unlink()
+
     with patch("zeev.requests.post", return_value=mock_resp):
         with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
             result = zeev.groq_tts("Hello, this is a test.")

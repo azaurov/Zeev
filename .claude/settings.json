@@ -5,7 +5,10 @@
       "Bash(systemctl status *)",
       "Bash(php -l *)",
       "Bash(sudo systemctl restart zeev-device)",
-      "Bash(sudo systemctl restart zeev-device && *)"
+      "Bash(sudo systemctl restart zeev-device && *)",
+      "Bash(ssh ragnar@ragnarok 'python3 << *)",
+      "Bash(ssh ragnar@ragnarok 'cd /home/ragnar/Zeev && python3 << *)",
+      "Bash(ssh ragnar@ragnarok 'cd *)"
     ]
   }
 }

@@ -5870,9 +5870,10 @@ def run_device_mode():
         resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
-        # 429 on 70B/R1 → fall back to 8B before giving up
-        if (resp is not None and resp.status_code == 429
-                and model_id in (MODELS["2"][0], MODELS["3"][0])):
+        # 429 or per-model cooldown on 70B/R1 → fall back to 8B before giving up
+        if (model_id in (MODELS["2"][0], MODELS["3"][0])
+                and ((resp is not None and resp.status_code == 429)
+                     or err == "rate-limited")):
             print(f"[llm] 429 on {short} — retrying with 8B", flush=True)
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")

@@ -5881,6 +5881,16 @@ def run_device_mode():
             resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
+        # 413 (request too large) → trim oldest history pairs and retry
+        if resp is not None and resp.status_code == 413:
+            trim_payload = list(payload_msgs)
+            while len(trim_payload) > 2:  # keep at least sys_prompt + current_user
+                trim_payload = [trim_payload[0]] + trim_payload[3:]  # drop oldest user+assistant pair
+                print(f"[llm] 413 — trimmed to {len(trim_payload)} msgs, retrying", flush=True)
+                resp, err = _groq_post(trim_payload, model_id, stream=False, max_tokens=tok_limit)
+                if resp is None or resp.status_code != 413:
+                    break
+
         if err or resp is None or resp.status_code != 200:
             status_code = resp.status_code if resp is not None else "no resp"
             detail = err or (resp.text if resp is not None else "no response")

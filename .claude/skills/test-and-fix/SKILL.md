@@ -2,6 +2,24 @@
 
 Run a structured bug-finding pass over the Zeev codebase and service, then fix everything found. Work autonomously without asking for confirmation. Deploy when done.
 
+## Permissions required (add to `.claude/settings.json` `permissions.allow` before running)
+
+The skill requires these entries so it can run end-to-end without approval prompts:
+
+```json
+"Bash(python3 -c *)",
+"Bash(python3 << *)",
+"Bash(ssh ragnar@ragnarok *)",
+"Bash(journalctl *)",
+"Bash(systemctl status *)",
+"Bash(git -C /home/azaurov/Zeev add *)",
+"Bash(git -C /home/azaurov/Zeev commit *)",
+"Bash(git -C /home/azaurov/Zeev push *)",
+"Bash(sudo systemctl restart zeev-device)"
+```
+
+All of the above are already present in `.claude/settings.local.json` on this machine. The `settings.json` in this repo covers `journalctl *` and `systemctl status *`.
+
 ## Scope
 
 Target: `zeev/zeev.py` (single-file app) running as `zeev-device.service` on `ragnar@ragnarok`.

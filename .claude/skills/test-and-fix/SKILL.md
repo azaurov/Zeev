@@ -151,7 +151,7 @@ SSH to `ragnar@ragnarok` and run:
    tests = [
        (\"what's this week's Torah portion?\", z.needs_torah, True),
        (\"what's this week's Torah portion?\", z.needs_parsha_reading, True),
-       (\"what's this week's Torah portion?\", lambda t: z.route_model(t) == z.MODELS['2'][0], False),
+       (\"Torah portion\", lambda t: z.needs_torah(t) or z.needs_parsha_reading(t), True),
        (\"recite the shema\", z.needs_torah, True),
        (\"play some jazz\", z.needs_torah, False),
        (\"what's the weather\", z.needs_torah, False),

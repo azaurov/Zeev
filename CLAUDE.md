@@ -195,7 +195,7 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 
 Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min for the full corpus).
 
-- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, **parsha/parshah**, etc.).
+- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, **parsha/parshah/portion**, etc.).
 - **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`. FTS5 skip set includes noise verbs ("recite", "tell", "read", "say") and time words ("week", "today") so they don't pollute passage matching.
 - `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
 - DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha/Siddur/Haggadah/Zohar/DSS/Sumerian), `ref`, `en`, `he`. `done` table tracks imported refs for resume safety.

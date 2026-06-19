@@ -2460,7 +2460,7 @@ def retrieve_relevant(query, k=2, min_score=2):
 _TORAH_RE = re.compile(
     r"\b("
     r"torah|tanakh|talmud|gemara|gemorah|mishna|mishnah|chumash|"
-    r"bible|biblical|verse|pasuk|passuk|parasha|parashat|parsha|parshah|"
+    r"bible|biblical|verse|pasuk|passuk|parasha|parashat|parsha|parshah|portion|"
     r"halacha|halakha|midrash|rashi|rambam|maimonides|"
     r"daf|folio|tractate|masechet|seder|sefer|"
     r"genesis|bereshit|beresheet|exodus|shemot|leviticus|vayikra|"
@@ -2511,7 +2511,7 @@ def torah_search(query, k=3):
         # FTS5 query: OR over content words, skip common stop words
         skip = {"the", "and", "for", "what", "does", "how", "who", "was",
                 "are", "this", "that", "with", "from", "have",
-                "recite", "tell", "week", "today", "week's", "read", "say"}
+                "recite", "tell", "week", "today", "week's", "read", "say", "portion"}
         fts_words = [w for w in words if w not in skip][:12]
         if not fts_words:
             return []

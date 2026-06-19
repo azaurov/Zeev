@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(journalctl *)",
+      "Bash(systemctl status *)",
+      "Bash(php -l *)"
+    ]
+  }
+}

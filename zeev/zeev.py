@@ -2512,17 +2512,19 @@ def needs_parsha_reading(text):
 
 
 def get_weekly_parsha():
-    """Fetch this week's Torah portion from Hebcal. Returns dict or None."""
+    """Fetch the upcoming (this week's) Torah portion from Hebcal. Returns dict or None."""
     import datetime
     today = datetime.date.today()
     cached = _weekly_parsha_cache.get("parsha")
     if cached and _weekly_parsha_cache.get("fetched_date") == today:
         return cached
     try:
+        # Fetch 3 weeks to be safe across month boundaries
+        end = (today + datetime.timedelta(days=21)).isoformat()
         r = requests.get(
             "https://www.hebcal.com/hebcal",
             params={"v": 1, "cfg": "json", "maj": "on", "min": "off",
-                    "nx": "off", "year": today.year, "month": today.month,
+                    "nx": "off", "start": today.isoformat(), "end": end,
                     "ss": "off", "mf": "off", "c": "off", "M": "on", "s": "on"},
             timeout=8,
         )

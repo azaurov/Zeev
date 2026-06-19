@@ -4579,7 +4579,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     payload = [{"role": "system", "content": sys_prompt}] + snapshot
                     thermal_reply = ""
                     try:
-                        resp, err = _groq_post(payload, model_id)
+                        resp, err = _groq_post(payload, model_id, max_tokens=600)
                         if err:
                             thermal_sse({"error": err})
                         else:
@@ -4700,6 +4700,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             user_msg   = data.get("message", "").strip()
             model_pref = data.get("model", "auto")
             model      = route_model(user_msg) if model_pref == "auto" else model_pref
+            if model_pref == "auto" and (needs_parsha_reading(user_msg) or needs_torah(user_msg)):
+                model = MODELS["2"][0]  # Torah/parsha payload exceeds 8B 6k TPM limit
 
             if not user_msg:
                 self.send_response(400)
@@ -4778,7 +4780,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             sys_prompt = _build_system_prompt(user_msg, on_search)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
-            if needs_torah(user_msg):
+            if needs_parsha_reading(user_msg):
+                tok_limit = 1600
+            elif needs_torah(user_msg):
                 tok_limit = 1200
             elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
                 tok_limit = 1200
@@ -5515,7 +5519,7 @@ def run_device_mode():
                         except (BrokenPipeError, OSError):
                             _piper_dev_proc = None
                             continue
-                        audio = _collect_piper_audio(p1)
+                        audio = _collect_piper_audio(p1, idle_timeout=8.0)
                         if audio:
                             break
                         _piper_dev_proc = None
@@ -5804,7 +5808,8 @@ def run_device_mode():
                             msgs += session[-10:]
                             msgs.append({"role": "user", "content": text})
                             resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
-                            if err or not resp:
+                            if err or resp is None or resp.status_code != 200:
+                                print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
                                 return ""
                             return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
@@ -6844,7 +6849,8 @@ def main():
                             msgs = [{"role": "system", "content": _call_sys}]
                             msgs.append({"role": "user", "content": text})
                             resp, err, _ = _llm_post(msgs, "llama-3.1-8b-instant", stream=False, max_tokens=150)
-                            if err or not resp:
+                            if err or resp is None or resp.status_code != 200:
+                                print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
                                 return ""
                             return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 

@@ -43,7 +43,7 @@ GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 _groq_tts_rate_limited_until: float = 0.0   # epoch — skip Orpheus TTS until this time after a 429
 _groq_stt_rate_limited_until: float = 0.0   # epoch — skip Whisper STT until this time after a 429
-_groq_post_rate_limited_until: float = 0.0  # epoch — skip Groq chat-completions until this time after a 429
+_groq_model_rate_limited_until: dict = {}   # model_id → epoch — per-model chat-completion 429 cooldown
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
@@ -2802,11 +2802,11 @@ def gcal_fetch(days=1) -> str:
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_post(msgs, model, stream=True, max_tokens=400, _bypass_cooldown=False):
+def _groq_post(msgs, model, stream=True, max_tokens=400):
     """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
-    global _groq_post_rate_limited_until
-    if not _bypass_cooldown and time.time() < _groq_post_rate_limited_until:
-        return None, "rate-limited"   # skip until cooldown expires
+    global _groq_model_rate_limited_until
+    if time.time() < _groq_model_rate_limited_until.get(model, 0):
+        return None, "rate-limited"   # skip this model until cooldown expires
     last_err = ""
     for attempt in range(3):
         try:
@@ -2819,8 +2819,8 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, _bypass_cooldown=False)
                 timeout=60,
             )
             if resp.status_code == 429:
-                _groq_post_rate_limited_until = time.time() + 300  # back off for 5 minutes
-                print(f"[llm] Groq chat 429 — skipping for 5 min", flush=True)
+                _groq_model_rate_limited_until[model] = time.time() + 300  # back off for 5 minutes
+                print(f"[llm] Groq chat 429 on {model} — skipping for 5 min", flush=True)
             return resp, None
         except requests.RequestException as e:
             last_err = str(e)
@@ -5877,8 +5877,7 @@ def run_device_mode():
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
             tok_limit = 600
-            resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit,
-                                   _bypass_cooldown=True)
+            resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
         if err or resp is None or resp.status_code != 200:

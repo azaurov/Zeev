@@ -5739,11 +5739,17 @@ def run_device_mode():
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
         sys_prompt   = _build_system_prompt(transcript)
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
-        resp, err    = _groq_post(payload_msgs, model_id, stream=False)
+        if needs_torah(transcript):
+            tok_limit = 1200
+        elif model_id in (MODELS["3"][0], MODELS["2"][0]):
+            tok_limit = 1200
+        else:
+            tok_limit = 600
+        resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
         if err or not resp or resp.status_code != 200:
-            detail = err or (resp.text[:80] if resp else "no response")
+            detail = err or (resp.text if resp else "no response")
             print(f"LLM error: {detail}", flush=True)
             _set_face("error", "LLM error")
             board.set_rgb(*_LED_ERROR)

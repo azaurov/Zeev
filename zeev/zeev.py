@@ -5749,9 +5749,9 @@ def run_device_mode():
         resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
-        if err or not resp or resp.status_code != 200:
-            detail = err or (resp.text if resp else "no response")
-            print(f"LLM error: {detail}", flush=True)
+        if err or resp is None or resp.status_code != 200:
+            detail = err or (resp.text if resp is not None else "no response")
+            print(f"LLM error [{resp.status_code if resp is not None else 'no resp'}]: {detail}", flush=True)
             _set_face("error", "LLM error")
             board.set_rgb(*_LED_ERROR)
             time.sleep(2)

@@ -2500,6 +2500,86 @@ def needs_torah(text):
     return TORAH_DB.exists() and bool(_TORAH_RE.search(text))
 
 
+_PARSHA_READING_RE = re.compile(
+    r"\b(parsha|parshah|parasha|parashat|portion)\b", re.IGNORECASE
+)
+_weekly_parsha_cache = {}   # {"parsha": {...}, "fetched_date": date}
+
+
+def needs_parsha_reading(text):
+    """True when the user wants to hear the weekly Torah reading."""
+    return bool(_PARSHA_READING_RE.search(text))
+
+
+def get_weekly_parsha():
+    """Fetch this week's Torah portion from Hebcal. Returns dict or None."""
+    import datetime
+    today = datetime.date.today()
+    cached = _weekly_parsha_cache.get("parsha")
+    if cached and _weekly_parsha_cache.get("fetched_date") == today:
+        return cached
+    try:
+        r = requests.get(
+            "https://www.hebcal.com/hebcal",
+            params={"v": 1, "cfg": "json", "maj": "on", "min": "off",
+                    "nx": "off", "year": today.year, "month": today.month,
+                    "ss": "off", "mf": "off", "c": "off", "M": "on", "s": "on"},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        for item in r.json().get("items", []):
+            if item.get("category") == "parashat":
+                result = {
+                    "name": item["title"].replace("Parashat ", "").replace("Parasha ", ""),
+                    "title": item["title"],
+                    "date": item["date"],
+                    "torah": item.get("leyning", {}).get("torah", ""),
+                }
+                _weekly_parsha_cache["parsha"] = result
+                _weekly_parsha_cache["fetched_date"] = today
+                return result
+    except Exception:
+        pass
+    return None
+
+
+def _parse_torah_ref(ref):
+    """Parse 'Numbers 16:1-18:32' → ('Numbers', [16, 17, 18])."""
+    m = re.match(r"([A-Za-z ]+?)\s+(\d+):\d+-(?:[A-Za-z ]+\s+)?(\d+):\d+", ref.strip())
+    if not m:
+        return None, []
+    book = m.group(1).strip()
+    return book, list(range(int(m.group(2)), int(m.group(3)) + 1))
+
+
+def get_parsha_text(parsha_info, max_chars=7000):
+    """Fetch chapter texts for a parsha from torah.db. Returns full text string."""
+    book, chapters = _parse_torah_ref(parsha_info.get("torah", ""))
+    if not book or not chapters:
+        return ""
+    try:
+        import sqlite3 as _sq
+        con = _sq.connect(f"file:{TORAH_DB}?mode=ro", uri=True)
+        texts = []
+        total = 0
+        for ch in chapters:
+            row = con.execute("SELECT en FROM passages WHERE ref=?", (f"{book} {ch}",)).fetchone()
+            if row:
+                chunk = row[0]
+                if total + len(chunk) > max_chars:
+                    remaining = max_chars - total
+                    if remaining > 300:
+                        texts.append(chunk[:remaining] + "…")
+                    break
+                texts.append(chunk)
+                total += len(chunk)
+        con.close()
+        return "\n\n".join(texts)
+    except Exception:
+        return ""
+
+
 def torah_search(query, k=3):
     """Return up to k (ref, en_text) pairs from the local Torah FTS5 database."""
     if not TORAH_DB.exists():
@@ -3094,7 +3174,17 @@ def _build_system_prompt(user_text, on_search=None):
             rag_lines.append(f"User: {u[:300]}\nZeev: {a[:300]}")
         parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
 
-    if needs_torah(user_text):
+    if needs_parsha_reading(user_text):
+        parsha = get_weekly_parsha()
+        if parsha:
+            ptext = get_parsha_text(parsha)
+            if ptext:
+                parts.append(
+                    f"\n\n## {parsha['title']} — Torah Reading ({parsha['torah']}):\n{ptext}"
+                    "\n\n## Instruction: The user wants to hear the Torah portion read aloud."
+                    " Read the text above from the beginning. Do not summarize — recite the actual verses."
+                )
+    elif needs_torah(user_text):
         torah_hits = torah_search(user_text)
         if torah_hits:
             torah_lines = "\n".join(
@@ -3260,7 +3350,9 @@ def stream_reply(messages, model):
     sys_prompt = _build_system_prompt(user_text, on_search)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
-    if needs_torah(user_text):
+    if needs_parsha_reading(user_text):
+        tok_limit = 1600
+    elif needs_torah(user_text):
         tok_limit = 1200
     elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
         tok_limit = 1200
@@ -5735,15 +5827,17 @@ def run_device_mode():
         # ─────────────────────────────────────────────────────────────────────
 
         model_id = route_model(transcript)
-        if needs_torah(transcript):
-            # Torah payload injects large passages; 8B's 6k TPM limit is too small
+        if needs_torah(transcript) or needs_parsha_reading(transcript):
+            # Torah/parsha payload injects large passages; 8B's 6k TPM limit is too small
             model_id = MODELS["2"][0]
         short    = _MODEL_SHORT.get(model_id, "?")
 
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
         sys_prompt   = _build_system_prompt(transcript)
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
-        if needs_torah(transcript):
+        if needs_parsha_reading(transcript):
+            tok_limit = 1600  # room to recite several chapters
+        elif needs_torah(transcript):
             tok_limit = 1200
         elif model_id in (MODELS["3"][0], MODELS["2"][0]):
             tok_limit = 1200

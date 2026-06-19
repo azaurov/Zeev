@@ -85,7 +85,7 @@ Hebrew, Spanish, and Russian use Google Translate TTS (no install needed). Requi
 
 ## Torah RAG (Sefaria)
 
-Zeev can retrieve passages from a local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. When a query matches known keywords, up to 3 relevant passages are injected into the system prompt before the Groq call.
+Zeev can retrieve passages from a local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. When a query matches known keywords (including "parsha"/"parshah"), up to 3 relevant passages are injected into the system prompt before the Groq call. Torah queries automatically use the 70B model with a 1,200-token limit and FTS5 noise-word filtering so common verbs and time references don't pollute passage matching.
 
 **Corpora:**
 

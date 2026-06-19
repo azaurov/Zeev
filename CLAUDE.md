@@ -156,7 +156,7 @@ Default is **auto-routing**: the model is chosen per message by `route_model()`.
 `route_model(text)` picks a model per message using two keyword regexes — no extra API call:
 
 - `_REASONING_RE` — matches math, logic, proofs, algorithms, calculus/algebra/geometry → DeepSeek R1
-- `_SMART_RE` — matches code, explanations, summaries, comparisons, and natural-language question patterns ("tell me about", "what is/are", "why does/is/are", "history of", "how to", "pros and cons", "recommend", etc.) → 70B Smart
+- `_SMART_RE` — matches code, explanations, summaries, comparisons, and natural-language question patterns ("tell me about", "what is/are", "why does/is/are", "history of", "how to", "pros and cons", "recommend", "recite", etc.) → 70B Smart
 - Default → 8B Fast
 
 The terminal prints `[auto → 8B/70B/R1]` before each response. The web UI shows the model as a dim tag below the bubble. Lock/unlock with `/model`.
@@ -187,7 +187,7 @@ Facts about the user are extracted from conversations and stored in `data/zeev.d
 
 Past conversations are indexed at startup for keyword-based retrieval. Relevant exchanges are injected into the system prompt for each turn.
 
-- **`build_rag_index()`** — reads all rows from the `messages` table (`ORDER BY id`) into `_HISTORY_ENTRIES` and builds an inverted word index (`_HISTORY_INDEX`), filtering stop words (`_STOP_WORDS`).
+- **`build_rag_index()`** — reads the last 500 rows from the `messages` table into `_HISTORY_ENTRIES` and builds an inverted word index (`_HISTORY_INDEX`), filtering stop words (`_STOP_WORDS`). Capped at 500 to prevent OOM on Pi Zero 2W with large history DBs.
 - **`retrieve_relevant(query, k=2, min_score=2)`** — scores past entries by word overlap with the current query, returns up to `k` `(user_msg, assistant_reply)` pairs above `min_score`. Injected as `## Relevant past exchanges:`.
 - **`init_learning()`** — called once at startup by both `main()` and `run_web_server()`; loads memory and builds RAG index.
 
@@ -195,8 +195,8 @@ Past conversations are indexed at startup for keyword-based retrieval. Relevant 
 
 Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min for the full corpus).
 
-- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, etc.).
-- **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`.
+- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, **parsha/parshah**, etc.).
+- **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`. FTS5 skip set includes noise verbs ("recite", "tell", "read", "say") and time words ("week", "today") so they don't pollute passage matching.
 - `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
 - DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha/Siddur/Haggadah/Zohar/DSS/Sumerian), `ref`, `en`, `he`. `done` table tracks imported refs for resume safety.
 - **Apocrypha**: Ben Sira (51 ch), Tobit (13), Judith (16), 1 Maccabees (16), 2 Maccabees (10), Wisdom of Solomon (18), Prayer of Manasseh (1), Psalm 151. Ben Sira chapters 17/22–24/29/36 use `a`–`g` sub-refs (`_BEN_SIRA_SPLIT`).

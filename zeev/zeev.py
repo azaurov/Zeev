@@ -6193,6 +6193,123 @@ def run_device_mode():
         time.sleep(1)
 
 
+def run_call_mode(number: str, intent: str = "") -> None:
+    """
+    CLI entry point: dial `number` via HFP and run a single bt_call_loop
+    session, then hang up. Mirrors the device-mode "call NNN and ..." path
+    but is invokable from a shell, e.g.:
+
+        python3 zeev/zeev.py --call 8577017252 --intent "have a fun chat"
+
+    Uses bt_speak_sco (not _speak_device) so it works without the Whisplay
+    HAT wake-word listener. SIGINT hangs up cleanly.
+    """
+    global _SETTINGS_TTS_ON
+    zeev_cleanup()    # clear any crash leftovers from a previous run
+    init_learning()
+
+    # Normalise the number: keep digits and a single leading +
+    digits = re.sub(r"[^\d+]", "", number)
+    if not digits:
+        print(f"[call] No digits in number: {number!r}", flush=True)
+        sys.exit(2)
+    number = digits
+
+    persona = extract_call_persona(intent or "")
+    print(f"[call] Dialing {number} intent={intent!r} persona={persona}", flush=True)
+
+    # Ensure HFP is up before dialing (will pair/trust if necessary)
+    phone_mac = bt_ensure_hfp_connected(timeout=20)
+    if not phone_mac:
+        print("[call] No phone connected via HFP — aborting", flush=True)
+        sys.exit(3)
+
+    if not bt_call_dial(number):
+        print(f"[call] bt_call_dial({number}) failed — aborting", flush=True)
+        sys.exit(4)
+
+    # Give the call a moment to connect
+    time.sleep(3)
+    if not bt_hfp_detect():
+        print("[call] HFP dropped after dial — aborting", flush=True)
+        bt_call_hangup()
+        sys.exit(5)
+
+    # Load prior conversation context for the LLM
+    try:
+        session = load_prior()
+    except Exception:
+        session = []
+
+    record_dir = str(BASE_DIR / "data" / "call_recordings")
+    os.makedirs(record_dir, exist_ok=True)
+
+    # SIGINT/SIGTERM → hang up and exit (no zombie calls)
+    def _shutdown(sig=None, frame=None):
+        print(f"\n[call] Caught signal {sig} — hanging up", flush=True)
+        bt_call_hangup()
+        zeev_cleanup()
+        sys.exit(0)
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    # SCO speak callback: Zeev's voice to the caller
+    def _speak(text: str) -> None:
+        sco_dev = bt_hfp_dev(phone_mac)
+        samplerate = bt_sco_rate(phone_mac)
+        bt_speak_sco(text, sco_dev, samplerate, persona=persona)
+
+    # STT callback: raw 16k mono PCM → transcript
+    def _stt(pcm: bytes) -> str:
+        import wave, io as _io
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(pcm)
+        return groq_stt(buf.getvalue())
+
+    # LLM callback: focused call prompt + recent session context
+    def _llm(text: str) -> str:
+        sys_prompt = (
+            "You are Zeev, Alex's AI assistant, on a brief phone call. "
+            f"{('Call intent: ' + intent + '. ') if intent else ''}"
+            "Keep replies to 1-2 short sentences. Be friendly, warm, and "
+            "a little playful. Do NOT use crude, sexual, racial, or otherwise "
+            "offensive humor. If the other person seems busy or uninterested, "
+            "wish them well and end the call politely. Do not pretend to be a "
+            "real person — you are clearly an AI assistant calling on Alex's "
+            "behalf."
+        )
+        msgs = [{"role": "system", "content": sys_prompt}]
+        msgs += session[-10:]
+        msgs.append({"role": "user", "content": text})
+        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+        if err or resp is None or resp.status_code != 200:
+            print(f"[call] LLM error: {err}", flush=True)
+            return ""
+        try:
+            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        except Exception:
+            return ""
+
+    print("[call] Starting bt_call_loop...", flush=True)
+    try:
+        bt_call_loop(_speak, _stt, _llm, phone_mac,
+                     record_dir=record_dir,
+                     call_intent=intent,
+                     persona=persona)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[call] bt_call_loop crashed: {type(e).__name__}: {e}", flush=True)
+    finally:
+        print("[call] Hanging up", flush=True)
+        bt_call_hangup()
+        zeev_cleanup()
+
+
 def main():
     global _SETTINGS_TTS_ON
     zeev_cleanup()   # clear any crash leftovers from a previous run
@@ -6905,5 +7022,18 @@ if __name__ == "__main__":
         run_web_server()
     elif "--device" in sys.argv or "-device" in sys.argv:
         run_device_mode()
+    elif "--call" in sys.argv:
+        # --call <NUMBER> [--intent "TEXT"]
+        argv = sys.argv[1:]
+        if "--call" not in argv or len(argv) < 2:
+            print("Usage: zeev.py --call <NUMBER> [--intent \"TEXT\"]", flush=True)
+            sys.exit(2)
+        number = argv[argv.index("--call") + 1]
+        intent = ""
+        if "--intent" in argv:
+            idx = argv.index("--intent")
+            if idx + 1 < len(argv):
+                intent = argv[idx + 1]
+        run_call_mode(number, intent)
     else:
         main()

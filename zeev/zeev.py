@@ -42,6 +42,8 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 _groq_tts_rate_limited_until: float = 0.0   # epoch — skip Orpheus TTS until this time after a 429
+_groq_stt_rate_limited_until: float = 0.0   # epoch — skip Whisper STT until this time after a 429
+_groq_post_rate_limited_until: float = 0.0  # epoch — skip Groq chat-completions until this time after a 429
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL     = "https://api.tavily.com/search"
@@ -1046,6 +1048,9 @@ def tts_web(text, lang=None):
 
 def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
     """POST WAV to an OpenAI-compatible /audio/transcriptions endpoint."""
+    global _groq_stt_rate_limited_until
+    if time.time() < _groq_stt_rate_limited_until:
+        return ""   # rate-limited — skip until cooldown expires
     boundary = b"--boundary\r\n"
     cd = b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'
     model_part = (
@@ -1070,6 +1075,9 @@ def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
         )
         if r.status_code == 200:
             return r.json().get("text", "").strip()
+        if r.status_code == 429:
+            _groq_stt_rate_limited_until = time.time() + 300  # back off for 5 minutes
+            print(f"[stt] Whisper 429 — skipping for 5 min", flush=True)
     except Exception:
         pass
     return ""
@@ -2796,17 +2804,24 @@ def gcal_fetch(days=1) -> str:
 
 def _groq_post(msgs, model, stream=True, max_tokens=400):
     """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
+    global _groq_post_rate_limited_until
+    if time.time() < _groq_post_rate_limited_until:
+        return None, "rate-limited"   # skip until cooldown expires
     last_err = ""
     for attempt in range(3):
         try:
-            return requests.post(
+            resp = requests.post(
                 GROQ_URL,
                 json={"model": model, "messages": msgs,
                       "temperature": 0.75, "max_tokens": max_tokens, "stream": stream},
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 stream=stream,
                 timeout=60,
-            ), None
+            )
+            if resp.status_code == 429:
+                _groq_post_rate_limited_until = time.time() + 300  # back off for 5 minutes
+                print(f"[llm] Groq chat 429 — skipping for 5 min", flush=True)
+            return resp, None
         except requests.RequestException as e:
             last_err = str(e)
             if attempt < 2:

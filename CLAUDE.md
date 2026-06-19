@@ -181,6 +181,7 @@ Facts about the user are extracted from conversations and stored in `data/zeev.d
 
 - **`load_memory()` / `save_memory()`** — read/write the `facts` table in `zeev.db` (unique text rows, ordered by insertion `id`).
 - **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit. Both `_bosgame_complete` and `_llm_complete` (Groq) recognize HTTP 429 and return `(None, "rate-limited")`; the caller short-circuits to `None` so the quit-handler shows the rate-limit warning instead of a fake success.
+- **Groq 429 backoff** — three module globals track cooldown timestamps after a 429: `_groq_tts_rate_limited_until` (Orpheus TTS, 5 min), `_groq_stt_rate_limited_until` (Whisper STT, 5 min), `_groq_post_rate_limited_until` (chat completions via `_groq_post`, 5 min). Each gate is checked at the top of the relevant function so subsequent calls skip the HTTP request entirely instead of hammering for another 429. On a 429 each function logs `[tts|stt|llm] ... 429 — skipping for 5 min` so the cause is visible in `journalctl`.
 - Extraction runs automatically on `quit` in terminal mode. Can also be triggered with `/memorize` (terminal) or the 🧠 → "Memorize this session" button (web UI).
 - Remove individual facts with `/forget-fact N` (terminal) or via the memory panel (web UI).
 

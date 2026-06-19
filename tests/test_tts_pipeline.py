@@ -496,3 +496,118 @@ def test_speak_terminal_routes_hebrew_to_gtts_not_orpheus(zeev):
     assert gtts_calls[0][1] == "he", (
         f"_gtts_speak must be called with lang='he', got {gtts_calls[0][1]!r}"
     )
+
+
+# ============================================================================
+# B13 — Whisper 429: must not silently return '' as if no speech
+# ============================================================================
+
+def test_whisper_multipart_429_does_not_silently_pass(zeev, capsys):
+    """
+    Bug B13: _whisper_multipart() returned "" on HTTP 429 from Groq Whisper
+    with no logging and no rate-limit state. Callers (groq_stt, groq_stt_call)
+    interpret "" as "no speech detected", so the call loop spins silently
+    during a 429 — the AI appears to have stopped listening. After the
+    cooldown the very next call hits the API again, hammering for another 429.
+
+    Fix: log the 429 loudly, set a cooldown timestamp, and return "" so
+    callers still get the empty-transcript signal.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+    mock_resp.text = "rate limit exceeded"
+
+    # Use a tiny valid WAV so groq_stt doesn't early-return on empty bytes
+    import struct
+    fake_wav = b"RIFF" + struct.pack("<I", 36) + b"WAVE" + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16) + b"data" + struct.pack("<I", 0)
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            result = zeev._whisper_multipart(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                "fake-key", fake_wav, "whisper-large-v3-turbo",
+            )
+
+    captured = capsys.readouterr()
+    assert result == "", "_whisper_multipart must return empty string on 429"
+    assert "429" in captured.out, (
+        "_whisper_multipart must print a log line on 429 (bug B13: silent "
+        "fallthrough made it impossible to diagnose why STT stopped)"
+    )
+    assert zeev._groq_stt_rate_limited_until > time.time(), (
+        "_whisper_multipart must set a future cooldown timestamp on 429 "
+        "(bug B13: without this every call re-fires the API)"
+    )
+
+
+def test_whisper_multipart_429_honoured_on_next_call(zeev):
+    """
+    After a 429 sets the STT rate-limit state, the next call must return
+    '' immediately without making any HTTP request.
+    """
+    zeev._groq_stt_rate_limited_until = time.time() + 3600  # locked for 1h
+    try:
+        with patch("zeev.requests.post") as mock_post:
+            result = zeev._whisper_multipart(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                "fake-key", b"RIFF...data", "whisper-large-v3-turbo",
+            )
+        assert result == "", "_whisper_multipart must return '' while rate-limited"
+        mock_post.assert_not_called(), (
+            "_whisper_multipart must NOT call requests.post while rate-limited"
+        )
+    finally:
+        zeev._groq_stt_rate_limited_until = 0.0
+
+
+# ============================================================================
+# B14 — _groq_post 429: must set cooldown state so subsequent calls skip
+# ============================================================================
+
+def test_groq_post_429_sets_rate_limit_state(zeev):
+    """
+    Bug B14: _groq_post() returned the 429 response without setting any
+    cooldown. Every subsequent call hammered Groq and got another 429.
+    Same shape as the original _orpheus_429_until / _groq_tts_rate_limited_until
+    bug (bug B3/B4), but on the chat-completion path.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+    mock_resp.text = "rate limit exceeded"
+
+    msgs = [{"role": "user", "content": "hi"}]
+    zeev._groq_post_rate_limited_until = 0.0
+
+    with patch("zeev.requests.post", return_value=mock_resp):
+        with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+            resp, err = zeev._groq_post(msgs, "llama-3.1-8b-instant",
+                                        stream=False, max_tokens=200)
+
+    assert resp is mock_resp, "_groq_post must return the response on 429 (caller checks status)"
+    assert zeev._groq_post_rate_limited_until > time.time(), (
+        "_groq_post must set a future cooldown timestamp on 429 (bug B14)"
+    )
+    # cleanup
+    zeev._groq_post_rate_limited_until = 0.0
+
+
+def test_groq_post_429_honoured_on_next_call(zeev):
+    """
+    After a 429 sets the cooldown, the next _groq_post must NOT make an
+    HTTP request — return None with a clear rate-limit error.
+    """
+    zeev._groq_post_rate_limited_until = time.time() + 3600
+    try:
+        with patch("zeev.requests.post") as mock_post:
+            with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
+                resp, err = zeev._groq_post(
+                    [{"role": "user", "content": "hi"}],
+                    "llama-3.1-8b-instant", stream=False, max_tokens=200,
+                )
+        assert resp is None, "_groq_post must return None while rate-limited"
+        assert err and "rate-limit" in err.lower(), (
+            f"_groq_post must return a 'rate-limit' error while locked, got {err!r}"
+        )
+        mock_post.assert_not_called()
+    finally:
+        zeev._groq_post_rate_limited_until = 0.0

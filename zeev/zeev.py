@@ -203,6 +203,14 @@ _BT_DISCONNECT_RE = re.compile(
     r"|\bswitch.{0,20}\b(speaker|wm8960|built.?in)\b",
     re.IGNORECASE,
 )
+_CAMERA_RE = re.compile(
+    r"\bwhat (do you see|can you see|are you seeing|do you look at)\b"
+    r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
+    r"|\bwhat('?s| is) (in front of you|around you|there)\b"
+    r"|\b(describe|show me) what('?s| is) (there|in front|around)\b"
+    r"|\bcan you see (anything|something|what'?s|me)\b",
+    re.IGNORECASE,
+)
 _BT_CALL_RE = re.compile(
     r"\b(call|phone|dial|ring)\b.{0,40}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b|\b\w+\b)",
     re.IGNORECASE,
@@ -5848,6 +5856,48 @@ def run_device_mode():
                 _speak_device(reply)
                 _go_ready() if _busy.is_set() else _go_idle()
                 return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Camera natural language handling ──────────────────────────────────
+        if CAMERA_AVAILABLE and _CAMERA_RE.search(transcript):
+            print(f"[camera] capturing…", flush=True)
+            _set_face("thinking", "Capturing…")
+            img = capture_image()
+            if not img:
+                reply = "Sorry, I couldn't capture an image right now."
+                _speak_device(reply)
+                session.append({"role": "assistant", "content": reply})
+                append_message("assistant", reply)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+            vision_payload = _build_vision_msgs(img, transcript)
+            print(f"[camera] calling vision LLM…", flush=True)
+            resp, err = _groq_post(vision_payload, VISION_MODEL, stream=False, max_tokens=600)
+            if err or resp is None or resp.status_code != 200:
+                status_code = resp.status_code if resp is not None else "no resp"
+                detail = err or (resp.text if resp is not None else "no response")
+                print(f"Vision LLM error [{status_code}]: {detail}", flush=True)
+                try:
+                    import datetime as _dt
+                    with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
+                        _ef.write(f"{_dt.datetime.now().isoformat()} Vision [{status_code}]: {detail[:300]}\n")
+                except Exception:
+                    pass
+                display_msg = "Rate limited" if status_code == 429 else f"LLM err {status_code}"
+                _set_face("error", display_msg)
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+            reply = resp.json()["choices"][0]["message"]["content"].strip()
+            print(f"Zeev [Scout]: {reply}\n")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            board.set_rgb(*_LED_SPEAKING)
+            _set_face("speaking", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
         # ─────────────────────────────────────────────────────────────────────
 
         model_id = route_model(transcript)

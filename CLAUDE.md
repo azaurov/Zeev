@@ -125,6 +125,11 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_gtts_speak(text, lang, adev=None)`** — plays Google Translate TTS via `mpg123` in a background thread; `adev` selects the ALSA device (used in device mode).
 - **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
 - **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
+- **`init_camera()`** — tries to open a `Picamera2` instance; sets `CAMERA_AVAILABLE`. Called at startup in all modes.
+- **`capture_image(width=1280, height=720)`** — captures a JPEG via picamera2, applies 180° flip if `CAMERA_FLIP` is set, returns base64 string or `None` on failure.
+- **`_build_vision_msgs(image_b64, question="")`** — builds the multimodal messages list (system prompt + image URL + question) for a vision API call.
+- **`VISION_MODEL`** — `"meta-llama/llama-4-scout-17b-16e-instruct"` (Groq). Used by `/look` (terminal), `/snap` (web UI), and natural-language camera queries in device mode.
+- **`_CAMERA_RE`** — regex that matches natural-language camera intents ("what do you see", "take a photo", "can you see anything", etc.). Checked in `_handle_transcript` before text LLM routing; only fires when `CAMERA_AVAILABLE` is True.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`_db()` / `_db_lock` / `_db_con`** — lazy singleton SQLite connection to `data/zeev.db` (`check_same_thread=False`, WAL mode). All storage calls acquire `_db_lock` before executing; this is the thread-safety mechanism for `ThreadingHTTPServer`. Tables: `messages`, `facts`, `notes`, `settings`.
 - **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f zeev_music` and `pkill -f zeev_rec.wav` to catch orphaned ffmpeg/mpg123/arecord processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path.
@@ -317,6 +322,7 @@ All thermal camera logic lives in `zeev/mlx90640.py`:
 - **`_handle_transcript` tok_limit**: mirrors terminal/web — `needs_torah()` → 1200, 70B/R1 → 1200, else 600.
 - **`_handle_transcript` 429 fallback**: if 70B or R1 returns 429 or hits its per-model cooldown (`err == "rate-limited"`), automatically retries with 8B (tok_limit 600) before surfacing an error. Covers both TPM burst limits and daily TPD exhaustion.
 - **LLM error display**: Whisplay screen shows specific messages — "Rate limited" (429), "No network" (connection/timeout errors), or "LLM err \<code\>" — instead of the generic "LLM error". Full error detail (status code + body) is appended to `data/zeev_errors.log` with ISO timestamp for post-hoc diagnosis.
+- **Camera natural language** (`_CAMERA_RE`): phrases like "what do you see", "take a photo", "can you see anything" in device mode trigger `capture_image()` + vision model call (Llama 4 Scout) instead of the text LLM. Requires `CAMERA_AVAILABLE=True` (picamera2 detected at startup via `init_camera()`).
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
 
 ## Hardware context

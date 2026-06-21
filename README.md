@@ -189,6 +189,8 @@ sudo apt install -y python3-picamera2
 
 Zeev auto-detects the camera at startup via `picamera2`. In the terminal use `/look [question]` to take a photo and ask Zeev about it. The web UI shows a 📷 button (with optional flip toggle). Use `/flip` or the ↕ button to rotate the image 180° (saved persistently).
 
+In **device mode** (Whisplay push-to-talk), natural language camera phrases work hands-free — say "what do you see", "take a photo", or "can you see anything" and Zeev captures a JPEG and describes it via the Llama 4 Scout vision model.
+
 ---
 
 ## Whisplay HAT device mode

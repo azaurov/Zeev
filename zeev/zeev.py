@@ -203,6 +203,15 @@ _BT_DISCONNECT_RE = re.compile(
     r"|\bswitch.{0,20}\b(speaker|wm8960|built.?in)\b",
     re.IGNORECASE,
 )
+_VOLUME_RE = re.compile(
+    r"\b(turn (it |the volume )?(up|down|louder|quieter|softer))\b"
+    r"|\b(volume (up|down|higher|lower|louder|quieter|softer))\b"
+    r"|\b(increase|raise|boost|crank up|bump up) (the )?(volume|sound)\b"
+    r"|\b(decrease|lower|reduce|turn down) (the )?(volume|sound)\b"
+    r"|\b(louder|quieter|softer)\b",
+    re.IGNORECASE,
+)
+
 _CAMERA_RE = re.compile(
     r"\bwhat (do you see|can you see|are you seeing|do you look at)\b"
     r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
@@ -5857,6 +5866,20 @@ def run_device_mode():
                 _go_ready() if _busy.is_set() else _go_idle()
                 return
         # ─────────────────────────────────────────────────────────────────────
+
+        # ── Volume natural language handling ──────────────────────────────────
+        if _VOLUME_RE.search(transcript):
+            t = transcript.lower()
+            up = any(w in t for w in ("up", "louder", "higher", "increase", "raise", "boost", "crank", "bump"))
+            new_vol = set_volume(min(100, _VOLUME + 15) if up else max(0, _VOLUME - 15))
+            direction = "up" if up else "down"
+            reply = f"Volume {direction} to {new_vol} percent."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
 
         # ── Camera natural language handling ──────────────────────────────────
         if CAMERA_AVAILABLE and _CAMERA_RE.search(transcript):

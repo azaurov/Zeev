@@ -5436,7 +5436,7 @@ def run_device_mode():
             # piper survived (wasn't tracked as p1 this call) — drain its buffer
             _drain_piper(_piper_dev_proc)
 
-    def _speak_device(text):
+    def _speak_device(text, voice="daniel"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
         lang = detect_lang(text)
@@ -5446,7 +5446,7 @@ def run_device_mode():
         adev = bt_audio_dev()
 
         # 1. Orpheus / OpenAI — WAV output via aplay
-        wav = groq_tts(clean, voice="daniel") if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+        wav = groq_tts(clean, voice=voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if not wav:
             print(f"[tts] Orpheus failed — falling back to Piper", flush=True)
@@ -6193,9 +6193,9 @@ def run_device_mode():
                     proc.stdin.close()
                     proc.wait()
                 except BrokenPipeError:
-                    _speak_device(_greeting)  # BT not ready yet, fall back to device speaker
+                    _speak_device(_greeting, voice="autumn")  # BT not ready yet, fall back to device speaker
             else:
-                _speak_device(_greeting)   # fallback if ElevenLabs unavailable
+                _speak_device(_greeting, voice="autumn")   # fallback if ElevenLabs unavailable
             _go_idle()
             _greeting_done.set()
 

@@ -328,12 +328,12 @@ _SMART_RE = re.compile(
 MODELS = {
     "1": ("llama-3.1-8b-instant",          "Llama 3.1 8B  — fast"),
     "2": ("llama-3.3-70b-versatile",        "Llama 3.3 70B — smart"),
-    "3": ("deepseek-r1-distill-llama-70b",  "DeepSeek R1   — reasoning"),
+    "3": ("openai/gpt-oss-120b",             "GPT-OSS 120B  — reasoning"),
 }
 _MODEL_SHORT = {
     "llama-3.1-8b-instant":         "8B",
     "llama-3.3-70b-versatile":      "70B",
-    "deepseek-r1-distill-llama-70b":"R1",
+    "openai/gpt-oss-120b":          "GPT-OSS",
 }
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -349,7 +349,7 @@ _VOLUME           = 87      # 0–100; applied via amixer
 def route_model(text):
     """Pick model ID automatically based on message content."""
     if _REASONING_RE.search(text):
-        return MODELS["3"][0]   # DeepSeek R1
+        return MODELS["3"][0]   # GPT-OSS 120B
     if _SMART_RE.search(text):
         return MODELS["2"][0]   # 70B Smart
     return MODELS["1"][0]       # 8B Fast
@@ -3381,7 +3381,7 @@ def stream_reply(messages, model):
         tok_limit = 1600
     elif needs_torah(user_text):
         tok_limit = 1200
-    elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
+    elif model in (MODELS["3"][0], MODELS["2"][0]):  # GPT-OSS or 70B
         tok_limit = 1200
     else:
         tok_limit = 600
@@ -3605,7 +3605,7 @@ footer {
       <option value="auto" selected>Auto</option>
       <option value="llama-3.1-8b-instant">8B Fast</option>
       <option value="llama-3.3-70b-versatile">70B Smart</option>
-      <option value="deepseek-r1-distill-llama-70b">DeepSeek R1</option>
+      <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
     </select>
   </div>
 </header>
@@ -4809,7 +4809,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 tok_limit = 1600
             elif needs_torah(user_msg):
                 tok_limit = 1200
-            elif model in (MODELS["3"][0], MODELS["2"][0]):  # R1 or 70B
+            elif model in (MODELS["3"][0], MODELS["2"][0]):  # GPT-OSS or 70B
                 tok_limit = 1200
             else:
                 tok_limit = 600

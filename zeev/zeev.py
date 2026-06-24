@@ -5871,7 +5871,7 @@ def run_device_mode():
         if _VOLUME_RE.search(transcript):
             t = transcript.lower()
             up = any(w in t for w in ("up", "louder", "higher", "increase", "raise", "boost", "crank", "bump"))
-            new_vol = set_volume(min(100, _VOLUME + 15) if up else max(0, _VOLUME - 15))
+            new_vol = set_volume(min(100, _VOLUME + 5) if up else max(0, _VOLUME - 5))
             direction = "up" if up else "down"
             reply = f"Volume {direction} to {new_vol} percent."
             print(f"Zeev: {reply}")

@@ -20,6 +20,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
 - **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
+- **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded to city/region via Nominatim; injected into context automatically on location queries; `/gps` terminal command; `GET /gps` web endpoint
 - **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights) in a single WAL-mode `zeev.db`; no flat files
 
 ## Running
@@ -254,6 +255,7 @@ Physical disconnects (headphones powered off or out of range) are handled automa
 | `play <query>` | Play YouTube audio |
 | `/stop` | Stop music playback |
 | `/bt` | Manage Bluetooth audio devices |
+| `/gps` | Show current location (WiFi-triangulated or IP) |
 | `quit` | Exit (auto-memorizes session) |
 
 ## Hardware

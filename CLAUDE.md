@@ -180,6 +180,21 @@ Zeev uses a keyword heuristic (`_SEARCH_RE`) to decide when to search — no mod
 
 Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SSE event) show a status line during search.
 
+### GPS / geolocation
+
+Zeev can report its current location using a tiered pipeline — no GPS hardware required.
+
+- **`_wifi_scan_aps()`** — scans visible WiFi APs via `nmcli` (no sudo); returns list of `{macAddress, signalStrength}`.
+- **`_wifi_geolocate(aps)`** — sends APs to Google Geolocation API first (`GOOGLE_GEOLOC_KEY` in `.env`, free tier 40k req/month, threshold <10 000m), then beacondb (community-sourced, free, threshold <1 000m). Returns `{lat, lon, accuracy, method}` or `None` if both fall back to IP.
+- **`_ip_geolocate()`** — fallback via `ip-api.com` (no key, ~25km accuracy).
+- **`_reverse_geocode(lat, lon)`** — Nominatim/OSM lookup; enriches WiFi-triangulated fixes with city/region/country/zip when those aren't returned by the geolocation service.
+- **`gps_locate()`** — runs the full pipeline; result cached 30 min. Keys always include `lat`, `lon`, `accuracy`, `method` (`wifi+google` / `wifi+beacondb` / `ip`).
+- **`gps_summary(loc)`** — one-liner: `City, Region, Country  (lat°, lon°)  ±Xm via method  timezone`.
+- **`needs_gps(text)`** / `_GPS_RE` — detects natural-language location queries and injects `## Current location:` into the system prompt.
+- **`/gps` terminal command** — shows AP count, location summary, IP/ISP, and full reverse-geocoded address.
+- **`GET /gps` web endpoint** — returns raw location JSON.
+- `GOOGLE_GEOLOC_KEY` read from `.env`; without it the pipeline falls through to beacondb then IP.
+
 ### User memory (persistent facts)
 
 Facts about the user are extracted from conversations and stored in `data/zeev.db` (`facts` table). Injected into every system prompt under `## What I know about Alex:`.

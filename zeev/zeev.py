@@ -203,6 +203,18 @@ _BT_DISCONNECT_RE = re.compile(
     r"|\bswitch.{0,20}\b(speaker|wm8960|built.?in)\b",
     re.IGNORECASE,
 )
+_BT_TETHER_ON_RE = re.compile(
+    r"\btether(ing)?\b"
+    r"|\b(use|enable|turn on|connect|start|share).{0,30}\b(phone.{0,15}internet|phone.{0,15}data|mobile.{0,15}data|phone.{0,15}hotspot|internet.{0,15}phone)\b"
+    r"|\bphone.{0,20}\b(internet|data|network|connection)\b"
+    r"|\b(bluetooth|bt).{0,20}\b(internet|data|tether|network|hotspot)\b"
+    r"|\bmobile.{0,10}\b(internet|data|hotspot)\b",
+    re.IGNORECASE,
+)
+_BT_TETHER_OFF_RE = re.compile(
+    r"\b(stop|disable|turn off|disconnect|end).{0,30}\b(tether(ing)?|phone.{0,15}internet|mobile.{0,15}data)\b",
+    re.IGNORECASE,
+)
 _VOLUME_RE = re.compile(
     r"\b(turn (it |the volume )?(up|down|louder|quieter|softer))\b"
     r"|\b(volume (up|down|higher|lower|louder|quieter|softer))\b"
@@ -269,8 +281,12 @@ _BT_ANSWER_RE = re.compile(
 )
 
 def extract_bt_intent(text):
-    """Return ('scan'|'pair'|'connect'|'disconnect'|None) for BT natural-language requests."""
+    """Return ('scan'|'pair'|'connect'|'disconnect'|'tether_on'|'tether_off'|None) for BT natural-language requests."""
     t = text.strip()
+    if _BT_TETHER_OFF_RE.search(t):
+        return "tether_off"
+    if _BT_TETHER_ON_RE.search(t):
+        return "tether_on"
     if _BT_SCAN_RE.search(t):
         return "scan"
     if _BT_PAIR_RE.search(t):
@@ -1191,6 +1207,7 @@ _BT_RATE: int = 44100    # sample rate reported by bluealsa
 _BT_CHANNELS: int = 1    # channel count reported by bluealsa
 _bt_scan_results: list[tuple[str, str]] = []  # [(mac, name)] from last /bt scan
 _BT_PHONE_MAC: str = ""  # MAC of phone connected via HFP
+_BT_PAN_MAC: str = ""   # MAC of phone providing BT PAN internet tethering
 _IN_CALL: bool = False   # True while a phone call is active
 _call_thread: threading.Thread | None = None  # running call conversation loop
 
@@ -1381,6 +1398,124 @@ def bt_disconnect(mac: str) -> None:
     except Exception:
         pass
     _BT_AUDIO_DEV = ""
+
+
+# ---------------------------------------------------------------------------
+# Bluetooth PAN tethering (NAP profile — phone shares mobile internet)
+# ---------------------------------------------------------------------------
+
+def bt_pan_connect(mac: str) -> tuple[bool, str]:
+    """Connect to phone's BT PAN NAP service, bring up bnep0, get DHCP lease.
+    Returns (ok, status_message).
+    Phone must have Bluetooth Tethering enabled in Settings → Connections → Mobile Hotspot."""
+    global _BT_PAN_MAC
+
+    # Connect to the NAP profile via bluetoothctl network menu
+    try:
+        result = subprocess.run(
+            ["bluetoothctl"],
+            input=f"menu network\nconnect {mac} nap\nback\nquit\n",
+            capture_output=True, text=True, timeout=20,
+        )
+        output = result.stdout + result.stderr
+    except Exception as e:
+        return False, f"bluetoothctl error: {e}"
+
+    # Wait up to 8s for bnep0 to appear
+    bnep_up = False
+    for _ in range(16):
+        r = subprocess.run(["ip", "link", "show", "bnep0"], capture_output=True)
+        if r.returncode == 0:
+            bnep_up = True
+            break
+        time.sleep(0.5)
+
+    if not bnep_up:
+        return False, "bnep0 interface did not appear — is BT Tethering enabled on the phone?"
+
+    # Bring up interface and get DHCP lease — try nmcli (NetworkManager), then dhcpcd, then dhclient
+    lease_ok = False
+    for cmd in (
+        ["nmcli", "device", "connect", "bnep0"],
+        ["dhcpcd", "bnep0"],
+        ["sudo", "dhcpcd", "bnep0"],
+        ["sudo", "dhclient", "bnep0"],
+    ):
+        if not shutil.which(cmd[0].lstrip("sudo ")):
+            continue
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=15)
+            if r.returncode == 0:
+                lease_ok = True
+                break
+        except Exception:
+            continue
+
+    if not lease_ok:
+        # Interface is up but no IP yet; NetworkManager may handle it automatically
+        time.sleep(3)
+
+    # Check for an IP address on bnep0
+    ip_str = ""
+    try:
+        r = subprocess.run(["ip", "addr", "show", "bnep0"], capture_output=True, text=True, timeout=5)
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", r.stdout)
+        if m:
+            ip_str = m.group(1)
+    except Exception:
+        pass
+
+    if ip_str:
+        _BT_PAN_MAC = mac
+        return True, f"BT tethering active — IP {ip_str}"
+    else:
+        return False, "bnep0 appeared but no IP assigned — check phone's BT tethering setting"
+
+
+def bt_pan_disconnect() -> None:
+    """Release DHCP lease on bnep0 and disconnect the PAN link."""
+    global _BT_PAN_MAC
+    mac = _BT_PAN_MAC
+    _BT_PAN_MAC = ""
+
+    # Release DHCP lease
+    for cmd in (
+        ["nmcli", "device", "disconnect", "bnep0"],
+        ["dhcpcd", "-k", "bnep0"],
+        ["sudo", "dhcpcd", "-k", "bnep0"],
+        ["sudo", "dhclient", "-r", "bnep0"],
+    ):
+        if not shutil.which(cmd[0].lstrip("sudo ")):
+            continue
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            break
+        except Exception:
+            continue
+
+    if mac:
+        try:
+            subprocess.run(
+                ["bluetoothctl"],
+                input=f"menu network\ndisconnect {mac}\nback\nquit\n",
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+
+def bt_pan_status() -> dict:
+    """Return {'connected': bool, 'ip': str, 'mac': str}."""
+    ip_str = ""
+    try:
+        r = subprocess.run(["ip", "addr", "show", "bnep0"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", r.stdout)
+            if m:
+                ip_str = m.group(1)
+    except Exception:
+        pass
+    return {"connected": bool(ip_str), "ip": ip_str, "mac": _BT_PAN_MAC}
 
 
 # ---------------------------------------------------------------------------
@@ -2691,6 +2826,198 @@ def tavily_search(query):
 
 
 # ---------------------------------------------------------------------------
+# GPS / geolocation  (WiFi triangulation → IP fallback)
+# ---------------------------------------------------------------------------
+
+GOOGLE_GEOLOC_KEY = os.environ.get("GOOGLE_GEOLOC_KEY", "")
+
+_GPS_RE = re.compile(
+    r"\b(where (am i|are we|is this|are you)|my (location|position|coordinates|gps|address|city)|"
+    r"what (city|country|state|region|timezone|zip|postal) (am i in|is this|are we in)|"
+    r"gps (coordinates?|location|position)|current (location|position|coordinates?)|"
+    r"locate (me|us|yourself)|find (my|our) location|"
+    r"what('?s| is) (my|our|the current) (location|position|address|city|country))\b",
+    re.IGNORECASE,
+)
+
+_gps_cache: dict = {}     # {"result": dict, "ts": float}
+_GPS_CACHE_TTL = 1800     # 30 minutes
+
+
+def _wifi_scan_aps() -> list[dict]:
+    """Scan nearby WiFi APs via nmcli. Returns list of {macAddress, signalStrength}."""
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "BSSID,SIGNAL", "dev", "wifi", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        aps = []
+        for line in r.stdout.splitlines():
+            # nmcli escapes colons in BSSIDs as \:  e.g. 10\:E1\:77\:08\:B9\:1B:100
+            m = re.match(r'^((?:[0-9A-Fa-f]{2}(?:\\:)){5}[0-9A-Fa-f]{2}):(-?\d+)', line)
+            if m:
+                bssid = m.group(1).replace("\\:", ":")
+                signal = int(m.group(2))
+                aps.append({"macAddress": bssid, "signalStrength": signal})
+        return aps
+    except Exception:
+        return []
+
+
+def _wifi_geolocate(aps: list[dict]) -> dict | None:
+    """Try WiFi triangulation. Returns {lat, lon, accuracy, method} or None on miss.
+
+    Tries Google Geolocation API first (if GOOGLE_GEOLOC_KEY set), then beacondb.
+    Returns None if both services fall back to IP geolocation (accuracy >= 10000m).
+    """
+    if len(aps) < 2:
+        return None
+
+    payload = {"wifiAccessPoints": aps[:20]}
+
+    # 1) Google Geolocation API — best residential coverage, free tier ~40k req/month
+    if GOOGLE_GEOLOC_KEY:
+        try:
+            resp = requests.post(
+                f"https://www.googleapis.com/geolocation/v1/geolocate?key={GOOGLE_GEOLOC_KEY}",
+                json=payload, timeout=8,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                loc = data.get("location", {})
+                acc = data.get("accuracy", 9999)
+                if loc and acc < 10000:
+                    return {"lat": loc["lat"], "lon": loc["lng"], "accuracy": acc, "method": "wifi+google"}
+        except Exception:
+            pass
+
+    # 2) beacondb (MLS successor, community-sourced, no key required)
+    try:
+        resp = requests.post("https://beacondb.net/v1/geolocate", json=payload, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            loc = data.get("location", {})
+            acc = data.get("accuracy", 9999)
+            # Only trust it when accuracy < 1000m (not an IP fallback)
+            if loc and acc < 1000:
+                return {"lat": loc["lat"], "lon": loc["lng"], "accuracy": acc, "method": "wifi+beacondb"}
+    except Exception:
+        pass
+
+    return None
+
+
+def _ip_geolocate() -> dict:
+    """IP-based geolocation via ip-api.com. Returns full dict or {"error": str}."""
+    try:
+        resp = requests.get(
+            "http://ip-api.com/json/?fields=status,message,country,countryCode,"
+            "region,regionName,city,zip,lat,lon,timezone,isp,query",
+            timeout=5,
+        )
+        data = resp.json()
+        if data.get("status") != "success":
+            return {"error": data.get("message", "geolocation failed")}
+        data["method"] = "ip"
+        data["accuracy"] = 25000
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def gps_locate() -> dict:
+    """Return best available location dict.
+
+    Pipeline: WiFi scan → Google Geolocation / beacondb → IP fallback.
+    Cached 30 min. Keys always include lat, lon, accuracy, method.
+    """
+    now = time.time()
+    cached = _gps_cache.get("result")
+    if cached and now - _gps_cache.get("ts", 0) < _GPS_CACHE_TTL:
+        return cached
+
+    # Try WiFi triangulation first
+    aps = _wifi_scan_aps()
+    result = _wifi_geolocate(aps)
+
+    if result is None:
+        # Fall back to IP geolocation
+        ip_loc = _ip_geolocate()
+        if "error" in ip_loc:
+            return ip_loc
+        result = {
+            "lat": ip_loc.get("lat"),
+            "lon": ip_loc.get("lon"),
+            "accuracy": ip_loc.get("accuracy", 25000),
+            "method": "ip",
+            "city": ip_loc.get("city", ""),
+            "regionName": ip_loc.get("regionName", ""),
+            "country": ip_loc.get("country", ""),
+            "countryCode": ip_loc.get("countryCode", ""),
+            "timezone": ip_loc.get("timezone", ""),
+            "zip": ip_loc.get("zip", ""),
+            "isp": ip_loc.get("isp", ""),
+            "query": ip_loc.get("query", ""),
+        }
+
+    _gps_cache["result"] = result
+    _gps_cache["ts"] = now
+    return result
+
+
+def _reverse_geocode(lat: float, lon: float) -> dict:
+    """Reverse-geocode coordinates to city/region/country via Nominatim (OpenStreetMap).
+    Returns partial address dict or empty dict on failure.
+    """
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "json", "zoom": 14},
+            headers={"User-Agent": "Zeev-AI-Companion/1.0"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            addr = data.get("address", {})
+            return {
+                "city": addr.get("city") or addr.get("town") or addr.get("village") or addr.get("suburb", ""),
+                "regionName": addr.get("state", ""),
+                "country": addr.get("country", ""),
+                "countryCode": addr.get("country_code", "").upper(),
+                "zip": addr.get("postcode", ""),
+                "display_name": data.get("display_name", ""),
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def gps_summary(loc: dict) -> str:
+    """Format a location dict into a readable one-liner with method and accuracy."""
+    if "error" in loc:
+        return f"Location unavailable: {loc['error']}"
+    parts = []
+    if loc.get("city"):
+        parts.append(loc["city"])
+    if loc.get("regionName"):
+        parts.append(loc["regionName"])
+    if loc.get("country"):
+        parts.append(loc["country"])
+    place = ", ".join(p for p in parts if p) or "unknown"
+    lat  = loc.get("lat", "?")
+    lon  = loc.get("lon", "?")
+    acc  = loc.get("accuracy")
+    tz   = loc.get("timezone", "")
+    method = loc.get("method", "ip")
+    acc_str = f"±{int(acc)}m" if acc and acc < 10000 else "~25km"
+    return f"{place}  ({lat:.5f}°, {lon:.5f}°)  {acc_str} via {method}  {tz}".strip()
+
+
+def needs_gps(text: str) -> bool:
+    return bool(_GPS_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
 # Google Calendar
 # ---------------------------------------------------------------------------
 
@@ -3233,6 +3560,14 @@ def _build_system_prompt(user_text, on_search=None):
         cal = gcal_fetch(_gcal_days)
         _gcal_label = "Today's calendar" if _gcal_days == 1 else f"Calendar (next {_gcal_days} days)"
         parts.append(f"\n\n## {_gcal_label}:\n{cal}")
+
+    if needs_gps(user_text):
+        loc = gps_locate()
+        # For WiFi-triangulated fixes, enrich with a reverse-geocoded place name
+        if loc.get("method", "ip") != "ip" and not loc.get("city"):
+            geo = _reverse_geocode(loc["lat"], loc["lon"])
+            loc = {**loc, **{k: v for k, v in geo.items() if v}}
+        parts.append(f"\n\n## Current location:\n{gps_summary(loc)}")
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
@@ -4370,6 +4705,14 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(body)
             elif self.path == "/health":
                 body = json.dumps(get_system_health()).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/gps":
+                loc = gps_locate()
+                body = json.dumps(loc).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -5797,6 +6140,50 @@ def run_device_mode():
             _go_ready() if _busy.is_set() else _go_idle()
             return
 
+        # ── BT tethering ─────────────────────────────────────────────────────
+        if bt_intent == "tether_on":
+            status = bt_pan_status()
+            if status["connected"]:
+                reply = f"Bluetooth tethering is already active. IP address {status['ip']}."
+            else:
+                # Try to find the phone in paired devices
+                devices = bt_list()
+                phone_mac = _BT_PAN_MAC or _BT_PHONE_MAC
+                if not phone_mac and devices:
+                    # Pick the first paired device that isn't the current audio device
+                    for m, n, _ in devices:
+                        if not _BT_AUDIO_DEV or m not in _BT_AUDIO_DEV:
+                            phone_mac = m
+                            break
+                    if not phone_mac:
+                        phone_mac = devices[0][0]
+                if not phone_mac:
+                    reply = "No paired phone found. Pair your phone first."
+                else:
+                    _speak_device("Connecting to phone tethering. This may take a moment.")
+                    ok, msg = bt_pan_connect(phone_mac)
+                    reply = f"Connected. {msg.split('—')[-1].strip()}" if ok else f"Tethering failed. {msg.split('—')[-1].strip()} Make sure Bluetooth Tethering is enabled on your phone under Settings, Connections, Mobile Hotspot."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        if bt_intent == "tether_off":
+            status = bt_pan_status()
+            if status["connected"]:
+                bt_pan_disconnect()
+                reply = "Bluetooth tethering disconnected."
+            else:
+                reply = "Tethering isn't active."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
         # ── Phone call handling ───────────────────────────────────────────────
         if _IN_CALL and _BT_HANGUP_RE.search(transcript):
             bt_call_hangup()
@@ -6498,6 +6885,7 @@ def main():
     print(f"  /flip         toggle camera 180° rotation (persistent)")
     print(f"  /thermal [q]  capture thermal frame; optionally ask Zeev about it")
     print(f"  /quantum <q>  run a quantum circuit on your idea or dilemma")
+    print(f"  /gps          show current location via IP geolocation")
     print(f"  quit          exit{RESET}\n")
 
     locked_model = None   # None = auto-routing
@@ -6863,9 +7251,64 @@ def main():
                 session = session[-60:]
             continue
 
+        if user_input.lower() == "/gps":
+            aps = _wifi_scan_aps()
+            print(f"{DIM}[locating... {len(aps)} APs visible]{RESET}", flush=True)
+            loc = gps_locate()
+            if "error" in loc:
+                print(f"{DIM}Location unavailable: {loc['error']}{RESET}\n")
+            else:
+                if loc.get("method", "ip") != "ip" and not loc.get("city"):
+                    geo = _reverse_geocode(loc["lat"], loc["lon"])
+                    loc = {**loc, **{k: v for k, v in geo.items() if v}}
+                print(f"{DIM}Location: {gps_summary(loc)}{RESET}")
+                if loc.get("query"):
+                    print(f"{DIM}IP: {loc['query']}  ISP: {loc.get('isp', '?')}{RESET}")
+                if loc.get("display_name"):
+                    print(f"{DIM}Address: {loc['display_name']}{RESET}")
+                print()
+            continue
+
         if user_input.lower().startswith("/bt"):
             parts = user_input.split()
             sub = parts[1].lower() if len(parts) > 1 else ""
+
+            if sub == "tether":
+                arg = parts[2].lower() if len(parts) > 2 else ""
+                if arg == "off":
+                    s = bt_pan_status()
+                    if s["connected"]:
+                        bt_pan_disconnect()
+                        print(f"{DIM}BT tethering disconnected.{RESET}\n")
+                    else:
+                        print(f"{DIM}Tethering is not active.{RESET}\n")
+                else:
+                    # /bt tether [N] — connect to paired device N (default: first non-audio device)
+                    s = bt_pan_status()
+                    if s["connected"]:
+                        print(f"{DIM}Already tethering via {s['mac']} — IP {s['ip']}.{RESET}\n")
+                    else:
+                        devices = bt_list()
+                        if not devices:
+                            print(f"{DIM}No paired devices. Pair your phone first.{RESET}\n")
+                        else:
+                            if arg.isdigit():
+                                idx = int(arg) - 1
+                                mac, name = devices[idx][0], devices[idx][1] if 0 <= idx < len(devices) else (devices[0][0], devices[0][1])
+                            else:
+                                # Pick first device that isn't current audio headphones
+                                mac, name = next(
+                                    ((m, n) for m, n, _ in devices if not _BT_AUDIO_DEV or m not in _BT_AUDIO_DEV),
+                                    (devices[0][0], devices[0][1]),
+                                )
+                            print(f"{DIM}Connecting BT tethering to {name}...{RESET}", flush=True)
+                            print(f"{DIM}(Enable 'Bluetooth Tethering' on your phone under Settings → Connections → Mobile Hotspot){RESET}")
+                            ok, msg = bt_pan_connect(mac)
+                            if ok:
+                                print(f"{DIM}Tethering active — {msg.split('—')[-1].strip()}{RESET}\n")
+                            else:
+                                print(f"{DIM}Failed: {msg}{RESET}\n")
+                continue
 
             if sub == "scan":
                 print(f"{DIM}Scanning for Bluetooth devices (10s)...{RESET}", flush=True)
@@ -6899,7 +7342,10 @@ def main():
                 # show status
                 adev = bt_audio_dev()
                 bt_active = bool(_BT_AUDIO_DEV)
+                pan = bt_pan_status()
                 print(f"{DIM}Audio output: {'Bluetooth' if bt_active else 'WM8960 speaker'}{RESET}")
+                if pan["connected"]:
+                    print(f"{DIM}BT tethering: active — IP {pan['ip']} via {pan['mac']}{RESET}")
                 if not devices:
                     print(f"{DIM}No paired devices. Use /bt scan to find headphones.{RESET}\n")
                 else:
@@ -6908,10 +7354,12 @@ def main():
                         dot = f"{CYAN}●{RESET}" if connected else f"{DIM}○{RESET}"
                         status = f"{CYAN} ♪ audio{RESET}" if (connected and _BT_AUDIO_DEV and mac in _BT_AUDIO_DEV) else (f"{DIM} connected{RESET}" if connected else "")
                         print(f"  {i}) {dot} {name}  {DIM}{mac}{RESET}{status}")
-                    print(f"\n{DIM}  /bt scan         scan for new devices")
-                    print(f"  /bt pair <N>     pair a scanned device")
-                    print(f"  /bt <number>     connect + route audio")
-                    print(f"  /bt off          disconnect all{RESET}\n")
+                    print(f"\n{DIM}  /bt scan           scan for new devices")
+                    print(f"  /bt pair <N>       pair a scanned device")
+                    print(f"  /bt <number>       connect + route audio")
+                    print(f"  /bt tether [N]     share phone internet via BT PAN")
+                    print(f"  /bt tether off     stop tethering")
+                    print(f"  /bt off            disconnect all{RESET}\n")
 
             elif sub == "off":
                 for mac, name, connected in devices:
@@ -6933,7 +7381,7 @@ def main():
                 else:
                     print(f"{DIM}No device #{sub}.{RESET}\n")
             else:
-                print(f"{DIM}Usage: /bt  /bt scan  /bt pair <N>  /bt <N>  /bt off{RESET}\n")
+                print(f"{DIM}Usage: /bt  /bt scan  /bt pair <N>  /bt <N>  /bt tether [N]  /bt tether off  /bt off{RESET}\n")
             continue
 
         batt_level, batt_charging = get_battery()
@@ -7040,6 +7488,39 @@ def main():
                 if connected:
                     bt_disconnect(mac)
             reply = "Disconnected. Audio back to the speaker."
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
+            continue
+
+        if bt_intent == "tether_on":
+            pan = bt_pan_status()
+            if pan["connected"]:
+                reply = f"Bluetooth tethering is already active (IP {pan['ip']})."
+            else:
+                devices = bt_list()
+                phone_mac = _BT_PAN_MAC or _BT_PHONE_MAC or next(
+                    (m for m, n, _ in devices if not _BT_AUDIO_DEV or m not in _BT_AUDIO_DEV),
+                    devices[0][0] if devices else "",
+                )
+                if not phone_mac:
+                    reply = "No paired phone found. Pair your phone first."
+                else:
+                    print(f"{DIM}[bt] Connecting tethering to {phone_mac}... (enable BT Tethering on phone){RESET}", flush=True)
+                    ok, msg = bt_pan_connect(phone_mac)
+                    reply = f"Tethering active — {msg.split('—')[-1].strip()}" if ok else f"Tethering failed: {msg.split('—')[-1].strip()}"
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
+            if tts_on:
+                speak_terminal(reply)
+            continue
+
+        if bt_intent == "tether_off":
+            pan = bt_pan_status()
+            if pan["connected"]:
+                bt_pan_disconnect()
+                reply = "Bluetooth tethering disconnected."
+            else:
+                reply = "Tethering isn't active."
             print(f"\n{CYAN}{BOLD}Zeev:{RESET} {reply}\n")
             if tts_on:
                 speak_terminal(reply)

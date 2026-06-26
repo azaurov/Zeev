@@ -42,7 +42,8 @@ func FindPiper() (bin, model string, ok bool) {
 		"/usr/local/bin/piper",
 	}
 	for _, b := range candidates {
-		if _, err := os.Stat(b); err == nil {
+		info, err := os.Stat(b)
+		if err == nil && !info.IsDir() {
 			bin = b
 			break
 		}

@@ -1,6 +1,9 @@
 # llama.cpp binaries and shared libs
 zeev/bin/
 
+# Go audio daemon compiled binaries
+zeev-audio/bin/
+
 # Model weights
 zeev/models/
 

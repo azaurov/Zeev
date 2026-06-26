@@ -1,0 +1,21 @@
+[Unit]
+Description=Zeev audio daemon (Go)
+After=sound.target bluetooth.target network.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=ragnar
+ExecStart=/home/ragnar/zeev-audio/zeev-audio --socket /tmp/zeev-audio.sock
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zeev-audio
+
+# Give Piper time to load the ONNX model before zeev.py starts.
+# zeev.py's AudioClient retries the socket connection for up to 30s.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

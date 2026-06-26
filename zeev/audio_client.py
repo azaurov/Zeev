@@ -1,0 +1,213 @@
+"""
+AudioClient — thin Python adapter over the zeev-audio Go daemon.
+
+Connects to the Unix socket at SOCKET_PATH. All methods fall back to
+returning a sentinel value (never raise) when the daemon is unavailable,
+so zeev.py can degrade gracefully.
+
+Protocol: NDJSON over Unix domain socket.
+  Python → Go:  {"id": "<uuid>", "cmd": "<name>", ...fields...}\n
+  Go → Python:  {"id": "<uuid>", "ok": true|false, ...fields...}\n
+"""
+
+import base64
+import json
+import socket
+import threading
+import uuid
+import logging
+
+log = logging.getLogger(__name__)
+
+SOCKET_PATH = "/tmp/zeev-audio.sock"
+
+
+class _Disconnected(Exception):
+    pass
+
+
+class AudioClient:
+    """
+    Thread-safe client for the zeev-audio Go daemon.
+
+    If the daemon socket is missing at construction time, all methods
+    return sensible defaults and log a warning — zeev.py falls back to
+    its built-in Python implementations.
+    """
+
+    SOCKET = SOCKET_PATH
+
+    def __init__(self, socket_path: str = SOCKET_PATH):
+        self.SOCKET = socket_path
+        self._sock: socket.socket | None = None
+        self._reader = None
+        self._lock = threading.Lock()
+        self._available = False
+        self._connect()
+
+    # ── connection management ────────────────────────────────────────────────
+
+    def _connect(self) -> bool:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(self.SOCKET)
+            self._sock = s
+            self._reader = s.makefile("r")
+            self._available = True
+            log.debug("audio_client: connected to %s", self.SOCKET)
+            return True
+        except (FileNotFoundError, ConnectionRefusedError) as e:
+            log.warning("audio_client: daemon not available (%s) — using Python fallbacks", e)
+            self._available = False
+            return False
+
+    def _reconnect(self) -> bool:
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
+        self._reader = None
+        self._available = False
+        return self._connect()
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    # ── low-level call ───────────────────────────────────────────────────────
+
+    def _call(self, **kwargs) -> dict:
+        """
+        Send one request and return the parsed response.
+        Reconnects once on broken pipe; raises _Disconnected if still broken.
+        """
+        if not self._available:
+            raise _Disconnected("daemon not available")
+
+        kwargs["id"] = str(uuid.uuid4())
+        payload = (json.dumps(kwargs) + "\n").encode()
+
+        for attempt in range(2):
+            try:
+                with self._lock:
+                    self._sock.sendall(payload)
+                    line = self._reader.readline()
+                if not line:
+                    raise _Disconnected("daemon closed connection")
+                return json.loads(line)
+            except (BrokenPipeError, OSError, _Disconnected):
+                if attempt == 0:
+                    if not self._reconnect():
+                        raise _Disconnected("daemon unavailable after reconnect")
+                else:
+                    self._available = False
+                    raise _Disconnected("daemon unavailable")
+
+    def _call_safe(self, default, **kwargs) -> dict:
+        """Like _call but returns default on any error."""
+        try:
+            return self._call(**kwargs)
+        except Exception as e:
+            log.debug("audio_client: %s -> %s", kwargs.get("cmd"), e)
+            return default
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def audio_dev(self) -> str:
+        """Return the active ALSA PCM string (BT or wired speaker)."""
+        r = self._call_safe({"dev": "plughw:wm8960soundcard,0"}, cmd="audio_dev")
+        return r.get("dev", "plughw:wm8960soundcard,0")
+
+    def speak(self, text: str, lang: str = "en", dev: str = "") -> None:
+        """Fire-and-forget TTS — returns immediately (daemon synthesises async)."""
+        self._call_safe({}, cmd="speak", text=text, lang=lang, dev=dev)
+
+    def speak_sync(self, text: str, lang: str = "en", dev: str = "") -> None:
+        """Blocking TTS — waits for audio to finish before returning."""
+        self._call_safe({}, cmd="speak_sync", text=text, lang=lang, dev=dev)
+
+    def get_volume(self) -> int:
+        """Return current system volume 0–100."""
+        r = self._call_safe({"level": 87}, cmd="vol_get")
+        return int(r.get("level", 87))
+
+    def set_volume(self, level: int) -> int:
+        """Set system volume 0–100; returns the clamped level."""
+        r = self._call_safe({"level": level}, cmd="vol_set", level=int(level))
+        return int(r.get("level", level))
+
+    def bt_detect(self) -> dict:
+        """Query bluealsa-aplay at daemon startup; returns BT status dict."""
+        r = self._call_safe({}, cmd="bt_detect")
+        return {
+            "connected": bool(r.get("connected")),
+            "dev": r.get("bt_dev", ""),
+            "rate": int(r.get("bt_rate", 0)),
+            "channels": int(r.get("bt_channels", 0)),
+        }
+
+    def bt_verify(self) -> dict:
+        """Re-check BT connection on each TTS call to detect disconnects."""
+        r = self._call_safe({}, cmd="bt_verify")
+        return {
+            "connected": bool(r.get("connected")),
+            "dev": r.get("bt_dev", ""),
+            "rate": int(r.get("bt_rate", 0)),
+            "channels": int(r.get("bt_channels", 0)),
+        }
+
+    def bt_scan(self, timeout: int = 10) -> list[dict]:
+        """Scan for BT devices; returns list of {"mac": .., "name": ..}."""
+        r = self._call_safe({"devices": []}, cmd="bt_scan", timeout=timeout)
+        return r.get("devices", [])
+
+    def bt_connect(self, mac: str) -> dict:
+        """Connect to a BT device by MAC; returns bt_verify-style dict."""
+        r = self._call_safe({"ok": False, "error": "daemon unavailable"},
+                            cmd="bt_connect", mac=mac)
+        return r
+
+    def bt_disconnect(self, mac: str) -> bool:
+        """Disconnect a BT device; returns True on success."""
+        r = self._call_safe({"ok": False}, cmd="bt_disconnect", mac=mac)
+        return bool(r.get("ok"))
+
+    def bt_pair(self, mac: str) -> bool:
+        """Pair and trust a BT device; returns True on success."""
+        r = self._call_safe({"ok": False}, cmd="bt_pair", mac=mac)
+        return bool(r.get("ok"))
+
+    def play(self, query: str) -> str:
+        """Start YouTube playback; returns the resolved title."""
+        r = self._call_safe({"title": ""}, cmd="play", query=query)
+        return r.get("title", "")
+
+    def stop(self) -> None:
+        """Stop any in-progress music playback."""
+        self._call_safe({}, cmd="stop")
+
+    def record(self, max_seconds: float = 8.0, vad: bool = True) -> bytes:
+        """Record audio; returns WAV bytes."""
+        r = self._call_safe({"wav_b64": ""}, cmd="record",
+                            max_seconds=max_seconds, vad=vad)
+        b64 = r.get("wav_b64", "")
+        if not b64:
+            return b""
+        return base64.b64decode(b64)
+
+    def health(self) -> str:
+        """Return a one-line health summary string."""
+        r = self._call_safe({"title": "unavailable"}, cmd="health")
+        return r.get("title", "unavailable")
+
+    def close(self) -> None:
+        """Close the socket connection."""
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
+        self._available = False

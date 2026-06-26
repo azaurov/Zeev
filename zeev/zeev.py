@@ -144,6 +144,28 @@ WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep na
 WAKE_WORD_THRESHOLD = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
 WAKE_WORD_COOLDOWN  = float(os.environ.get("WAKE_WORD_COOLDOWN",  "1.5"))
 
+# ---------------------------------------------------------------------------
+# Go audio daemon integration
+# ---------------------------------------------------------------------------
+# _audio is an AudioClient instance when the daemon is running, or None when
+# the daemon socket is absent (Python fallbacks are used automatically).
+# Populated by _init_audio() called from every startup path.
+_audio = None   # type: AudioClient | None
+
+def _init_audio():
+    """Try to connect to the zeev-audio Go daemon; fall back silently."""
+    global _audio
+    try:
+        from audio_client import AudioClient
+        client = AudioClient()
+        if client.available:
+            _audio = client
+            print("[audio] connected to zeev-audio daemon")
+        else:
+            print("[audio] daemon not running — using Python audio fallbacks")
+    except ImportError:
+        pass  # audio_client.py not yet on PYTHONPATH; pure Python mode
+
 # Learning state — populated by init_learning() at startup
 USER_FACTS       = []   # persistent facts about the user
 USER_NOTES       = []   # persistent notes saved by the user
@@ -772,6 +794,10 @@ YT_COOKIES = BASE_DIR / "data" / "yt-cookies.txt"
 def music_stop():
     """Kill the active music playback process, if any."""
     global _MUSIC_PROC
+    if _audio and _audio.available:
+        _audio.stop()
+        return True
+    # Python fallback
     if _MUSIC_PROC and _MUSIC_PROC.poll() is None:
         _MUSIC_PROC.terminate()
         _MUSIC_PROC = None
@@ -781,17 +807,20 @@ def music_stop():
 
 
 def set_volume(level):
-    """Set system volume (0–100). Tries amixer Master, then wm8960 Speaker."""
+    """Set system volume (0–100). Delegates to daemon when available."""
     global _VOLUME
     level = max(0, min(100, int(level)))
+    if _audio and _audio.available:
+        level = _audio.set_volume(level)
+        _VOLUME = level
+        return level
+    # Python fallback: amixer Master, then wm8960 Speaker
     _VOLUME = level
-    # Standard ALSA Master control (works on most Pi audio configs)
     r = subprocess.run(
         ["amixer", "sset", "Master", f"{level}%"],
         capture_output=True,
     )
     if r.returncode != 0:
-        # WM8960 HAT: Speaker range is 0–127
         raw = round(level / 100 * 127)
         subprocess.run(
             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(raw)],
@@ -801,6 +830,8 @@ def set_volume(level):
 
 
 def get_volume():
+    if _audio and _audio.available:
+        return _audio.get_volume()
     return _VOLUME
 
 
@@ -809,6 +840,10 @@ def youtube_play(query, adev=None):
     global _MUSIC_PROC
 
     music_stop()  # stop any current track
+
+    if _audio and _audio.available:
+        title = _audio.play(query)
+        return title or query, None
 
     if not shutil.which("yt-dlp"):
         return None, "yt-dlp not installed (sudo apt install yt-dlp)"
@@ -1225,6 +1260,13 @@ def bt_audio_dev() -> str:
 def bt_verify_connected():
     """Clear _BT_AUDIO_DEV if the headphones are no longer listed by BlueALSA (physical disconnect)."""
     global _BT_AUDIO_DEV, _BT_RATE, _BT_CHANNELS
+    if _audio and _audio.available:
+        status = _audio.bt_verify()
+        _BT_AUDIO_DEV = status.get("dev", "")
+        _BT_RATE = status.get("rate", 44100) or 44100
+        _BT_CHANNELS = status.get("channels", 1) or 1
+        return
+    # Python fallback
     if not _BT_AUDIO_DEV:
         return
     try:
@@ -1244,6 +1286,15 @@ def bt_verify_connected():
 def bt_detect_connected():
     """At startup, check if a paired BT device is already connected via BlueALSA and set _BT_AUDIO_DEV."""
     global _BT_AUDIO_DEV, _BT_CHANNELS, _BT_RATE
+    if _audio and _audio.available:
+        status = _audio.bt_detect()
+        _BT_AUDIO_DEV = status.get("dev", "")
+        _BT_RATE = status.get("rate", 44100) or 44100
+        _BT_CHANNELS = status.get("channels", 1) or 1
+        if _BT_AUDIO_DEV:
+            print(f"[bt] daemon: headphones at {_BT_AUDIO_DEV} ({_BT_RATE}Hz {_BT_CHANNELS}ch)")
+        return
+    # Python fallback
     import time as _t
     for attempt in range(2):  # retry up to 2×1s = 2s for bluealsa to register (headphones are optional at boot)
         try:
@@ -1302,6 +1353,10 @@ _MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$')
 
 def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
     """Scan for nearby Bluetooth devices. Returns (mac, name) for named devices only."""
+    if _audio and _audio.available:
+        results = _audio.bt_scan(timeout=timeout)
+        return [(d["mac"], d["name"]) for d in results if d.get("name")]
+    # Python fallback
     found: dict[str, str] = {}
     try:
         # Use OS-level timeout to avoid readline() blocking on partial ANSI lines
@@ -1357,6 +1412,9 @@ def _bt_match_device(text: str) -> tuple[str, str] | None:
 
 def bt_pair(mac: str) -> bool:
     """Pair and trust a Bluetooth device by MAC."""
+    if _audio and _audio.available:
+        return _audio.bt_pair(mac)
+    # Python fallback
     try:
         proc = subprocess.Popen(
             ["bluetoothctl"],
@@ -1372,6 +1430,15 @@ def bt_pair(mac: str) -> bool:
 
 def bt_connect(mac: str) -> bool:
     global _BT_AUDIO_DEV, _BT_RATE, _BT_CHANNELS
+    if _audio and _audio.available:
+        r = _audio.bt_connect(mac)
+        if r.get("ok"):
+            _BT_AUDIO_DEV = r.get("bt_dev", bt_alsa_dev(mac))
+            _BT_RATE = r.get("bt_rate", 44100) or 44100
+            _BT_CHANNELS = r.get("bt_channels", 1) or 1
+            return True
+        return False
+    # Python fallback
     try:
         r = subprocess.run(
             ["bluetoothctl", "connect", mac],
@@ -1379,7 +1446,6 @@ def bt_connect(mac: str) -> bool:
         )
         if r.returncode == 0:
             _BT_AUDIO_DEV = bt_alsa_dev(mac)
-            # Refresh format from bluealsa after connect
             import time as _t; _t.sleep(1)
             bt_detect_connected()
             return True
@@ -1390,6 +1456,11 @@ def bt_connect(mac: str) -> bool:
 
 def bt_disconnect(mac: str) -> None:
     global _BT_AUDIO_DEV
+    if _audio and _audio.available:
+        _audio.bt_disconnect(mac)
+        _BT_AUDIO_DEV = ""
+        return
+    # Python fallback
     try:
         subprocess.run(
             ["bluetoothctl", "disconnect", mac],
@@ -4631,6 +4702,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     zeev_cleanup()   # clear any crash leftovers from a previous run
+    _init_audio()
     init_learning()
     init_camera()
     init_thermal()
@@ -5475,6 +5547,7 @@ def pick_model(current_locked=None):
 def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
     zeev_cleanup()   # clear any crash leftovers from a previous run
+    _init_audio()
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
     try:
         from whisplay import WhisplayBoard
@@ -6822,6 +6895,7 @@ def run_call_mode(number: str, intent: str = "") -> None:
 def main():
     global _SETTINGS_TTS_ON
     zeev_cleanup()   # clear any crash leftovers from a previous run
+    _init_audio()
     init_learning()
 
     import queue as _queue

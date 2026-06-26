@@ -4,19 +4,13 @@
 build:
 	go build -o bin/zeev-audio ./cmd/zeev-audio
 
-# Cross-compile for Pi Zero 2W.
-# NOTE: GOARCH is intentionally left as a variable.
-#   Pi Zero 2W is Cortex-A53 (ARMv8).
-#   - 64-bit Raspberry Pi OS: GOARCH=arm64 (no GOARM needed)
-#   - 32-bit Raspberry Pi OS: GOARCH=arm GOARM=7
-#   Verify with `uname -m` on the Pi before deploying.
-#   Current setting assumes 32-bit OS (GOARM=7). Adjust if 64-bit.
-GOARCH   ?= arm
-GOARM    ?= 7
+# Cross-compile for Pi Zero 2W (64-bit Raspberry Pi OS, Cortex-A53/ARMv8).
+# uname -m = aarch64 → GOARCH=arm64, no GOARM needed.
+GOARCH   ?= arm64
 PI_HOST  ?= ragnar@ragnarok
 
 pi:
-	GOOS=linux GOARCH=$(GOARCH) GOARM=$(GOARM) \
+	GOOS=linux GOARCH=$(GOARCH) \
 		go build -o bin/zeev-audio-pi ./cmd/zeev-audio
 	@echo "Binary: bin/zeev-audio-pi"
 	@echo "Deploy: scp bin/zeev-audio-pi $(PI_HOST):~/zeev-audio/zeev-audio"

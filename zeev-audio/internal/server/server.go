@@ -46,19 +46,28 @@ func New(socketPath string) (*Server, error) {
 
 // Init sets up Piper, detects BT, starts keepalive. Called before Run().
 func (s *Server) Init() {
-	// Try to find and start Piper.
-	bin, model, ok := piper.FindPiper()
-	if ok {
-		s.state.PiperBin = bin
-		s.state.PiperModel = model
-		p := piper.New(bin, model)
-		if err := p.Start(); err != nil {
-			log.Printf("piper: startup failed: %v (will retry on first speak)", err)
-		} else {
-			s.state.PiperProc = p
-		}
+	// Remote Piper TTS on bosgame takes priority over local Piper process.
+	// Set REMOTE_PIPER_URL (and optionally REMOTE_PIPER_KEY) in the systemd unit.
+	s.state.RemotePiperURL = os.Getenv("REMOTE_PIPER_URL")
+	s.state.RemotePiperKey = os.Getenv("REMOTE_PIPER_KEY")
+
+	if s.state.RemotePiperURL != "" {
+		log.Printf("piper: using remote TTS at %s", s.state.RemotePiperURL)
 	} else {
-		log.Println("piper: not found — espeak-ng fallback only")
+		// Try to find and start local Piper.
+		bin, model, ok := piper.FindPiper()
+		if ok {
+			s.state.PiperBin = bin
+			s.state.PiperModel = model
+			p := piper.New(bin, model)
+			if err := p.Start(); err != nil {
+				log.Printf("piper: startup failed: %v (will retry on first speak)", err)
+			} else {
+				s.state.PiperProc = p
+			}
+		} else {
+			log.Println("piper: not found — espeak-ng fallback only")
+		}
 	}
 
 	// Detect BT headphones (optional at boot; retry 2×).

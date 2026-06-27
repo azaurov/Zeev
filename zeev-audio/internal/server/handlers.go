@@ -1,10 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os/exec"
+	"strings"
 
 	"github.com/azaurov/zeev-audio/internal/audio"
 	"github.com/azaurov/zeev-audio/internal/bt"
@@ -17,9 +21,11 @@ import (
 
 // State shared across handlers, set once at startup.
 type State struct {
-	PiperProc *piper.Proc
-	PiperBin  string
-	PiperModel string
+	PiperProc      *piper.Proc
+	PiperBin       string
+	PiperModel     string
+	RemotePiperURL string // e.g. https://ollama.sogdiana-gematria.net/piper/tts
+	RemotePiperKey string // X-Zeev-Key value
 }
 
 // handle dispatches a single request and returns the response.
@@ -231,20 +237,55 @@ func (s *Server) handle(req proto.Request) proto.Response {
 	return base
 }
 
-func (s *Server) speakPiper(text, dev string, sync bool) error {
-	if s.state.PiperProc == nil {
-		return fmt.Errorf("no piper proc")
+// remotePiperSynth calls the bosgame Piper TTS HTTP API and returns raw PCM
+// (WAV header stripped — always 22050 Hz mono S16_LE from Piper).
+func (s *Server) remotePiperSynth(text string) ([]byte, error) {
+	body := []byte(`{"text":` + `"` + strings.ReplaceAll(text, `"`, `\"`) + `"` + `}`)
+	req, err := http.NewRequest("POST", s.state.RemotePiperURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.state.RemotePiperKey != "" {
+		req.Header.Set("X-Zeev-Key", s.state.RemotePiperKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("remote piper: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("remote piper: HTTP %d", resp.StatusCode)
+	}
+	wav, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("remote piper read: %w", err)
+	}
+	// Strip 44-byte WAV header to get raw PCM.
+	if len(wav) < 44 {
+		return nil, fmt.Errorf("remote piper: response too short (%d bytes)", len(wav))
+	}
+	return wav[44:], nil
+}
+
+func (s *Server) speakPiper(text, dev string, sync bool) error {
 	btStatus := bt.GetStatus()
 	var pcm []byte
 	var err error
 
-	if btStatus.Connected {
-		// One-shot for BT: capture full multi-sentence output before playback.
-		pcm, err = piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
+	if s.state.RemotePiperURL != "" {
+		// Remote synthesis on bosgame — frees Pi RAM and CPU.
+		pcm, err = s.remotePiperSynth(text)
+	} else if s.state.PiperProc != nil {
+		if btStatus.Connected {
+			// One-shot for BT: capture full multi-sentence output before playback.
+			pcm, err = piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
+		} else {
+			// Persistent process for wired speaker.
+			pcm, err = s.state.PiperProc.Synthesize(text)
+		}
 	} else {
-		// Persistent process for wired speaker.
-		pcm, err = s.state.PiperProc.Synthesize(text)
+		return fmt.Errorf("no piper available (local proc nil, no remote URL)")
 	}
 	if err != nil {
 		return err
@@ -276,15 +317,24 @@ func resampleFFmpeg(pcm []byte, inRate, inCh, outRate, outCh int) ([]byte, error
 	return cmd.Output()
 }
 
-// speakSCO synthesizes text via Piper one-shot, resamples to scoRate, and
-// plays on the SCO ALSA device.  Always one-shot (need full audio before aplay).
+// speakSCO synthesizes text via Piper (remote or local one-shot), resamples to
+// scoRate, and plays on the SCO ALSA device.
 func (s *Server) speakSCO(text, scoDev string, scoRate int) error {
-	if s.state.PiperBin == "" || s.state.PiperModel == "" {
-		return fmt.Errorf("piper not found")
-	}
-	pcm, err := piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
-	if err != nil {
-		return fmt.Errorf("piper: %w", err)
+	var pcm []byte
+	var err error
+	if s.state.RemotePiperURL != "" {
+		pcm, err = s.remotePiperSynth(text)
+		if err != nil {
+			return fmt.Errorf("remote piper SCO: %w", err)
+		}
+	} else {
+		if s.state.PiperBin == "" || s.state.PiperModel == "" {
+			return fmt.Errorf("piper not found")
+		}
+		pcm, err = piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
+		if err != nil {
+			return fmt.Errorf("piper: %w", err)
+		}
 	}
 	if len(pcm) == 0 {
 		return fmt.Errorf("piper returned empty audio")

@@ -11,7 +11,7 @@ import (
 
 var (
 	volMu  sync.Mutex
-	volume = 87
+	volume = 94
 	// aplayMu serializes all aplay calls so the keepalive goroutine and TTS
 	// cannot open the ALSA device simultaneously (causes broken pipe errors).
 	aplayMu sync.Mutex

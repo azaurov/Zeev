@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/azaurov/zeev-audio/internal/audio"
 	"github.com/azaurov/zeev-audio/internal/bt"
@@ -250,7 +251,8 @@ func (s *Server) remotePiperSynth(text string) (pcm []byte, rate int, err error)
 	if s.state.RemotePiperKey != "" {
 		req.Header.Set("X-Zeev-Key", s.state.RemotePiperKey)
 	}
-	resp, err2 := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 45 * time.Second}
+	resp, err2 := client.Do(req)
 	if err2 != nil {
 		return nil, 0, fmt.Errorf("remote tts: %w", err2)
 	}

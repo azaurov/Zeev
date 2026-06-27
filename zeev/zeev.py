@@ -919,7 +919,7 @@ def youtube_play(query, adev=None):
 
 
 def speak_terminal(text, lang=None):
-    """Speak via Piper (en/es) or espeak-ng (he/fallback) in background."""
+    """Speak via Piper (en) or gTTS (he/es/ru) in background."""
     if not TTS_AVAILABLE:
         return
     lang = lang or detect_lang(text)
@@ -931,6 +931,14 @@ def speak_terminal(text, lang=None):
     _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
     if lang in _GTTS_LANGS and shutil.which("mpg123"):
         _gtts_speak(clean, _GTTS_LANGS[lang], adev=adev)
+    elif _audio and _audio.available:
+        # Delegate English Piper synthesis to the Go daemon (warm process, no reload).
+        threading.Thread(
+            target=_audio.speak_sync,
+            args=(clean,),
+            kwargs={"lang": lang, "dev": adev},
+            daemon=True,
+        ).start()
     elif PIPER_BIN and PIPER_MODELS.get("en"):
         _piper_speak(clean, PIPER_MODELS["en"], adev=adev)
     else:
@@ -6942,7 +6950,8 @@ def main():
     readline.set_history_length(200)
 
     init_tts()
-    _piper_warmup()
+    if not (_audio and _audio.available):
+        _piper_warmup()
     init_camera()
     init_thermal()
     init_mic()

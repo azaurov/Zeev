@@ -3538,8 +3538,9 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
 
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
-        if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused")):
-            print(f"[offline] Groq unreachable, falling back to bosgame Ollama", flush=True)
+        if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused", "rate-limited")):
+            label = "offline" if "rate-limited" not in err else "rate-limited"
+            print(f"[{label}] Groq unavailable, falling back to bosgame Ollama", flush=True)
             resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
             return resp, err, "groq"
         return resp, err, "groq"

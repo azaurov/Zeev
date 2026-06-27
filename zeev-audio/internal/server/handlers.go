@@ -170,7 +170,7 @@ func (s *Server) handle(req proto.Request) proto.Response {
 			if status.Connected {
 				dev = status.Dev
 			} else {
-				dev = "plughw:wm8960soundcard,0"
+				dev = "plughw:wm8960soundcard,0" // recording uses hw directly (dmix is playback-only)
 			}
 		}
 		wav, err := record.Record(dev, req.MaxSeconds, req.VAD, req.Rate)

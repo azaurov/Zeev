@@ -114,9 +114,11 @@ func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) er
 	return waitErr
 }
 
-// DefaultSpeakerDev returns the WM8960 ALSA device string.
+// DefaultSpeakerDev returns the wired speaker ALSA device.
+// Uses "default" (dmix) instead of "plughw:" so the daemon shares the
+// WM8960 with other ALSA clients (mpg123, espeak-ng) without exclusive lock.
 func DefaultSpeakerDev() string {
-	return "plughw:wm8960soundcard,0"
+	return "default"
 }
 
 // ParseBTDev extracts the ALSA device from a bluealsa PCM string of the form

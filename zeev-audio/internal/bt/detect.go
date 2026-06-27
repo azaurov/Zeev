@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azaurov/zeev-audio/internal/audio"
 )
 
 var (
@@ -51,7 +53,7 @@ func AudioDev() string {
 	if d != "" {
 		return d
 	}
-	return "plughw:wm8960soundcard,0"
+	return audio.DefaultSpeakerDev()
 }
 
 var pcmLineRe = regexp.MustCompile(`bluealsa:DEV=([0-9A-F:]+),PROFILE=a2dp`)

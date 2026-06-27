@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Proc struct {
@@ -141,6 +142,19 @@ func (p *Proc) Synthesize(text string) ([]byte, error) {
 	return pcm, nil
 }
 
+// firstChunkTimeout is how long to wait for the first PCM byte from Piper.
+// Covers cold ONNX model load (~20s) and warm synthesis start (~1-2s).
+const firstChunkTimeout = 30 * time.Second
+
+// idleTimeout is how long to wait between PCM bursts before declaring done.
+// Measured inter-sentence gap on warm Pi Zero 2W: ~4.5s; 8s gives 3.5s margin.
+const idleTimeout = 8 * time.Second
+
+type readResult struct {
+	n   int
+	err error
+}
+
 func (p *Proc) synth(text string) ([]byte, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -149,33 +163,52 @@ func (p *Proc) synth(text string) ([]byte, error) {
 	if _, err := fmt.Fprintln(p.stdin, text); err != nil {
 		return nil, fmt.Errorf("piper write: %w", err)
 	}
-	// Piper writes raw PCM; we read until no bytes arrive for idleTimeout.
-	// Because --output-raw doesn't delimit sentences, we use a simple
-	// read-all-available approach: drain stdout with a short deadline.
-	// The process stays alive; we close nothing.
+
+	// Read PCM with goroutine-based timeouts:
+	//   - firstChunkTimeout (30s) for the initial burst
+	//   - idleTimeout (8s) between subsequent bursts
+	// This is more reliable than the short-read heuristic on a loaded Pi Zero 2W
+	// where reads often return < bufSize mid-stream due to OS scheduling.
 	var buf bytes.Buffer
 	tmp := make([]byte, 4096)
+	gotFirst := false
+	deadline := time.Now().Add(firstChunkTimeout)
+
 	for {
-		n, err := p.stdout.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
+		ch := make(chan readResult, 1)
+		go func() {
+			n, err := p.stdout.Read(tmp)
+			ch <- readResult{n, err}
+		}()
+
+		wait := idleTimeout
+		if !gotFirst {
+			wait = time.Until(deadline)
+			if wait <= 0 {
+				return nil, fmt.Errorf("piper: first chunk timeout after %v", firstChunkTimeout)
 			}
-			return nil, fmt.Errorf("piper read: %w", err)
 		}
-		// If the read returned fewer bytes than the buffer, we're likely
-		// at the end of this sentence's output — but we can't know for sure
-		// without a sentinel. Piper outputs a newline after each sentence
-		// when using --output-raw + JSON output; without JSON we just read
-		// until idle. This is handled via the one-shot path for BT.
-		if n < len(tmp) {
-			break
+
+		select {
+		case r := <-ch:
+			if r.n > 0 {
+				buf.Write(tmp[:r.n])
+				gotFirst = true
+			}
+			if r.err == io.EOF {
+				return buf.Bytes(), nil
+			}
+			if r.err != nil {
+				return nil, fmt.Errorf("piper read: %w", r.err)
+			}
+		case <-time.After(wait):
+			if !gotFirst {
+				return nil, fmt.Errorf("piper: first chunk timeout after %v", firstChunkTimeout)
+			}
+			// idleTimeout elapsed after receiving data — synthesis complete.
+			return buf.Bytes(), nil
 		}
 	}
-	return buf.Bytes(), nil
 }
 
 // SynthesizeOneShot runs a fresh Piper subprocess for one text block and

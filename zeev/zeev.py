@@ -6583,16 +6583,16 @@ def run_device_mode():
         short    = _MODEL_SHORT.get(model_id, "?")
 
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
-        sys_prompt   = _build_system_prompt(transcript)
+        sys_prompt   = _build_system_prompt(transcript) + "\n\nKeep replies to 1-3 sentences maximum — this is a voice interface. Be direct and meaningful."
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
         if needs_parsha_reading(transcript):
             tok_limit = 1600  # room to recite several chapters
         elif needs_torah(transcript):
-            tok_limit = 1200
-        elif model_id in (MODELS["3"][0], MODELS["2"][0]):
-            tok_limit = 1200
-        else:
             tok_limit = 600
+        elif model_id in (MODELS["3"][0], MODELS["2"][0]):
+            tok_limit = 400
+        else:
+            tok_limit = 300
         resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
@@ -6603,7 +6603,7 @@ def run_device_mode():
             print(f"[llm] 429 on {short} — retrying with 8B", flush=True)
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
-            tok_limit = 600
+            tok_limit = 300
             resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 

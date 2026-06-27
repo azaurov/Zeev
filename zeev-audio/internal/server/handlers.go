@@ -275,25 +275,73 @@ func (s *Server) remotePiperSynth(text string) (pcm []byte, rate int, err error)
 	return wav[44:], sr, nil
 }
 
+// splitSentences splits text at ". "/"! "/"? " boundaries for streaming TTS.
+// Sentences shorter than 10 chars are merged with the next chunk to avoid
+// false splits on abbreviations like "Mr." or "e.g."
+func splitSentences(text string) []string {
+	if len(text) < 100 {
+		return []string{text}
+	}
+	var out []string
+	start := 0
+	for i := 1; i < len(text); i++ {
+		c := text[i-1]
+		if (c == '.' || c == '!' || c == '?') && text[i] == ' ' {
+			s := strings.TrimSpace(text[start:i])
+			if len(s) >= 10 {
+				out = append(out, s)
+				start = i + 1
+			}
+		}
+	}
+	if s := strings.TrimSpace(text[start:]); s != "" {
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return []string{text}
+	}
+	return out
+}
+
 func (s *Server) speakPiper(text, dev string, sync bool) error {
 	btStatus := bt.GetStatus()
+
+	if s.state.RemotePiperURL != "" {
+		// Split into sentences so each remote synthesis call stays under 10s.
+		// Streams audio to the speaker sentence-by-sentence.
+		for _, sent := range splitSentences(text) {
+			pcm, ttsRate, err := s.remotePiperSynth(sent)
+			if err != nil {
+				return err
+			}
+			if len(pcm) == 0 {
+				continue
+			}
+			if btStatus.Connected {
+				resampled, err := resampleFFmpeg(pcm, ttsRate, 1, btStatus.Rate, btStatus.Channels)
+				if err != nil {
+					return fmt.Errorf("resample: %w", err)
+				}
+				if err := audio.APlay(resampled, btStatus.Dev, "S16_LE", btStatus.Rate, btStatus.Channels); err != nil {
+					return err
+				}
+			} else {
+				if err := audio.APlay(pcm, dev, "S16_LE", ttsRate, 1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	// Local Piper path.
 	var pcm []byte
 	var err error
-
-	ttsRate := 22050 // default for local Piper
-	if s.state.RemotePiperURL != "" {
-		// Remote synthesis on bosgame — frees Pi RAM and CPU.
-		var sr int
-		pcm, sr, err = s.remotePiperSynth(text)
-		if sr > 0 {
-			ttsRate = sr
-		}
-	} else if s.state.PiperProc != nil {
+	ttsRate := 22050
+	if s.state.PiperProc != nil {
 		if btStatus.Connected {
-			// One-shot for BT: capture full multi-sentence output before playback.
 			pcm, err = piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
 		} else {
-			// Persistent process for wired speaker.
 			pcm, err = s.state.PiperProc.Synthesize(text)
 		}
 	} else {
@@ -305,8 +353,6 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 	if len(pcm) == 0 {
 		return fmt.Errorf("tts returned empty audio")
 	}
-
-	// Resample for BT if rate differs from TTS output rate.
 	if btStatus.Connected {
 		pcm, err = resampleFFmpeg(pcm, ttsRate, 1, btStatus.Rate, btStatus.Channels)
 		if err != nil {

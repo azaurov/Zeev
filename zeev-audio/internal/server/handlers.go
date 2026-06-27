@@ -237,35 +237,40 @@ func (s *Server) handle(req proto.Request) proto.Response {
 	return base
 }
 
-// remotePiperSynth calls the bosgame Piper TTS HTTP API and returns raw PCM
-// (WAV header stripped — always 22050 Hz mono S16_LE from Piper).
-func (s *Server) remotePiperSynth(text string) ([]byte, error) {
+// remotePiperSynth calls the bosgame TTS HTTP API and returns raw PCM plus
+// the sample rate read from the WAV header (supports both 22050Hz Piper and
+// 24000Hz Kokoro without any hardcoded assumption).
+func (s *Server) remotePiperSynth(text string) (pcm []byte, rate int, err error) {
 	body := []byte(`{"text":` + `"` + strings.ReplaceAll(text, `"`, `\"`) + `"` + `}`)
-	req, err := http.NewRequest("POST", s.state.RemotePiperURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	req, err2 := http.NewRequest("POST", s.state.RemotePiperURL, bytes.NewReader(body))
+	if err2 != nil {
+		return nil, 0, err2
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.state.RemotePiperKey != "" {
 		req.Header.Set("X-Zeev-Key", s.state.RemotePiperKey)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("remote piper: %w", err)
+	resp, err2 := http.DefaultClient.Do(req)
+	if err2 != nil {
+		return nil, 0, fmt.Errorf("remote tts: %w", err2)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("remote piper: HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("remote tts: HTTP %d", resp.StatusCode)
 	}
-	wav, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("remote piper read: %w", err)
+	wav, err2 := io.ReadAll(resp.Body)
+	if err2 != nil {
+		return nil, 0, fmt.Errorf("remote tts read: %w", err2)
 	}
-	// Strip 44-byte WAV header to get raw PCM.
 	if len(wav) < 44 {
-		return nil, fmt.Errorf("remote piper: response too short (%d bytes)", len(wav))
+		return nil, 0, fmt.Errorf("remote tts: response too short (%d bytes)", len(wav))
 	}
-	return wav[44:], nil
+	// Parse sample rate from WAV header bytes 24-27 (little-endian uint32).
+	sr := int(uint32(wav[24]) | uint32(wav[25])<<8 | uint32(wav[26])<<16 | uint32(wav[27])<<24)
+	if sr <= 0 {
+		sr = 22050 // safe default
+	}
+	return wav[44:], sr, nil
 }
 
 func (s *Server) speakPiper(text, dev string, sync bool) error {
@@ -273,9 +278,14 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 	var pcm []byte
 	var err error
 
+	ttsRate := 22050 // default for local Piper
 	if s.state.RemotePiperURL != "" {
 		// Remote synthesis on bosgame — frees Pi RAM and CPU.
-		pcm, err = s.remotePiperSynth(text)
+		var sr int
+		pcm, sr, err = s.remotePiperSynth(text)
+		if sr > 0 {
+			ttsRate = sr
+		}
 	} else if s.state.PiperProc != nil {
 		if btStatus.Connected {
 			// One-shot for BT: capture full multi-sentence output before playback.
@@ -285,24 +295,24 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 			pcm, err = s.state.PiperProc.Synthesize(text)
 		}
 	} else {
-		return fmt.Errorf("no piper available (local proc nil, no remote URL)")
+		return fmt.Errorf("no tts available (local proc nil, no remote URL)")
 	}
 	if err != nil {
 		return err
 	}
 	if len(pcm) == 0 {
-		return fmt.Errorf("piper returned empty audio")
+		return fmt.Errorf("tts returned empty audio")
 	}
 
-	// Resample for BT if rate differs from Piper's 22050Hz mono.
+	// Resample for BT if rate differs from TTS output rate.
 	if btStatus.Connected {
-		pcm, err = resampleFFmpeg(pcm, 22050, 1, btStatus.Rate, btStatus.Channels)
+		pcm, err = resampleFFmpeg(pcm, ttsRate, 1, btStatus.Rate, btStatus.Channels)
 		if err != nil {
 			return fmt.Errorf("resample: %w", err)
 		}
 		return audio.APlay(pcm, btStatus.Dev, "S16_LE", btStatus.Rate, btStatus.Channels)
 	}
-	return audio.APlay(pcm, dev, "S16_LE", 22050, 1)
+	return audio.APlay(pcm, dev, "S16_LE", ttsRate, 1)
 }
 
 // resampleFFmpeg resamples raw S16_LE PCM via an inline ffmpeg pipeline.
@@ -322,10 +332,15 @@ func resampleFFmpeg(pcm []byte, inRate, inCh, outRate, outCh int) ([]byte, error
 func (s *Server) speakSCO(text, scoDev string, scoRate int) error {
 	var pcm []byte
 	var err error
+	ttsRate := 22050
 	if s.state.RemotePiperURL != "" {
-		pcm, err = s.remotePiperSynth(text)
+		var sr int
+		pcm, sr, err = s.remotePiperSynth(text)
 		if err != nil {
-			return fmt.Errorf("remote piper SCO: %w", err)
+			return fmt.Errorf("remote tts SCO: %w", err)
+		}
+		if sr > 0 {
+			ttsRate = sr
 		}
 	} else {
 		if s.state.PiperBin == "" || s.state.PiperModel == "" {
@@ -337,11 +352,11 @@ func (s *Server) speakSCO(text, scoDev string, scoRate int) error {
 		}
 	}
 	if len(pcm) == 0 {
-		return fmt.Errorf("piper returned empty audio")
+		return fmt.Errorf("tts returned empty audio")
 	}
-	// Piper outputs 22050 Hz mono S16LE; resample to SCO rate (8000 or 16000 Hz).
-	if scoRate != 22050 {
-		pcm, err = resampleFFmpeg(pcm, 22050, 1, scoRate, 1)
+	// Resample from TTS rate to SCO rate if needed.
+	if scoRate != ttsRate {
+		pcm, err = resampleFFmpeg(pcm, ttsRate, 1, scoRate, 1)
 		if err != nil {
 			return fmt.Errorf("resample to %dHz: %w", scoRate, err)
 		}

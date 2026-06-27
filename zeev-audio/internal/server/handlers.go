@@ -45,7 +45,7 @@ func (s *Server) handle(req proto.Request) proto.Response {
 			dev = bt.AudioDev()
 		}
 		var err error
-		if s.state.PiperProc != nil && (req.Lang == "" || req.Lang == "en") {
+		if (s.state.RemotePiperURL != "" || s.state.PiperProc != nil) && (req.Lang == "" || req.Lang == "en") {
 			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync")
 		} else {
 			err = fmt.Errorf("piper not available; use espeak-ng fallback")

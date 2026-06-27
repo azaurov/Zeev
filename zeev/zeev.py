@@ -254,6 +254,15 @@ _CAMERA_RE = re.compile(
     r"|\bcan you see (anything|something|what'?s|me)\b",
     re.IGNORECASE,
 )
+_VOICE_COACH_RE = re.compile(
+    r"\b(voice\s+(training|coach|coaching|practice|exercise|lesson|feedback|warm.?up)|"
+    r"coach\s+(my|me on)\s+(voice|speech|speaking)|"
+    r"help\s+(me\s+)?(with\s+)?(my\s+)?(voice|speaking|speech|pronunciation|diction)|"
+    r"(practice|improve|work on)\s+(my\s+)?(voice|speech|speaking|diction|articulation)|"
+    r"(give|provide)\s+.*\bfeedback\b.*\b(voice|speech|speaking)\b|"
+    r"\b(speak|speaking)\s+(training|practice|coach))\b",
+    re.IGNORECASE,
+)
 _BT_CALL_RE = re.compile(
     r"\b(call|phone|dial|ring)\b.{0,40}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b|\b\w+\b)",
     re.IGNORECASE,
@@ -1243,6 +1252,24 @@ def stt(wav_bytes):
     if provider == "faster-whisper":
         return _stt_faster_whisper(wav_bytes)
     return groq_stt(wav_bytes)   # fallback
+
+
+def voice_coach_feedback(transcript: str) -> str:
+    """Send a speech transcript to the LLM for voice coaching feedback."""
+    msgs = [
+        {"role": "system", "content": (
+            "You are a voice coach. The user has spoken aloud and their speech was transcribed. "
+            "Analyze the transcript for: clarity, word choice, filler words (um, uh, like, you know), "
+            "sentence structure, confidence, and whether ideas are expressed concisely. "
+            "Give 2-3 specific, actionable pieces of feedback. Be encouraging but honest. "
+            "Keep your response under 80 words — it will be spoken aloud."
+        )},
+        {"role": "user", "content": f"Here is the speech transcript:\n\n{transcript}"},
+    ]
+    reply, err, _ = _llm_post(msgs, MODELS["2"][0], stream=False, max_tokens=200)
+    if err or reply is None or reply.status_code != 200:
+        return "I had trouble analyzing that. Try again?"
+    return reply.json()["choices"][0]["message"]["content"].strip()
 
 
 _BT_AUDIO_DEV: str = ""   # set to bluealsa PCM when headphones are active
@@ -6164,7 +6191,8 @@ def run_device_mode():
 
     # ── Shared LLM + TTS handler ─────────────────────────────────────────────
 
-    _turn_count = [0]   # counts completed turns for auto-memorize trigger
+    _turn_count = [0]           # counts completed turns for auto-memorize trigger
+    _voice_coach_pending = [False]  # True → next transcript is analyzed as voice practice
 
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
@@ -6173,6 +6201,37 @@ def run_device_mode():
 
         print(f"You: {transcript}")
         _set_face("thinking", transcript)
+
+        # ── Voice coach mode ──────────────────────────────────────────────────
+        if _voice_coach_pending[0]:
+            _voice_coach_pending[0] = False
+            print("[voice coach] Analyzing…", flush=True)
+            feedback = voice_coach_feedback(transcript)
+            print(f"Zeev [coach]: {feedback}")
+            session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            session.append({"role": "assistant", "content": feedback})
+            append_message("assistant", feedback)
+            _set_face("speaking", feedback)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(feedback)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        # ── Voice coach intent detection ──────────────────────────────────────
+        if _VOICE_COACH_RE.search(transcript):
+            reply = "Sure! Hold the button and say whatever you'd like to practice. I'll give you feedback when you're done."
+            _voice_coach_pending[0] = True
+            print(f"Zeev: {reply}")
+            session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _set_face("speaking", reply)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
 
         session.append({"role": "user", "content": transcript})
         append_message("user", transcript)
@@ -7698,6 +7757,27 @@ def main():
                     print(f"\n{CYAN}{BOLD}Zeev:{RESET} Couldn't place the call.\n")
             else:
                 print(f"\n{CYAN}{BOLD}Zeev:{RESET} What number should I call?\n")
+            continue
+
+        if user_input.lower() in ("/voice", "/voice-coach") or _VOICE_COACH_RE.search(user_input):
+            adev = bt_audio_dev() if callable(bt_audio_dev) else None
+            rec_dev = adev if adev else "plughw:wm8960soundcard,0"
+            print(f"{DIM}[voice coach] Listening... speak your passage (up to 60s){RESET}", flush=True)
+            speak_terminal("Go ahead, I'm listening. Speak your passage.")
+            wav = _record_utterance(device=rec_dev, max_seconds=60)
+            if not wav:
+                print(f"{DIM}[voice coach] No audio captured.{RESET}\n")
+                continue
+            print(f"{DIM}[voice coach] Transcribing...{RESET}", flush=True)
+            transcript = groq_stt(wav)
+            if not transcript:
+                print(f"{DIM}[voice coach] Couldn't transcribe audio.{RESET}\n")
+                continue
+            print(f"{DIM}[voice coach] You said: {transcript}{RESET}", flush=True)
+            print(f"{DIM}[voice coach] Analyzing...{RESET}", flush=True)
+            feedback = voice_coach_feedback(transcript)
+            print(f"\n{CYAN}{BOLD}Zeev [coach]:{RESET} {feedback}\n")
+            speak_terminal(feedback)
             continue
 
         model_id = locked_model if locked_model else route_model(user_input)

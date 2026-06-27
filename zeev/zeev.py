@@ -7848,10 +7848,10 @@ def main():
         if user_input.lower() in ("/voice", "/voice-coach") or _VOICE_COACH_RE.search(user_input):
             adev = bt_audio_dev() if callable(bt_audio_dev) else None
             rec_dev = adev if adev else "plughw:wm8960soundcard,0"
-            print(f"{DIM}[voice coach] Listening... speak your passage (up to 60s, stop and pause to finish){RESET}", flush=True)
+            print(f"{DIM}[voice coach] Listening... speak your passage (up to 120s, stop and pause to finish){RESET}", flush=True)
             speak_terminal("Go ahead, I'm listening. Speak your passage.")
             transcript = _voice_coach_record_and_transcribe(
-                rec_dev, max_seconds=60,
+                rec_dev, max_seconds=120,
                 status_fn=lambda s: print(f"{DIM}{s}{RESET}", flush=True),
             )
             if not transcript:

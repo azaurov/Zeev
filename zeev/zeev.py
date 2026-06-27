@@ -1033,12 +1033,13 @@ def cartesia_tts(text, voice_id=None, persona=None):
         return None
 
 
-def elevenlabs_tts(text, voice_id=None):
-    """Call ElevenLabs TTS. Returns MP3 bytes or None."""
+def elevenlabs_tts(text, voice_id=None, lang="en"):
+    """Call ElevenLabs TTS. Returns MP3 bytes or None.
+    eleven_turbo_v2_5 is multilingual — supports en, he, es, ru and more."""
     if not ELEVENLABS_API_KEY or not text.strip():
         return None
-    clean = _clean_for_tts(text, "en")
-    if not clean or detect_lang(clean) != "en":
+    clean = _clean_for_tts(text, lang)
+    if not clean:
         return None
     vid = voice_id or ELEVENLABS_VOICE_ID
     try:
@@ -1375,7 +1376,9 @@ def bt_alsa_dev(mac: str) -> str:
 
 def bt_audio_dev() -> str:
     """Return current audio output device — BT if connected, else WM8960."""
-    return _BT_AUDIO_DEV or "plughw:wm8960soundcard,0"
+    # "default" routes through dmix (/etc/asound.conf) — allows sharing
+    # with mpg123/espeak-ng without the exclusive-hw-lock conflict.
+    return _BT_AUDIO_DEV or "default"
 
 
 def bt_verify_connected():
@@ -6067,9 +6070,25 @@ def run_device_mode():
             finally:
                 _tts_p1 = _tts_p2 = None
 
-        # 2. Google Translate TTS — non-English (fast cloud, no model load lag)
+        # 2. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
         _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
         if lang in _GTTS_LANGS and shutil.which("mpg123"):
+            mp3_full = elevenlabs_tts(clean, lang=lang) if ELEVENLABS_API_KEY else None
+            if mp3_full:
+                p1 = subprocess.Popen(
+                    ["mpg123", "-q", "-a", adev, "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                _tts_p1 = p1
+                try:
+                    p1.stdin.write(mp3_full)
+                    p1.stdin.close()
+                except BrokenPipeError:
+                    pass
+                p1.wait()
+                _tts_p1 = None
+                return
             for chunk in _gtts_chunks(clean):
                 mp3 = _gtts_fetch_chunk(chunk, _GTTS_LANGS[lang])
                 if mp3:
@@ -6085,6 +6104,7 @@ def run_device_mode():
                     except BrokenPipeError:
                         pass
                     p1.wait()
+            _tts_p1 = None
             return
 
         # 3. Piper — daemon (Go process, warm model) or Python fallback

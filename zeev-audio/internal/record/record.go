@@ -62,8 +62,8 @@ func Record(dev string, maxSeconds float64, vad bool) ([]byte, error) {
 		}
 		nr, err := stdout.Read(tmp)
 		if nr > 0 {
-			copy(buf[n:], tmp[:nr])
-			n += nr
+			written := copy(buf[n:], tmp[:nr])
+			n += written
 
 			if vad {
 				// Check RMS of last 0.1s chunk (1600 bytes).

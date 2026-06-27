@@ -5348,8 +5348,12 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
 
 def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
                       silence_threshold=None, silence_run=8):
-    """Record until silence_run consecutive silent 0.25s chunks or max_seconds elapsed.
-    Returns WAV bytes or None."""
+    """Record until silence or max_seconds elapsed. Returns WAV bytes or None."""
+    if _audio and _audio.available:
+        wav = _audio.record(max_seconds=max_seconds, vad=True)
+        return wav if wav else None
+
+    # Python fallback: 0.25s chunk loop with energy-based VAD
     import wave, io
 
     if silence_threshold is None:

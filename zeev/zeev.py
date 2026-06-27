@@ -2433,7 +2433,7 @@ SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
     "questions to understand them better. "
-    "You are talking to Ragnar."
+    "You are talking to Alex."
 )
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():
@@ -3610,13 +3610,13 @@ def _build_system_prompt(user_text, on_search=None):
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
-        parts.append(f"\n\n## What I know about Ragnar:\n{facts_str}")
+        parts.append(f"\n\n## What I know about Alex:\n{facts_str}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)
     if notes_snapshot:
         notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
-        parts.append(f"\n\n## Ragnar's notes:\n{notes_str}")
+        parts.append(f"\n\n## Alex's notes:\n{notes_str}")
 
     hits = retrieve_relevant(user_text)
     if hits:

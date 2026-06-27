@@ -6049,6 +6049,49 @@ def run_device_mode():
             # piper survived (wasn't tracked as p1 this call) — drain its buffer
             _drain_piper(_piper_dev_proc)
 
+    def _split_sentences(text):
+        """Split text at sentence boundaries (mirrors Go daemon splitSentences)."""
+        if len(text) < 80:
+            return [text]
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        result, buf = [], ""
+        for p in parts:
+            buf = (buf + " " + p).strip() if buf else p
+            if len(buf) >= 10:
+                result.append(buf)
+                buf = ""
+        if buf:
+            result.append(buf)
+        return result or [text]
+
+    def _progressive_speak(reply):
+        """Speak reply while progressively revealing sentences on screen."""
+        sents = _split_sentences(reply)
+        # Kokoro 1.4x speed ≈ 15 chars/sec of spoken content
+        CHARS_PER_SEC = 15
+        speech_done = threading.Event()
+
+        def _speak_th():
+            _speak_device(reply)
+            speech_done.set()
+
+        def _caption_th():
+            shown = sents[0]
+            _set_face("speaking", shown)
+            for i in range(1, len(sents)):
+                # wait for previous sentence to finish before revealing next
+                wait = max(0.5, len(sents[i - 1]) / CHARS_PER_SEC)
+                if speech_done.wait(timeout=wait):
+                    break
+                shown = shown + " " + sents[i]
+                _set_face("speaking", shown)
+
+        ct = threading.Thread(target=_caption_th, daemon=True)
+        st = threading.Thread(target=_speak_th, daemon=True)
+        ct.start()
+        st.start()
+        st.join()  # block until audio finishes
+
     def _speak_device(text, voice="daniel"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
@@ -6637,11 +6680,11 @@ def run_device_mode():
         if needs_parsha_reading(transcript):
             tok_limit = 1600  # room to recite several chapters
         elif needs_torah(transcript):
-            tok_limit = 300
+            tok_limit = 350
         elif model_id in (MODELS["3"][0], MODELS["2"][0]):
-            tok_limit = 120
+            tok_limit = 160
         else:
-            tok_limit = 100
+            tok_limit = 130
         resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
@@ -6652,7 +6695,7 @@ def run_device_mode():
             print(f"[llm] 429 on {short} — retrying with 8B", flush=True)
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
-            tok_limit = 100
+            tok_limit = 130
             resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
@@ -6710,9 +6753,8 @@ def run_device_mode():
             threading.Thread(target=_bg_memorize, daemon=True).start()
 
         board.set_rgb(*_LED_SPEAKING)
-        _set_face("speaking", reply)
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-        _speak_device(reply)
+        _progressive_speak(reply)
         print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 
         _go_ready() if _busy.is_set() else _go_idle()

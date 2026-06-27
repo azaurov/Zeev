@@ -1272,6 +1272,92 @@ def voice_coach_feedback(transcript: str) -> str:
     return reply.json()["choices"][0]["message"]["content"].strip()
 
 
+def _voice_coach_record_and_transcribe(adev: str, max_seconds: int = 60,
+                                        status_fn=None) -> str | None:
+    """
+    Record speech and transcribe in parallel: every 15s of captured audio is
+    submitted to Whisper in a background thread so the transcript is mostly
+    ready by the time the speaker finishes.  VAD stops recording after 2.5s
+    of silence following speech.  Returns full transcript or None.
+    """
+    import concurrent.futures, io, wave, struct
+
+    SR = 16000
+    CHUNK_SECS = 15
+    CHUNK_BYTES = SR * 2 * CHUNK_SECS       # 15s of S16LE mono
+    READ_BYTES  = SR * 2 // 5               # 200ms read granularity
+    RMS_THRESH  = 500
+    SILENCE_LIMIT = int(SR * 2 * 2.5)       # stop after 2.5s silence post-speech
+
+    rec = subprocess.Popen(
+        ['arecord', '-D', adev, '-f', 'S16_LE', '-r', str(SR), '-c', '1',
+         '-d', str(int(max_seconds + 2))],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+    def pcm_to_wav(pcm: bytes) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SR)
+            wf.writeframes(pcm)
+        return buf.getvalue()
+
+    def chunk_rms(data: bytes) -> float:
+        n = len(data) // 2
+        if n == 0:
+            return 0.0
+        samples = struct.unpack(f'<{n}h', data[:n * 2])
+        return (sum(s * s for s in samples) / n) ** 0.5
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    futures: list = []
+    buf = b''
+    speech_started = False
+    silence_buf = 0
+    deadline = time.time() + max_seconds
+
+    try:
+        while time.time() < deadline:
+            data = rec.stdout.read(READ_BYTES)
+            if not data:
+                break
+            buf += data
+            rms = chunk_rms(data)
+            if rms >= RMS_THRESH:
+                speech_started = True
+                silence_buf = 0
+            elif speech_started:
+                silence_buf += len(data)
+                if silence_buf >= SILENCE_LIMIT:
+                    break
+            if len(buf) >= CHUNK_BYTES:
+                chunk, buf = buf[:CHUNK_BYTES], buf[CHUNK_BYTES:]
+                n = len(futures) + 1
+                if status_fn:
+                    status_fn(f"[transcribing chunk {n}...]")
+                futures.append(executor.submit(groq_stt, pcm_to_wav(chunk)))
+    finally:
+        rec.terminate()
+        rec.wait()
+
+    # Final chunk (shorter than 15s)
+    if buf and (speech_started or not futures):
+        futures.append(executor.submit(groq_stt, pcm_to_wav(buf)))
+
+    parts = []
+    for fut in futures:
+        try:
+            t = fut.result(timeout=30)
+            if t and t.strip():
+                parts.append(t.strip())
+        except Exception:
+            pass
+    executor.shutdown(wait=False)
+    return ' '.join(parts).strip() or None
+
+
 _BT_AUDIO_DEV: str = ""   # set to bluealsa PCM when headphones are active
 _BT_RATE: int = 44100    # sample rate reported by bluealsa
 _BT_CHANNELS: int = 1    # channel count reported by bluealsa
@@ -7762,16 +7848,14 @@ def main():
         if user_input.lower() in ("/voice", "/voice-coach") or _VOICE_COACH_RE.search(user_input):
             adev = bt_audio_dev() if callable(bt_audio_dev) else None
             rec_dev = adev if adev else "plughw:wm8960soundcard,0"
-            print(f"{DIM}[voice coach] Listening... speak your passage (up to 60s){RESET}", flush=True)
+            print(f"{DIM}[voice coach] Listening... speak your passage (up to 60s, stop and pause to finish){RESET}", flush=True)
             speak_terminal("Go ahead, I'm listening. Speak your passage.")
-            wav = _record_utterance(device=rec_dev, max_seconds=60)
-            if not wav:
-                print(f"{DIM}[voice coach] No audio captured.{RESET}\n")
-                continue
-            print(f"{DIM}[voice coach] Transcribing...{RESET}", flush=True)
-            transcript = groq_stt(wav)
+            transcript = _voice_coach_record_and_transcribe(
+                rec_dev, max_seconds=60,
+                status_fn=lambda s: print(f"{DIM}{s}{RESET}", flush=True),
+            )
             if not transcript:
-                print(f"{DIM}[voice coach] Couldn't transcribe audio.{RESET}\n")
+                print(f"{DIM}[voice coach] No audio captured.{RESET}\n")
                 continue
             print(f"{DIM}[voice coach] You said: {transcript}{RESET}", flush=True)
             print(f"{DIM}[voice coach] Analyzing...{RESET}", flush=True)

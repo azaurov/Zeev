@@ -2,6 +2,7 @@ package audio
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -78,6 +79,39 @@ func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 	}
 	stdin.Close()
 	return cmd.Wait()
+}
+
+// APlayPipe opens aplay once and calls feed() to write all PCM data, then
+// waits for playback to finish. Holding aplayMu for the whole duration
+// prevents the keepalive from opening the device mid-stream.
+// Use this when playing multiple sequential chunks (e.g. sentence-by-sentence
+// TTS) to avoid the WM8960 glitch caused by rapid open/close cycles.
+func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) error) error {
+	if format == "" {
+		format = "S16_LE"
+	}
+	aplayMu.Lock()
+	defer aplayMu.Unlock()
+	cmd := exec.Command("aplay",
+		"-D", dev,
+		"-f", format,
+		"-r", strconv.Itoa(rate),
+		"-c", strconv.Itoa(channels),
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	feedErr := feed(stdin)
+	stdin.Close()
+	waitErr := cmd.Wait()
+	if feedErr != nil {
+		return feedErr
+	}
+	return waitErr
 }
 
 // DefaultSpeakerDev returns the WM8960 ALSA device string.

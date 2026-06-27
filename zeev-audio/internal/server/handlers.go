@@ -307,31 +307,52 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 	btStatus := bt.GetStatus()
 
 	if s.state.RemotePiperURL != "" {
-		// Split into sentences so each remote synthesis call stays under 10s.
-		// Streams audio to the speaker sentence-by-sentence.
-		for _, sent := range splitSentences(text) {
-			pcm, ttsRate, err := s.remotePiperSynth(sent)
-			if err != nil {
+		sentences := splitSentences(text)
+		if len(sentences) == 0 {
+			return nil
+		}
+
+		// Synthesize first sentence to discover ttsRate, then open ONE aplay
+		// process for the whole response. Keeping the device open between
+		// sentences avoids the WM8960 glitch (broken pipe) caused by rapid
+		// open/close cycles.
+		firstPCM, ttsRate, err := s.remotePiperSynth(sentences[0])
+		if err != nil {
+			return err
+		}
+
+		// Determine output device/rate.
+		outDev, outRate, outCh := dev, ttsRate, 1
+		if btStatus.Connected {
+			outDev, outRate, outCh = btStatus.Dev, btStatus.Rate, btStatus.Channels
+		}
+
+		return audio.APlayPipe(outDev, "S16_LE", outRate, outCh, func(w io.Writer) error {
+			writePCM := func(pcm []byte) error {
+				if btStatus.Connected && (outRate != ttsRate || outCh != 1) {
+					var e error
+					pcm, e = resampleFFmpeg(pcm, ttsRate, 1, outRate, outCh)
+					if e != nil {
+						return fmt.Errorf("resample: %w", e)
+					}
+				}
+				_, err := w.Write(pcm)
 				return err
 			}
-			if len(pcm) == 0 {
-				continue
+			if err := writePCM(firstPCM); err != nil {
+				return err
 			}
-			if btStatus.Connected {
-				resampled, err := resampleFFmpeg(pcm, ttsRate, 1, btStatus.Rate, btStatus.Channels)
+			for _, sent := range sentences[1:] {
+				pcm, _, err := s.remotePiperSynth(sent)
 				if err != nil {
-					return fmt.Errorf("resample: %w", err)
-				}
-				if err := audio.APlay(resampled, btStatus.Dev, "S16_LE", btStatus.Rate, btStatus.Channels); err != nil {
 					return err
 				}
-			} else {
-				if err := audio.APlay(pcm, dev, "S16_LE", ttsRate, 1); err != nil {
+				if err := writePCM(pcm); err != nil {
 					return err
 				}
 			}
-		}
-		return nil
+			return nil
+		})
 	}
 
 	// Local Piper path.

@@ -11,6 +11,9 @@ import (
 var (
 	volMu  sync.Mutex
 	volume = 87
+	// aplayMu serializes all aplay calls so the keepalive goroutine and TTS
+	// cannot open the ALSA device simultaneously (causes broken pipe errors).
+	aplayMu sync.Mutex
 )
 
 // GetVolume returns the current volume (0–100).
@@ -46,10 +49,14 @@ func SetVolume(level int) (int, error) {
 }
 
 // APlay pipes raw PCM data to aplay on the given device.
+// Acquires aplayMu so the keepalive goroutine and TTS never open the device
+// simultaneously (concurrent opens cause broken pipe on the WM8960).
 func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 	if format == "" {
 		format = "S16_LE"
 	}
+	aplayMu.Lock()
+	defer aplayMu.Unlock()
 	args := []string{
 		"-D", dev,
 		"-f", format,

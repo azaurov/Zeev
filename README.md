@@ -14,7 +14,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Quantum reasoning** — maps any idea or dilemma to a quantum circuit, simulates interference, and interprets the pattern as insight; compounds daily via `quantum_daily.py` (8 canonical scenarios, cron 6 AM)
 - **Music playback** — natural language YouTube search via yt-dlp + ffmpeg (`play some jazz`, `stop`)
 - **Bluetooth audio** — pair and connect headphones by voice (`scan for bluetooth`, `pair my headphones`, `disconnect bluetooth`); all TTS and music routes through the headphones when connected; `/bt` slash command for manual control
-- **Phone calls (HFP)** — dial and receive calls via Bluetooth HFP; auto-detects voicemail (leaves a message), IVR menus (navigates with DTMF), or live callers (converses naturally); call intent extracted from user input (`call <number> to <reason>`); all call audio routed through the SCO channel with Groq Orpheus → Cartesia (~100ms) → Piper → gTTS fallback chain; Whisper hallucinations on ring tone filtered automatically; greeting deferred until call type is known; **speculative pre-generation** runs during ringing so the voicemail message is ready at the beep; aborts cleanly if phone isn't connected via HFP; live call LLM carries full conversation history across turns for natural topic continuity; live-answer detection prioritizes early speech onset over regex so Whisper hallucinations on 8kHz SCO audio can't misclassify a real pickup as voicemail
+- **Phone calls (HFP)** — dial and receive calls via Bluetooth HFP; auto-detects voicemail (leaves a message), IVR menus (navigates with DTMF), or live callers (converses naturally); call intent extracted from user input (`call <number> to <reason>`); SCO audio chain: Groq Orpheus → Cartesia (~100ms) → Piper (via Go daemon) → gTTS; Whisper hallucinations on ring tone filtered automatically; speculative pre-generation during ringing so the voicemail message is ready at the beep; live-answer detection prioritizes early speech onset over regex to prevent Whisper 8kHz hallucinations from misclassifying a real pickup
 - **Quantum conversation scenarios** (`quantum_convo.py`) — runs a quantum circuit over conversation directions (empathy, playfulness, depth, small talk) and uses the interference pattern to generate a prioritized call intent; `python3 zeev/quantum_convo.py --name NAME --call NUMBER`
 - **Voice input** — Web Speech Recognition in the browser; Groq Whisper STT in device mode
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
@@ -22,6 +22,24 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
 - **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded to city/region via Nominatim; injected into context automatically on location queries; `/gps` terminal command; `GET /gps` web endpoint
 - **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights) in a single WAL-mode `zeev.db`; no flat files
+
+## zeev-audio daemon
+
+A Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations. It keeps Piper's ONNX model warm (loaded once at startup, not per call), manages Bluetooth detection and reconnect, runs the WM8960 keepalive, handles music playback, and provides SCO call-audio synthesis for phone calls. `zeev.py` delegates to it via a thin Python adapter (`zeev/audio_client.py`) over a Unix socket; falls back to its own subprocess implementations if the daemon is unavailable.
+
+**Start the daemon** (already set up as a systemd service on the Pi):
+```bash
+sudo systemctl start zeev-audio
+sudo systemctl status zeev-audio
+sudo journalctl -u zeev-audio -f
+```
+
+**Build and deploy** (from dev box):
+```bash
+cd zeev-audio
+make pi       # cross-compile arm64 → bin/zeev-audio-pi
+make deploy   # scp binary to Pi, restart service
+```
 
 ## Running
 
@@ -64,12 +82,12 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 
 | Language | Detection | Terminal | Web UI | Device mode |
 |----------|-----------|----------|--------|-------------|
-| English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
+| English | default | Piper via Go daemon (warm, ~4s) | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
 | Spanish | ñ ¿ ¡ accented vowels | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 | Russian | Cyrillic characters | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 | Hebrew | any Hebrew Unicode character | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 
-Hebrew gTTS is also forced for Torah/Sefaria query responses even when the reply contains no Hebrew characters. Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper, then espeak-ng.
+Hebrew gTTS is also forced for Torah/Sefaria query responses even when the reply contains no Hebrew characters. Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
 
 ### Installing Piper (terminal TTS)
 

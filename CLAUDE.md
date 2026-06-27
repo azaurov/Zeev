@@ -6,9 +6,53 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Raspberry Pi project (Zeev) using Python with hardware HATs (Whisplay display, PiSugar battery, WM8960 audio). Always verify hardware-related config changes (`config.txt`, I2C/SPI baudrates) before assuming software causes for audio/display failures.
 
+## zeev-audio Go daemon
+
+A companion Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations: Piper TTS (persistent ONNX process, warm on startup), BT detection/scan/pair/connect, WM8960 keepalive, VAD recording, music playback, and SCO call-audio. Python delegates to it via `zeev/audio_client.py`; falls back to its own subprocess implementations when the daemon is unavailable.
+
+**Wire protocol**: NDJSON over Unix domain socket `/tmp/zeev-audio.sock`. Each request is one JSON line (`{"id": "...", "cmd": "...", ...fields...}\n`); each response is one JSON line (`{"id": "...", "ok": true|false, ...fields...}\n`).
+
+**Commands**:
+| cmd | purpose |
+|---|---|
+| `speak` / `speak_sync` | Piper TTS (auto-selects one-shot for BT, persistent for speaker); ffmpeg resample → aplay |
+| `speak_sco` | Piper one-shot → ffmpeg resample to SCO rate → aplay on SCO device (HFP call path) |
+| `vol_get` / `vol_set` | amixer Master → wm8960 Speaker fallback |
+| `bt_detect` / `bt_verify` | bluealsa-aplay PCM query, sets BT rate/channels globals |
+| `bt_scan` / `bt_pair` / `bt_connect` / `bt_disconnect` | bluetoothctl wrappers |
+| `audio_dev` | returns active ALSA PCM string (BT or wired) |
+| `play` / `stop` | yt-dlp → ffmpeg → aplay music playback |
+| `record` | arecord + RMS VAD, returns WAV bytes; `rate` field sets capture Hz (default 16000) |
+| `sco_record` | arecord from SCO capture device at negotiated rate, returns WAV bytes |
+| `health` | load/mem/battery summary |
+
+**`_init_audio()`** — called at startup in all modes; connects `AudioClient` to the socket. Sets `_audio` global. Falls back silently if socket missing.
+
+**`AudioClient`** (`zeev/audio_client.py`) — thread-safe Python adapter. Reconnects once on broken pipe. All methods return sensible defaults on error — zeev.py never sees exceptions. Key methods: `speak_sync()`, `sco_speak()`, `sco_record()`, `record()`, `bt_detect()`, `bt_verify()`, `bt_scan()`, `bt_connect()`, `bt_disconnect()`, `bt_pair()`, `play()`, `stop()`, `get_volume()`, `set_volume()`, `audio_dev()`, `health()`.
+
+**Daemon startup**: the Go daemon pre-warms Piper's ONNX model immediately on start (`Init()` calls `p.Start()`). On Pi Zero 2W this takes ~5s warm / ~20s cold. Model is loaded once; all subsequent `speak`/`speak_sco` calls synthesize in ~4s without reload. The daemon also starts the WM8960 keepalive goroutine (1s silence every 20s) and calls `bt.Detect(2)` to find any connected headphones.
+
+**systemd service**: `zeev-audio.service` at `/etc/systemd/system/`, `User=ragnar`, `Restart=on-failure`. Managed with `sudo systemctl start/stop/status zeev-audio`. Logs via `sudo journalctl -u zeev-audio`.
+
+**Building and deploying**:
+```bash
+cd zeev-audio
+# cross-compile for Pi Zero 2W (aarch64)
+make pi
+# stop daemon, scp binary, restart
+ssh ragnar@ragnarok "sudo systemctl stop zeev-audio"
+scp bin/zeev-audio-pi ragnar@ragnarok:~/zeev-audio/zeev-audio
+scp ../zeev/audio_client.py ragnar@ragnarok:~/Zeev/zeev/audio_client.py
+ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
+```
+
+**`speak_sco` SCO note**: the Piper branch in `bt_speak_sco()` delegates to `_audio.sco_speak(text, sco_dev, samplerate)` when daemon available. If daemon returns `ok=True`, the function returns immediately — daemon handled Piper → resample → aplay. Call loop recording (`_vad_collect`) stays in Python: it needs variable `silence_ms` (3000ms for IVR, 900ms for live) that the daemon's fixed-threshold VAD can't match. `sco_record()` exists for other use cases.
+
 ## TTS / Audio
 
 TTS uses Piper with a persistent process for the wired speaker path; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
+
+**Daemon delegation**: when the Go daemon is running, `_speak_device()` and `speak_terminal()` delegate the Piper path to `_audio.speak_sync()` and return immediately — no Python subprocess spawned. The Python Piper subprocess path is retained as fallback. The Python WM8960 keepalive thread and Piper prewarm thread are both skipped when the daemon is available (the daemon handles both).
 
 In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio by resetting `_piper_dev_proc = None` and restarting the process — only falls through to espeak-ng if both attempts fail.
 
@@ -18,7 +62,7 @@ In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSErr
 
 `_collect_piper_audio(p, first_timeout=30.0, idle_timeout=8.0)` — reads from the Piper subprocess with a 30s first-chunk timeout (covers cold ONNX model load on Pi Zero 2W, ~30s cold / ~5s warm) then 8s idle timeout between chunks. Measured inter-sentence gap on warm Pi Zero 2W: ~4.5s; 8s gives a 3.5s safety margin. Previous 2s timeout truncated after sentence one; 5s had only 0.5s margin.
 
-WM8960 auto-powers-down after ~30s of ALSA inactivity. Device mode runs a keepalive thread that plays a 1s silent buffer every 20s to prevent this.
+WM8960 auto-powers-down after ~30s of ALSA inactivity. The Go daemon runs a keepalive goroutine (1s silence every 20s). When the daemon is unavailable, device mode runs a Python keepalive thread instead.
 
 All audio output (TTS, music) routes through `bt_audio_dev()` which returns the active BlueALSA PCM string when Bluetooth headphones are connected, or `plughw:wm8960soundcard,0` otherwise. Requires `bluez-alsa-utils` + `libasound2-plugin-bluez` on the Pi.
 
@@ -42,7 +86,7 @@ Zeev can make and receive phone calls via Bluetooth HFP (Hands-Free Profile) on 
 
 - **HFP vs A2DP**: HFP is for bidirectional phone calls (uses SCO narrowband audio at 8 or 16 kHz); A2DP is for audio streaming headphones.
 - **SCO audio device**: `bluealsa:DEV=<mac>,PROFILE=sco,SRV=org.bluealsa` — exposed by BlueALSA v4.3.1+ as ALSA PCM for both recording (capture) and playback.
-- **`bt_speak_sco(text, sco_dev, samplerate)`** — speak text through the SCO device so the caller hears Zeev. Tries TTS in order: Groq Orpheus WAV → Piper one-shot raw PCM → gTTS MP3. All outputs are resampled via ffmpeg to the negotiated SCO rate and format (S16_LE, mono).
+- **`bt_speak_sco(text, sco_dev, samplerate)`** — speak text through the SCO device so the caller hears Zeev. TTS chain: Groq Orpheus WAV → Cartesia WAV → Piper (via daemon `speak_sco` if available, else Python subprocess) → gTTS MP3. All outputs resampled via ffmpeg to the negotiated SCO rate (S16_LE, mono). When the Go daemon handles Piper, it synthesizes one-shot → resamples → plays in a single round-trip and `bt_speak_sco` returns immediately after.
 - **`bt_hfp_dev(mac)` / `bt_sco_rate(mac)` / `bt_hfp_detect()`** — query the SCO device string and sample rate; detect the phone's MAC from bluealsa output.
 - **`bt_call_dial(number)` / `bt_call_hangup()`** — dial and hang up via AT commands (`ATD`, `AT+CHUP`) sent over D-Bus RFCOMM.
 - **`bt_call_dtmf(mac, digit)`** — send DTMF tone (`AT+VTS=<digit>`) for IVR menu navigation instead of TTS speech.
@@ -287,6 +331,7 @@ Groq Orpheus only supports English; non-English replies return `None` from `groq
 ```
 zeev/
   zeev.py                        # entire application
+  audio_client.py                # Python adapter for zeev-audio Go daemon
   mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
   import_sefaria.py              # populate data/torah.db (Sefaria, ETCBC DSS, ETCSL Sumerian)
   setup.sh                       # one-time setup script (legacy llama.cpp)
@@ -301,9 +346,27 @@ zeev/
     .readline_history            # terminal readline history
     cert.pem / key.pem           # TLS certs (--https mode)
     piper_voice.onnx             # optional: drop a Piper model here for auto-detection
+zeev-audio/                      # Go audio daemon (cross-compiled for arm64)
+  cmd/zeev-audio/main.go         # entry point, --socket flag, SIGTERM handler
+  internal/proto/proto.go        # NDJSON request/response types
+  internal/piper/piper.go        # persistent Piper process + SynthesizeOneShot
+  internal/audio/alsa.go         # SetVolume, APlay
+  internal/audio/keepalive.go    # WM8960 keepalive goroutine
+  internal/bt/detect.go          # bluealsa-aplay query, Detect/Verify/GetStatus
+  internal/bt/scan.go            # bluetoothctl scan + ANSI stripping
+  internal/bt/connect.go         # Connect/Disconnect/Pair
+  internal/music/music.go        # yt-dlp → ffmpeg → aplay
+  internal/record/record.go      # arecord + RMS VAD; rate is a parameter (default 16000)
+  internal/server/server.go      # Unix socket accept loop + Init()
+  internal/server/handlers.go    # cmd dispatch (speak, speak_sco, sco_record, vol, bt_*, …)
+  Makefile                       # make pi → cross-compile arm64; make deploy → scp + restart
+~/zeev-audio/                    # daemon binary on Pi (outside repo)
+  zeev-audio                     # cross-compiled arm64 binary
+/etc/systemd/system/
+  zeev-audio.service             # User=ragnar, Restart=on-failure
 ~/piper/                         # Piper TTS install (outside repo)
   piper                          # binary (symlinked to ~/.local/bin/piper)
-  en_US-lessac-medium.onnx       # English voice (auto-detected by init_tts)
+  en_US-lessac-medium.onnx       # English voice (auto-detected by init_tts and daemon)
   *.onnx.json                    # voice config
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```

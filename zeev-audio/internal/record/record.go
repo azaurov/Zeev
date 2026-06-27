@@ -80,8 +80,9 @@ func Record(dev string, maxSeconds float64, vad bool, rate int) ([]byte, error) 
 				}
 				rms := rmsInt16(buf[chunkStart:chunkEnd])
 				if rms < float64(silenceThreshold) && !speechEnd.IsZero() {
-					// 0.5s of silence after speech → stop.
-					if time.Since(speechEnd) > 500*time.Millisecond {
+					// 1.5s of silence after speech → stop.
+					// Longer pause accommodates Hebrew recitation / scripture reading.
+					if time.Since(speechEnd) > 1500*time.Millisecond {
 						log.Printf("record: VAD silence detected, stopping")
 						break
 					}

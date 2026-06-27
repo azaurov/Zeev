@@ -1132,7 +1132,7 @@ def tts_web(text, lang=None):
     return None, None
 
 
-def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
+def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None, language=None):
     """POST WAV to an OpenAI-compatible /audio/transcriptions endpoint."""
     global _groq_stt_rate_limited_until
     if time.time() < _groq_stt_rate_limited_until:
@@ -1150,6 +1150,12 @@ def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
             b"--boundary\r\n"
             b'Content-Disposition: form-data; name="prompt"\r\n\r\n'
             + prompt.encode() + b"\r\n"
+        )
+    if language:
+        multipart += (
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="language"\r\n\r\n'
+            + language.encode() + b"\r\n"
         )
     multipart += b"--boundary--\r\n"
     try:
@@ -1169,11 +1175,30 @@ def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None):
     return ""
 
 
+# Hebrew transliteration markers — if transcript contains these with no Hebrew
+# Unicode chars, Whisper probably heard Hebrew but guessed English.
+_HE_TRANSLIT_RE = re.compile(
+    r'\b(baruch|adonai|elohim|shema|shabbat|Torah|hallelujah|kadosh|'
+    r'shalom|yisrael|hashem|tzion|mishkan|kohen|amen|selah|tehillim|'
+    r'kedushah|amidah|aleinu|kaddish|maariv|shacharit|mincha)\b',
+    re.IGNORECASE,
+)
+
 def groq_stt(wav_bytes):
-    """Send WAV bytes to Groq Whisper. Returns transcript string or ''."""
+    """Send WAV bytes to Groq Whisper. Returns transcript string or ''.
+    If Whisper auto-detects English but transcript looks like transliterated
+    Hebrew, re-runs with language=he to get proper Hebrew characters."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
-    return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes, "whisper-large-v3-turbo")
+    text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes, "whisper-large-v3-turbo")
+    # If result has no Hebrew chars but sounds like Hebrew, re-run forced Hebrew
+    if text and _HE_TRANSLIT_RE.search(text) and not any('֐' <= c <= '׿' for c in text):
+        print("[stt] Hebrew transliteration detected — retrying with language=he", flush=True)
+        he_text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
+                                     "whisper-large-v3-turbo", language="he")
+        if he_text:
+            text = he_text
+    return text
 
 
 # Phone-context Whisper prompt — biases transcription toward call vocabulary,

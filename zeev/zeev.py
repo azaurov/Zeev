@@ -1184,18 +1184,31 @@ _HE_TRANSLIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Hebrew liturgical prompt — biases Whisper toward prayer vocabulary so it
+# transcribes tefillah words accurately instead of hallucinating noise.
+_HE_PRAYER_PROMPT = (
+    "ברוך אתה ה' אלהינו מלך העולם. שמע ישראל ה' אלהינו ה' אחד. "
+    "עלינו לשבח לאדון הכל. ונאמר והיה ה' למלך על כל הארץ. "
+    "הוא אלהינו אין עוד אמת מלכנו אפס זולתו. "
+    "וידעת היום והשבת אל לבבך. אדון עולם אשר מלך. "
+    "ה' מלך ה' מלך ה' ימלוך לעולם ועד. קדוש קדוש קדוש ה' צבאות."
+)
+
 def groq_stt(wav_bytes):
     """Send WAV bytes to Groq Whisper. Returns transcript string or ''.
-    If Whisper auto-detects English but transcript looks like transliterated
-    Hebrew, re-runs with language=he to get proper Hebrew characters."""
+    Always includes Hebrew liturgical prompt to bias toward prayer vocabulary.
+    If result is transliterated Hebrew, re-runs with language=he."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
-    text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes, "whisper-large-v3-turbo")
+    # First pass: auto language detection with Hebrew prayer prompt for vocabulary bias
+    text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
+                              "whisper-large-v3-turbo", prompt=_HE_PRAYER_PROMPT)
     # If result has no Hebrew chars but sounds like Hebrew, re-run forced Hebrew
-    if text and _HE_TRANSLIT_RE.search(text) and not any('֐' <= c <= '׿' for c in text):
+    if text and _HE_TRANSLIT_RE.search(text) and not any('א' <= c <= 'ת' for c in text):
         print("[stt] Hebrew transliteration detected — retrying with language=he", flush=True)
         he_text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
-                                     "whisper-large-v3-turbo", language="he")
+                                     "whisper-large-v3-turbo",
+                                     prompt=_HE_PRAYER_PROMPT, language="he")
         if he_text:
             text = he_text
     return text
@@ -2575,10 +2588,12 @@ SYSTEM_PROMPT = (
     "You speak concisely, remember what the user tells you, and ask follow-up "
     "questions to understand them better. "
     "You are talking to Alex. "
-    "When Alex recites, reads, or speaks in Hebrew or any language, be an honest critic: "
-    "point out mispronunciations, grammatical errors, word choice issues, or accent problems directly. "
-    "Do not give hollow praise or say 'beautiful' or 'excellent' unless it is genuinely flawless. "
-    "Prioritize useful feedback over encouragement."
+    "When Alex recites Hebrew prayers or scripture, FIRST identify the exact prayer "
+    "(e.g. Aleinu, Shema, Amidah, Kaddish, specific Torah portion) before giving feedback. "
+    "Then compare what was said against the correct text of THAT specific prayer and name "
+    "the specific words or phrases that were wrong. "
+    "Do not confuse one prayer with another. Do not give hollow praise. "
+    "Prioritize accurate identification and specific corrections over encouragement."
 )
 _vocab_path = BASE_DIR.parent / "swiftkey_system_prompt_snippet.md"
 if _vocab_path.exists():

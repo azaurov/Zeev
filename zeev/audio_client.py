@@ -188,9 +188,29 @@ class AudioClient:
         """Stop any in-progress music playback."""
         self._call_safe({}, cmd="stop")
 
-    def record(self, max_seconds: float = 8.0, vad: bool = True) -> bytes:
-        """Record audio; returns WAV bytes."""
+    def record(self, max_seconds: float = 8.0, vad: bool = True, rate: int = 0) -> bytes:
+        """Record audio; returns WAV bytes. rate=0 → 16000 Hz."""
         r = self._call_safe({"wav_b64": ""}, cmd="record",
+                            max_seconds=max_seconds, vad=vad, rate=rate)
+        b64 = r.get("wav_b64", "")
+        if not b64:
+            return b""
+        return base64.b64decode(b64)
+
+    def sco_speak(self, text: str, sco_dev: str, sco_rate: int) -> bool:
+        """Synthesize text via Piper and play on the SCO ALSA device.
+        sco_rate is the negotiated HFP sample rate (8000 or 16000 Hz).
+        Returns True on success."""
+        r = self._call_safe({"ok": False}, cmd="speak_sco",
+                            text=text, dev=sco_dev, rate=sco_rate)
+        return bool(r.get("ok"))
+
+    def sco_record(self, sco_dev: str, sco_rate: int,
+                   max_seconds: float = 8.0, vad: bool = True) -> bytes:
+        """Record from an SCO capture device at the negotiated rate.
+        Returns WAV bytes (header uses sco_rate)."""
+        r = self._call_safe({"wav_b64": ""}, cmd="sco_record",
+                            dev=sco_dev, rate=sco_rate,
                             max_seconds=max_seconds, vad=vad)
         b64 = r.get("wav_b64", "")
         if not b64:

@@ -21,6 +21,7 @@ type Request struct {
 	VAD        bool    `json:"vad,omitempty"`
 	Query      string  `json:"query,omitempty"`
 	Block      bool    `json:"block,omitempty"`
+	Rate       int     `json:"rate,omitempty"` // target sample rate for speak_sco
 }
 
 // Response is sent back from Go → Python for each request.

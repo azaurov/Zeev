@@ -12,31 +12,34 @@ import (
 )
 
 const (
-	sampleRate = 16000
-	channels   = 1
-	bitDepth   = 16
+	defaultRate = 16000
+	channels    = 1
+	bitDepth    = 16
 )
 
 // Record records up to maxSeconds of audio from dev, optionally applying
 // voice-activity detection (VAD) to cut the recording when speech stops.
-// Returns raw WAV bytes (with header).
-func Record(dev string, maxSeconds float64, vad bool) ([]byte, error) {
+// rate is the capture sample rate in Hz (0 → 16000). Returns raw WAV bytes.
+func Record(dev string, maxSeconds float64, vad bool, rate int) ([]byte, error) {
 	if dev == "" {
 		dev = "plughw:wm8960soundcard,0"
 	}
 	if maxSeconds <= 0 {
 		maxSeconds = 8
 	}
+	if rate <= 0 {
+		rate = defaultRate
+	}
 
 	// Calculate max samples.
-	maxSamples := int(maxSeconds * sampleRate)
+	maxSamples := int(maxSeconds * float64(rate))
 	bytesPerSample := bitDepth / 8 * channels
 	bufSize := maxSamples * bytesPerSample
 
 	cmd := exec.Command("arecord",
 		"-D", dev,
 		"-f", "S16_LE",
-		"-r", fmt.Sprintf("%d", sampleRate),
+		"-r", fmt.Sprintf("%d", rate),
 		"-c", fmt.Sprintf("%d", channels),
 		"-d", fmt.Sprintf("%.0f", math.Ceil(maxSeconds)),
 	)
@@ -56,6 +59,9 @@ func Record(dev string, maxSeconds float64, vad bool) ([]byte, error) {
 	speechEnd := time.Time{}
 	silenceThreshold := 400 // RMS energy threshold for VAD
 
+	// 0.1s of audio in bytes (for VAD chunk size).
+	vadChunkBytes := int(float64(rate) * 0.1 * 2)
+
 	for n < bufSize {
 		if time.Now().After(deadline) {
 			break
@@ -66,9 +72,9 @@ func Record(dev string, maxSeconds float64, vad bool) ([]byte, error) {
 			n += written
 
 			if vad {
-				// Check RMS of last 0.1s chunk (1600 bytes).
+				// Check RMS of last ~0.1s chunk.
 				chunkEnd := n
-				chunkStart := chunkEnd - 1600
+				chunkStart := chunkEnd - vadChunkBytes
 				if chunkStart < 0 {
 					chunkStart = 0
 				}
@@ -93,7 +99,7 @@ func Record(dev string, maxSeconds float64, vad bool) ([]byte, error) {
 	cmd.Wait()
 
 	pcm := buf[:n]
-	return makeWAV(pcm), nil
+	return makeWAV(pcm, rate), nil
 }
 
 func rmsInt16(data []byte) float64 {
@@ -113,7 +119,7 @@ func rmsInt16(data []byte) float64 {
 	return math.Sqrt(sum / float64(count))
 }
 
-func makeWAV(pcm []byte) []byte {
+func makeWAV(pcm []byte, sampleRate int) []byte {
 	dataSize := len(pcm)
 	fileSize := 36 + dataSize
 	byteRate := sampleRate * channels * bitDepth / 8

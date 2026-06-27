@@ -166,7 +166,48 @@ func (s *Server) handle(req proto.Request) proto.Response {
 				dev = "plughw:wm8960soundcard,0"
 			}
 		}
-		wav, err := record.Record(dev, req.MaxSeconds, req.VAD)
+		wav, err := record.Record(dev, req.MaxSeconds, req.VAD, req.Rate)
+		if err != nil {
+			base.Error = err.Error()
+		} else {
+			base.OK = true
+			base.WavB64 = base64.StdEncoding.EncodeToString(wav)
+		}
+
+	// ── speak_sco ──────────────────────────────────────────────────────────
+	// Synthesizes text via Piper (one-shot), resamples to SCO rate, plays on
+	// the SCO ALSA device.  Used as the Piper fallback in bt_speak_sco().
+	case "speak_sco":
+		if req.Dev == "" {
+			base.Error = "speak_sco: dev (SCO device string) is required"
+			break
+		}
+		scoRate := req.Rate
+		if scoRate <= 0 {
+			scoRate = 8000
+		}
+		if err := s.speakSCO(req.Text, req.Dev, scoRate); err != nil {
+			base.Error = err.Error()
+		} else {
+			base.OK = true
+		}
+
+	// ── sco_record ─────────────────────────────────────────────────────────
+	// Records from an SCO capture device at the negotiated rate.
+	case "sco_record":
+		if req.Dev == "" {
+			base.Error = "sco_record: dev (SCO device string) is required"
+			break
+		}
+		scoRate := req.Rate
+		if scoRate <= 0 {
+			scoRate = 8000
+		}
+		maxSeconds := req.MaxSeconds
+		if maxSeconds <= 0 {
+			maxSeconds = 8
+		}
+		wav, err := record.Record(req.Dev, maxSeconds, req.VAD, scoRate)
 		if err != nil {
 			base.Error = err.Error()
 		} else {
@@ -233,6 +274,29 @@ func resampleFFmpeg(pcm []byte, inRate, inCh, outRate, outCh int) ([]byte, error
 	)
 	cmd.Stdin = newBytesReader(pcm)
 	return cmd.Output()
+}
+
+// speakSCO synthesizes text via Piper one-shot, resamples to scoRate, and
+// plays on the SCO ALSA device.  Always one-shot (need full audio before aplay).
+func (s *Server) speakSCO(text, scoDev string, scoRate int) error {
+	if s.state.PiperBin == "" || s.state.PiperModel == "" {
+		return fmt.Errorf("piper not found")
+	}
+	pcm, err := piper.SynthesizeOneShot(s.state.PiperBin, s.state.PiperModel, text)
+	if err != nil {
+		return fmt.Errorf("piper: %w", err)
+	}
+	if len(pcm) == 0 {
+		return fmt.Errorf("piper returned empty audio")
+	}
+	// Piper outputs 22050 Hz mono S16LE; resample to SCO rate (8000 or 16000 Hz).
+	if scoRate != 22050 {
+		pcm, err = resampleFFmpeg(pcm, 22050, 1, scoRate, 1)
+		if err != nil {
+			return fmt.Errorf("resample to %dHz: %w", scoRate, err)
+		}
+	}
+	return audio.APlay(pcm, scoDev, "S16_LE", scoRate, 1)
 }
 
 func speakEspeak(text, dev string) error {

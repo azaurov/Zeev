@@ -1685,23 +1685,31 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
             print(f"[call] Cartesia error: {e}", flush=True)
 
     # 3. Piper (Ryan, male) — local synthesis, works offline
-    if not wav and PIPER_BIN and PIPER_MODELS.get("en"):
-        try:
-            p = subprocess.Popen(
-                [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            raw_pcm, piper_err = p.communicate(text.encode(), timeout=60)
-            if raw_pcm:
-                raw_rate = 22050
-                src_fmt = "raw"
-                print(f"[call] SCO TTS via Piper ({len(raw_pcm)} bytes)", flush=True)
-            else:
-                print(f"[call] Piper produced no audio: {piper_err[:120]}", flush=True)
+    if not wav:
+        if _audio and _audio.available:
+            # Daemon handles Piper → resample → aplay in one round-trip.
+            if _audio.sco_speak(text, sco_dev, samplerate):
+                print("[call] SCO TTS via Piper (daemon)", flush=True)
+                return
+            # Daemon available but sco_speak failed (Piper not found on daemon side);
+            # fall through to gTTS.
+        elif PIPER_BIN and PIPER_MODELS.get("en"):
+            try:
+                p = subprocess.Popen(
+                    [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                raw_pcm, piper_err = p.communicate(text.encode(), timeout=60)
+                if raw_pcm:
+                    raw_rate = 22050
+                    src_fmt = "raw"
+                    print(f"[call] SCO TTS via Piper ({len(raw_pcm)} bytes)", flush=True)
+                else:
+                    print(f"[call] Piper produced no audio: {piper_err[:120]}", flush=True)
+                    raw_pcm = None
+            except Exception as e:
+                print(f"[call] Piper error: {e}", flush=True)
                 raw_pcm = None
-        except Exception as e:
-            print(f"[call] Piper error: {e}", flush=True)
-            raw_pcm = None
 
     # 3. gTTS fallback — female voice, no gender selection, last resort
     if not wav and not raw_pcm:
@@ -2153,8 +2161,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     else:
         _pregen_thread = None
 
-    # Pre-warm Piper so it's loaded before we need to speak (avoids 20s ONNX load mid-call)
-    if PIPER_BIN and PIPER_MODELS.get("en"):
+    # Pre-warm Piper so it's loaded before we need to speak (avoids 20s ONNX load mid-call).
+    # Skipped when daemon is running — the daemon pre-warms Piper at startup.
+    if not (_audio and _audio.available) and PIPER_BIN and PIPER_MODELS.get("en"):
         try:
             _pw = subprocess.Popen(
                 [PIPER_BIN, "--model", PIPER_MODELS["en"], "--output_raw"],

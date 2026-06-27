@@ -3547,8 +3547,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
                 if not err:
                     return resp, err, "groq"
             if OPENROUTER_API_KEY:
-                print(f"[fallback] bosgame failed → OpenRouter", flush=True)
-                or_model = "meta-llama/llama-3.1-8b-instruct:free"
+                print(f"[fallback] bosgame failed → OpenRouter (llama-3.3-70b)", flush=True)
+                or_model = "meta-llama/llama-3.3-70b-instruct:free"
                 resp, err = _openai_compat_post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
@@ -3556,8 +3556,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
                 if not err:
                     return resp, err, "openrouter"
             if GEMINI_API_KEY:
-                print(f"[fallback] → Gemini", flush=True)
-                resp, err = _gemini_stream(msgs, "gemini-2.0-flash", max_tokens)
+                print(f"[fallback] → Gemini 2.5 Pro", flush=True)
+                resp, err = _gemini_stream(msgs, "gemini-2.5-pro", max_tokens)
                 if not err:
                     return resp, err, "gemini"
         return resp, err, "groq"

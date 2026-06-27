@@ -15,8 +15,8 @@ A companion Go daemon (`zeev-audio/`) handles all latency-sensitive audio operat
 **Commands**:
 | cmd | purpose |
 |---|---|
-| `speak` / `speak_sync` | Piper TTS (auto-selects one-shot for BT, persistent for speaker); ffmpeg resample → aplay |
-| `speak_sco` | Piper one-shot → ffmpeg resample to SCO rate → aplay on SCO device (HFP call path) |
+| `speak` / `speak_sync` | Remote Kokoro TTS on bosgame (24kHz) or local Piper fallback; WAV rate parsed from header; ffmpeg resample → aplay |
+| `speak_sco` | Remote Kokoro/Piper → ffmpeg resample to SCO rate → aplay on SCO device (HFP call path) |
 | `vol_get` / `vol_set` | amixer Master → wm8960 Speaker fallback |
 | `bt_detect` / `bt_verify` | bluealsa-aplay PCM query, sets BT rate/channels globals |
 | `bt_scan` / `bt_pair` / `bt_connect` / `bt_disconnect` | bluetoothctl wrappers |
@@ -424,7 +424,20 @@ bosgame (`Maccabeus-Ecolite-Series`, LAN IP `10.0.0.141`) runs Ollama and acts a
 - **Models available**: `llama3.1:8b` (chat fallback), `llama3.2:1b` (memory extraction, ~5–10s on CPU)
 - **Pi `/etc/hosts`**: `10.0.0.141 ollama.sogdiana-gematria.net` — required to avoid NAT hairpin (Pi on LAN cannot reach the public IP). Entry is persisted via `/etc/cloud/templates/hosts.debian.tmpl` (cloud-init manages `/etc/hosts` and resets it on reboot without this).
 - **Offline coverage**: fallback only works when Pi is on the home LAN. Away from home with no WiFi = no fallback (bosgame unreachable). Use phone hotspot for mobile use.
-- **nginx config** (bosgame `/etc/nginx/sites-available/default`): `/ollama/` location with `proxy_buffering off`, `proxy_read_timeout 300s`, auth via `$http_x_zeev_key`.
+- **nginx config** (bosgame `/etc/nginx/sites-enabled/default`): `/ollama/` location with `proxy_buffering off`, `proxy_read_timeout 300s`, auth via `$http_x_zeev_key`. Note: `sites-enabled/default` is a **separate file** from `sites-available/default` on bosgame — always edit `sites-enabled/`.
+
+### bosgame Kokoro TTS server
+
+Zeev's primary English TTS engine is **Kokoro** (~1x RTF on CPU, natural voice) running on bosgame. The Pi daemon calls `https://ollama.sogdiana-gematria.net/piper/tts` (same `/piper/` nginx route, renamed only in comment).
+
+- **Server**: `~/piper/tts_server.py` (Python 3, port 5600, localhost-only). Kokoro primary, Piper fallback.
+- **Service**: `piper-tts.service` (`sudo systemctl restart piper-tts`). Enabled, auto-restarts.
+- **Kokoro model**: `~/kokoro/kokoro-v1.0.onnx` (311MB) + `~/kokoro/voices-v1.0.bin` (27MB). Voice: `am_michael` (American male, 24kHz).
+- **Piper fallback**: `~/piper/piper` + `~/piper/en_US-lessac-medium.onnx` (22050Hz).
+- **Go daemon** (`REMOTE_PIPER_URL` env var in `zeev-audio.service`): calls the endpoint, parses WAV header bytes 24-27 for sample rate — works with both 22050Hz Piper and 24000Hz Kokoro without recompile.
+- **Latency**: Kokoro ~1-2s for short phrases (synthesis + network). Piper ~0.7s.
+- **Auth**: nginx checks `X-Zeev-Key` header; upstream server binds only to 127.0.0.1 (no re-check needed).
+- **Orpheus attempt**: abandoned — 3B Q4 GGUF on 8-core CPU is 14x real-time (60s for 4s of speech). GGUF stored at `~/orpheus/orpheus-3b-q4_k_m.gguf` but not used.
 
 ### User
 

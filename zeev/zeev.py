@@ -3538,11 +3538,28 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
 
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
-        if err and BOSGAME_URL and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused", "rate-limited")):
-            label = "offline" if "rate-limited" not in err else "rate-limited"
-            print(f"[{label}] Groq unavailable, falling back to bosgame Ollama", flush=True)
-            resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
-            return resp, err, "groq"
+        if err and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused", "rate-limited")):
+            label = "rate-limited" if "rate-limited" in err else "offline"
+            # Fallback chain: bosgame → OpenRouter → Gemini
+            if BOSGAME_URL:
+                print(f"[{label}] Groq → bosgame Ollama", flush=True)
+                resp, err = _bosgame_stream(msgs, max_tokens=max_tokens)
+                if not err:
+                    return resp, err, "groq"
+            if OPENROUTER_API_KEY:
+                print(f"[fallback] bosgame failed → OpenRouter", flush=True)
+                or_model = "meta-llama/llama-3.1-8b-instruct:free"
+                resp, err = _openai_compat_post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
+                )
+                if not err:
+                    return resp, err, "openrouter"
+            if GEMINI_API_KEY:
+                print(f"[fallback] → Gemini", flush=True)
+                resp, err = _gemini_stream(msgs, "gemini-2.0-flash", max_tokens)
+                if not err:
+                    return resp, err, "gemini"
         return resp, err, "groq"
 
     if provider == "openai":

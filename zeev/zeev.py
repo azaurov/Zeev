@@ -5762,25 +5762,27 @@ def run_device_mode():
     # ── WM8960 keepalive — prevents codec power-save after ~30s of silence ──
     # Plays a brief silent buffer every 20s to keep the codec awake without
     # holding the device open (which would block TTS playback).
+    # Skipped when the Go audio daemon is running — it runs its own keepalive goroutine.
     _KEEPALIVE_SILENCE = b'\x00' * (44100 * 2 * 1)  # 1s silence, 44100Hz S16_LE mono
     _keepalive_stop = threading.Event()
 
-    def _keepalive_loop():
-        while not _keepalive_stop.wait(timeout=20):
-            try:
-                p = subprocess.Popen(
-                    ["aplay", "-D", "plughw:wm8960soundcard,0",
-                     "-f", "S16_LE", "-r", "44100", "-c", "1", "-"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                p.stdin.write(_KEEPALIVE_SILENCE)
-                p.stdin.close()
-                p.wait(timeout=5)
-            except Exception:
-                pass
+    if not (_audio and _audio.available):
+        def _keepalive_loop():
+            while not _keepalive_stop.wait(timeout=20):
+                try:
+                    p = subprocess.Popen(
+                        ["aplay", "-D", "plughw:wm8960soundcard,0",
+                         "-f", "S16_LE", "-r", "44100", "-c", "1", "-"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    p.stdin.write(_KEEPALIVE_SILENCE)
+                    p.stdin.close()
+                    p.wait(timeout=5)
+                except Exception:
+                    pass
 
-    threading.Thread(target=_keepalive_loop, daemon=True).start()
+        threading.Thread(target=_keepalive_loop, daemon=True).start()
 
     # ── TTS (interruptible, blocking) ────────────────────────────────────────
 
@@ -5790,22 +5792,24 @@ def run_device_mode():
 
     # Pre-warm Piper in the background so the ONNX model (~20s load on Pi Zero 2W)
     # is ready before the first user interaction rather than blocking it.
-    def _prewarm_piper():
-        nonlocal _piper_dev_proc
-        model = (PIPER_MODELS.get("en")) if PIPER_BIN else None
-        if not model or _BT_AUDIO_DEV:
-            return  # BT uses one-shot path; no persistent process to pre-warm
-        try:
-            _piper_dev_proc = subprocess.Popen(
-                [PIPER_BIN, "--model", model, "--output_raw"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            print("[tts] Piper pre-warm started", flush=True)
-        except Exception as e:
-            print(f"[tts] Piper pre-warm failed: {e}", flush=True)
+    # Skipped when the Go audio daemon is running — daemon pre-warmed Piper at startup.
+    if not (_audio and _audio.available):
+        def _prewarm_piper():
+            nonlocal _piper_dev_proc
+            model = (PIPER_MODELS.get("en")) if PIPER_BIN else None
+            if not model or _BT_AUDIO_DEV:
+                return  # BT uses one-shot path; no persistent process to pre-warm
+            try:
+                _piper_dev_proc = subprocess.Popen(
+                    [PIPER_BIN, "--model", model, "--output_raw"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                print("[tts] Piper pre-warm started", flush=True)
+            except Exception as e:
+                print(f"[tts] Piper pre-warm failed: {e}", flush=True)
 
-    threading.Thread(target=_prewarm_piper, daemon=True).start()
+        threading.Thread(target=_prewarm_piper, daemon=True).start()
 
     def _collect_piper_audio(p, first_timeout=30.0, idle_timeout=8.0):
         """Read raw PCM from a live piper process until it goes quiet.
@@ -5931,10 +5935,15 @@ def run_device_mode():
                     p1.wait()
             return
 
-        # 3. Piper — persistent local neural TTS (model stays loaded between calls)
+        # 3. Piper — daemon (Go process, warm model) or Python fallback
         model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
         try:
-            if model:
+            if _audio and _audio.available:
+                # Delegate to the Go daemon: handles persistent process, BT one-shot,
+                # ffmpeg resampling, and aplay — all in Go.
+                _audio.speak_sync(clean, lang=lang, dev=adev)
+                return
+            elif model:
                 audio = None
                 if _BT_AUDIO_DEV:
                     # BT path: one-shot Piper invocation so we read until EOF (no timeout gaps

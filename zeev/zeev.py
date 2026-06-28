@@ -5955,7 +5955,7 @@ def run_device_mode():
             _face_caption = caption
 
     # ── Screen sleep ─────────────────────────────────────────────────────────
-    _IDLE_SLEEP_SEC = 30          # seconds of idle before screen + LED turn off
+    _IDLE_SLEEP_SEC = 15          # seconds of idle before screen + LED turn off
     _screen_on      = [True]      # mutable so nested functions can update it
     _last_activity  = [time.time()]
 
@@ -6346,8 +6346,8 @@ def run_device_mode():
     _state_lock    = threading.Lock()
     _rec_file      = Path("/tmp/zeev_rec.wav")
 
-    _LED_IDLE      = (0,  20,  0)
-    _LED_READY     = (0,  20, 40)
+    _LED_IDLE      = (0,   8,  0)
+    _LED_READY     = (0,   8, 20)
     _LED_RECORDING = (180, 0,  0)
     _LED_THINKING  = (0,   0, 90)
     _LED_SPEAKING  = (0,  90, 25)

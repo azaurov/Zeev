@@ -548,14 +548,8 @@ _ES_RE = re.compile(r"[ñÑ¿¡áéíóúüÁÉÍÓÚÜ]")
 
 
 def detect_lang(text):
-    """Return 'he', 'ru', 'es', or 'en' based on characters in text."""
-    if _HE_RE.search(text):
-        return "he"
-    if _RU_RE.search(text):
-        return "ru"
-    if _ES_RE.search(text):
-        return "es"
-    return "en"
+    """Return FORCED_LANG if set, otherwise 'en'. No auto-detection from characters."""
+    return FORCED_LANG or "en"
 
 
 def init_tts():
@@ -7304,7 +7298,7 @@ def main():
         print(f"  {DIM}{batt_icon} {batt_level:.0f}%{RESET}", end="")
     if session or USER_FACTS or batt_level is not None:
         print()
-    print(f"{DIM}Model: auto-routing  (/model to change)  |  Language: auto  (/lang to change){RESET}\n")
+    print(f"{DIM}Model: auto-routing  (/model to change)  |  Language: en  (/lang to change){RESET}\n")
 
     if "--no-greeting" not in sys.argv:
         _hour = time.localtime().tm_hour
@@ -7394,7 +7388,7 @@ def main():
             else:
                 current = FORCED_LANG or "auto"
                 print(f"{DIM}Current language: {current}")
-                print(f"  /lang auto   auto-detect from your input")
+                print(f"  /lang auto   English (default — no auto-detection)")
                 print(f"  /lang en     English")
                 print(f"  /lang he     Hebrew (עברית)")
                 print(f"  /lang es     Spanish (Español)")

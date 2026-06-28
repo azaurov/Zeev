@@ -170,12 +170,12 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 
 | Language | Detection | Terminal/device | Web UI |
 |---|---|---|---|
-| English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Hebrew | Hebrew Unicode char | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
-| Spanish | ñ/¿/¡/accents | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
-| Russian | Cyrillic U+0400–04FF | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
+| English | default (always) | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
+| Hebrew | `/lang he` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
+| Spanish | `/lang es` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
+| Russian | `/lang ru` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
 
-Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
+`detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Language only changes via `/lang` command. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
 
 ### Web UI SSE events
 

@@ -48,7 +48,7 @@ func (s *Server) handle(req proto.Request) proto.Response {
 		}
 		var err error
 		if (s.state.RemotePiperURL != "" || s.state.PiperProc != nil) && (req.Lang == "" || req.Lang == "en") {
-			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync")
+			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync", req.Voice)
 		} else {
 			err = fmt.Errorf("piper not available; use espeak-ng fallback")
 		}
@@ -242,11 +242,15 @@ func (s *Server) handle(req proto.Request) proto.Response {
 // remotePiperSynth calls the bosgame TTS HTTP API and returns raw PCM plus
 // the sample rate read from the WAV header (supports both 22050Hz Piper and
 // 24000Hz Kokoro without any hardcoded assumption).
-func (s *Server) remotePiperSynth(text string) (pcm []byte, rate int, err error) {
+func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []byte, rate int, err error) {
 	escaped := strings.ReplaceAll(text, `"`, `\"`)
+	voice := s.state.RemotePiperVoice
+	if len(voiceOverride) > 0 && voiceOverride[0] != "" {
+		voice = voiceOverride[0]
+	}
 	var body []byte
-	if s.state.RemotePiperVoice != "" {
-		body = []byte(`{"text":"` + escaped + `","voice":"` + s.state.RemotePiperVoice + `"}`)
+	if voice != "" {
+		body = []byte(`{"text":"` + escaped + `","voice":"` + voice + `"}`)
 	} else {
 		body = []byte(`{"text":"` + escaped + `"}`)
 	}
@@ -310,7 +314,7 @@ func splitSentences(text string) []string {
 	return out
 }
 
-func (s *Server) speakPiper(text, dev string, sync bool) error {
+func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 	btStatus := bt.GetStatus()
 
 	if s.state.RemotePiperURL != "" {
@@ -323,7 +327,7 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 		// process for the whole response. Keeping the device open between
 		// sentences avoids the WM8960 glitch (broken pipe) caused by rapid
 		// open/close cycles.
-		firstPCM, ttsRate, err := s.remotePiperSynth(sentences[0])
+		firstPCM, ttsRate, err := s.remotePiperSynth(sentences[0], voice)
 		if err != nil {
 			return err
 		}
@@ -350,7 +354,7 @@ func (s *Server) speakPiper(text, dev string, sync bool) error {
 				return err
 			}
 			for _, sent := range sentences[1:] {
-				pcm, _, err := s.remotePiperSynth(sent)
+				pcm, _, err := s.remotePiperSynth(sent, voice)
 				if err != nil {
 					return err
 				}

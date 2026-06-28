@@ -50,6 +50,9 @@ func (s *Server) Init() {
 	// Set REMOTE_PIPER_URL (and optionally REMOTE_PIPER_KEY) in the systemd unit.
 	s.state.RemotePiperURL   = os.Getenv("REMOTE_PIPER_URL")
 	s.state.RemotePiperKey   = os.Getenv("REMOTE_PIPER_KEY")
+	if s.state.RemotePiperKey == "" {
+		s.state.RemotePiperKey = os.Getenv("BOSGAME_KEY") // fallback to shared key from .env
+	}
 	s.state.RemotePiperVoice = os.Getenv("REMOTE_PIPER_VOICE")
 
 	if s.state.RemotePiperURL != "" {

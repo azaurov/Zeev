@@ -176,7 +176,7 @@ Everything lives in `zeev/zeev.py` — a single-file script:
 - **`_CAMERA_RE`** — regex that matches natural-language camera intents ("what do you see", "take a photo", "can you see anything", etc.). Checked in `_handle_transcript` before text LLM routing; only fires when `CAMERA_AVAILABLE` is True.
 - **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
 - **`_db()` / `_db_lock` / `_db_con`** — lazy singleton SQLite connection to `data/zeev.db` (`check_same_thread=False`, WAL mode). All storage calls acquire `_db_lock` before executing; this is the thread-safety mechanism for `ThreadingHTTPServer`. Tables: `messages`, `facts`, `notes`, `settings`.
-- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f zeev_music` and `pkill -f zeev_rec.wav` to catch orphaned ffmpeg/mpg123/arecord processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path.
+- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f` for `zeev_music`, `zeev_rec.wav`, `piper --model`, and `mpg123` to catch orphaned TTS/audio processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path. Also registered via `atexit` in `main()` and `run_device_mode()` so it fires on unhandled exceptions in addition to the SIGINT/SIGTERM signal handlers.
 - **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value. Speaks a time-of-day greeting to Alex on startup and "Goodbye, Alex." on exit via gTTS+mpg123 (blocking on exit so audio completes before the process dies).
 
 ### Models (Groq)
@@ -409,7 +409,7 @@ Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Ch
 
 ### Startup / shutdown behaviour
 
-- `zeev_cleanup()` runs at the top of `main()`, `run_web_server()`, and `run_device_mode()` to kill stale processes and temp files from any previous crash.
+- `zeev_cleanup()` runs at the top of `main()`, `run_web_server()`, and `run_device_mode()` to kill stale processes and temp files from any previous crash. It is also registered with `atexit` in `main()` and `run_device_mode()` so hanging Piper/mpg123 subprocesses are killed even on unhandled exceptions.
 - On startup, `main()` speaks **"Good morning/afternoon/evening, Alex. Ready when you are."** via gTTS+mpg123 (background thread, plays within ~2s).
 - On exit (`quit`, Ctrl-C, or SIGTERM), `main()` speaks **"Goodbye, Alex."** synchronously before calling `sys.exit()`.
 - Journald is configured for persistent storage (`/var/log/journal/`) so logs survive reboots and `journalctl -b -1` works.

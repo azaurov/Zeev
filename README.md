@@ -9,7 +9,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
 - **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse
-- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; Hebrew gTTS used whenever Hebrew characters appear in a response
+- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; Hebrew gTTS used whenever Hebrew characters appear in a response; device mode voice is **Sarina** (Zeev's secretary, Kokoro `af_heart`); Zeev's own voice is Groq Orpheus `daniel`; voice selectable per-request via the Go daemon
 - **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
 - **Weekly reflection** — every Sunday, synthesizes the past week of conversations into a first-person reflection (recurring themes, emotional patterns, open questions, emerging interests) stored in `zeev.db` and injected into every system prompt; uses bosgame llama3.1:8b or Groq 70B
 - **Quantum reasoning** — maps any idea or dilemma to a quantum circuit, simulates interference, and interprets the pattern as insight; compounds daily via `quantum_daily.py` (8 canonical scenarios, cron 6 AM)

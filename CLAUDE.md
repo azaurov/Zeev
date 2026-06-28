@@ -229,7 +229,7 @@ Address `0x33` on `/dev/i2c-3`. Hardware I2C `/dev/i2c-1` is used by WM8960 at `
 `python3 zeev/zeev.py --device`
 
 - **TTS priority**: Groq Orpheus → gTTS + mpg123 (he/es/ru) → Piper (en, one-shot for BT, persistent for speaker) → espeak-ng
-- **Speaker volume**: raw 110 (~87%) via amixer at startup. BT headphone volume: raw 50/127 (~39%).
+- **Speaker volume**: raw 113 (~89%) via amixer at startup. BT headphone volume: raw 50/127 (~39%).
 - **STT**: Groq Whisper `whisper-large-v3-turbo`.
 - **`_greeting_done` event**: gates the wake listener — `_wake_listener` blocks until greeting finishes so it can't self-trigger on the greeting audio through the mic.
 - **429 fallback**: `_handle_transcript` retries 70B/R1 429s with 8B before surfacing an error.
@@ -260,9 +260,10 @@ bosgame (LAN `10.0.0.141`) runs Ollama as free local inference backend.
 Primary English TTS: **Kokoro** on bosgame. Pi daemon calls `https://ollama.sogdiana-gematria.net/piper/tts`.
 
 - **Server**: `~/piper/tts_server.py` (port 5600, localhost-only). Service: `piper-tts.service`.
-- **Kokoro**: `~/kokoro/kokoro-v1.0.onnx` + `voices-v1.0.bin`. Voice: `am_michael` (24kHz). Latency: ~1-2s.
+- **Kokoro**: `~/kokoro/kokoro-v1.0.onnx` + `voices-v1.0.bin`. Default voice: `af_heart` (Sarina, 24kHz, speed=1.0). Set via `KOKORO_VOICE` env var or per-request `"voice"` field. Latency: ~1-2s.
 - **Piper fallback**: `~/piper/en_US-lessac-medium.onnx` (22050Hz). Latency: ~0.7s.
-- **Go daemon** (`REMOTE_PIPER_URL` env var): parses WAV header bytes 24-27 for sample rate — works with both 22050Hz and 24kHz without recompile.
+- **Go daemon** (`REMOTE_PIPER_URL` env var): parses WAV header bytes 24-27 for sample rate. `REMOTE_PIPER_VOICE` sets default voice; falls back to `BOSGAME_KEY` if `REMOTE_PIPER_KEY` is unset. Per-request `"voice"` field overrides the default for that call.
+- **Voice personas**: Zeev's brain voice = Groq Orpheus `daniel`. Device mode speaker = Kokoro `af_heart` ("Sarina", Zeev's secretary).
 
 ## User
 

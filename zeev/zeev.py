@@ -167,8 +167,9 @@ def _init_audio():
         pass  # audio_client.py not yet on PYTHONPATH; pure Python mode
 
 # Learning state — populated by init_learning() at startup
-USER_FACTS       = []   # persistent facts about the user
-USER_NOTES       = []   # persistent notes saved by the user
+USER_FACTS          = []   # persistent facts about the user
+USER_NOTES          = []   # persistent notes saved by the user
+_WEEKLY_REFLECTION  = ""   # latest weekly reflection, loaded at startup
 _HISTORY_ENTRIES = []   # raw parsed entries from history.jsonl for RAG
 _HISTORY_INDEX   = {}   # word → [entry indices] inverted index
 _notes_lock      = threading.Lock()
@@ -2655,6 +2656,13 @@ def _db() -> sqlite3.Connection:
                 interpretation TEXT    NOT NULL,
                 ts             TEXT    NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS reflections (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                period_start TEXT    NOT NULL,
+                period_end   TEXT    NOT NULL,
+                content      TEXT    NOT NULL,
+                ts           TEXT    NOT NULL
+            );
         """)
         _db_con.commit()
     return _db_con
@@ -3047,12 +3055,26 @@ def load_quantum_insights(k=3):
     return [{"idea": r["idea"], "interpretation": r["interpretation"]} for r in rows]
 
 
+def load_latest_reflection():
+    """Load the most recent weekly reflection into _WEEKLY_REFLECTION."""
+    global _WEEKLY_REFLECTION
+    try:
+        with _db_lock:
+            row = _db().execute(
+                "SELECT content FROM reflections ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        _WEEKLY_REFLECTION = row["content"] if row else ""
+    except Exception:
+        _WEEKLY_REFLECTION = ""
+
+
 def init_learning():
-    """Load memory facts, notes, settings, and build RAG index. Call once at startup."""
+    """Load memory facts, notes, settings, reflection, and build RAG index. Call once at startup."""
     global USER_FACTS, USER_NOTES
     USER_FACTS = load_memory()
     USER_NOTES = load_notes()
     load_settings()
+    load_latest_reflection()
     build_rag_index()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
 
@@ -3796,6 +3818,9 @@ def _build_system_prompt(user_text, on_search=None):
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
         parts.append(f"\n\n## What I know about Alex:\n{facts_str}")
+
+    if _WEEKLY_REFLECTION:
+        parts.append(f"\n\n## Weekly reflection:\n{_WEEKLY_REFLECTION[:1500]}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)

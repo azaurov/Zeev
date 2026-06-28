@@ -670,6 +670,12 @@ def _piper_speak(clean, model, adev=None):
                 aplay.wait()
             except Exception:
                 _piper_term_proc = None
+                try:
+                    aplay.stdin.close()
+                    aplay.kill()
+                    aplay.wait()
+                except Exception:
+                    pass
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1675,7 +1681,7 @@ def bt_pan_connect(mac: str) -> tuple[bool, str]:
         ["sudo", "dhcpcd", "bnep0"],
         ["sudo", "dhclient", "bnep0"],
     ):
-        if not shutil.which(cmd[0].lstrip("sudo ")):
+        if not shutil.which(cmd[1] if cmd[0] == "sudo" else cmd[0]):
             continue
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=15)
@@ -1719,7 +1725,7 @@ def bt_pan_disconnect() -> None:
         ["sudo", "dhcpcd", "-k", "bnep0"],
         ["sudo", "dhclient", "-r", "bnep0"],
     ):
-        if not shutil.which(cmd[0].lstrip("sudo ")):
+        if not shutil.which(cmd[1] if cmd[0] == "sudo" else cmd[0]):
             continue
         try:
             subprocess.run(cmd, capture_output=True, timeout=10)

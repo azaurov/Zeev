@@ -1198,22 +1198,13 @@ _HE_PRAYER_PROMPT = (
 
 def groq_stt(wav_bytes):
     """Send WAV bytes to Groq Whisper. Returns transcript string or ''.
-    Always includes Hebrew liturgical prompt to bias toward prayer vocabulary.
-    If result is transliterated Hebrew, re-runs with language=he."""
+    Always transcribes in the current FORCED_LANG (default: English)."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
-    # First pass: auto language detection with Hebrew prayer prompt for vocabulary bias
-    text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
-                              "whisper-large-v3-turbo", prompt=_HE_PRAYER_PROMPT)
-    # If result has no Hebrew chars but sounds like Hebrew, re-run forced Hebrew
-    if text and _HE_TRANSLIT_RE.search(text) and not any('א' <= c <= 'ת' for c in text):
-        print("[stt] Hebrew transliteration detected — retrying with language=he", flush=True)
-        he_text = _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
-                                     "whisper-large-v3-turbo",
-                                     prompt=_HE_PRAYER_PROMPT, language="he")
-        if he_text:
-            text = he_text
-    return text
+    lang = FORCED_LANG or "en"
+    prompt = _HE_PRAYER_PROMPT if lang == "he" else None
+    return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
+                              "whisper-large-v3-turbo", prompt=prompt, language=lang)
 
 
 # Phone-context Whisper prompt — biases transcription toward call vocabulary,

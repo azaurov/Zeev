@@ -25,8 +25,9 @@ type State struct {
 	PiperProc      *piper.Proc
 	PiperBin       string
 	PiperModel     string
-	RemotePiperURL string // e.g. https://ollama.sogdiana-gematria.net/piper/tts
-	RemotePiperKey string // X-Zeev-Key value
+	RemotePiperURL   string // e.g. https://ollama.sogdiana-gematria.net/piper/tts
+	RemotePiperKey   string // X-Zeev-Key value
+	RemotePiperVoice string // Kokoro voice name, e.g. "af_heart"; empty = server default
 }
 
 // handle dispatches a single request and returns the response.
@@ -242,7 +243,13 @@ func (s *Server) handle(req proto.Request) proto.Response {
 // the sample rate read from the WAV header (supports both 22050Hz Piper and
 // 24000Hz Kokoro without any hardcoded assumption).
 func (s *Server) remotePiperSynth(text string) (pcm []byte, rate int, err error) {
-	body := []byte(`{"text":` + `"` + strings.ReplaceAll(text, `"`, `\"`) + `"` + `}`)
+	escaped := strings.ReplaceAll(text, `"`, `\"`)
+	var body []byte
+	if s.state.RemotePiperVoice != "" {
+		body = []byte(`{"text":"` + escaped + `","voice":"` + s.state.RemotePiperVoice + `"}`)
+	} else {
+		body = []byte(`{"text":"` + escaped + `"}`)
+	}
 	req, err2 := http.NewRequest("POST", s.state.RemotePiperURL, bytes.NewReader(body))
 	if err2 != nil {
 		return nil, 0, err2

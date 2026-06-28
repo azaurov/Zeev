@@ -48,11 +48,12 @@ func New(socketPath string) (*Server, error) {
 func (s *Server) Init() {
 	// Remote Piper TTS on bosgame takes priority over local Piper process.
 	// Set REMOTE_PIPER_URL (and optionally REMOTE_PIPER_KEY) in the systemd unit.
-	s.state.RemotePiperURL = os.Getenv("REMOTE_PIPER_URL")
-	s.state.RemotePiperKey = os.Getenv("REMOTE_PIPER_KEY")
+	s.state.RemotePiperURL   = os.Getenv("REMOTE_PIPER_URL")
+	s.state.RemotePiperKey   = os.Getenv("REMOTE_PIPER_KEY")
+	s.state.RemotePiperVoice = os.Getenv("REMOTE_PIPER_VOICE")
 
 	if s.state.RemotePiperURL != "" {
-		log.Printf("piper: using remote TTS at %s", s.state.RemotePiperURL)
+		log.Printf("piper: using remote TTS at %s (voice=%q)", s.state.RemotePiperURL, s.state.RemotePiperVoice)
 	} else {
 		// Try to find and start local Piper.
 		bin, model, ok := piper.FindPiper()

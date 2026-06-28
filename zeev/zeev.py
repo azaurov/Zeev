@@ -6423,6 +6423,12 @@ def run_device_mode():
 
     _turn_count = [0]           # counts completed turns for auto-memorize trigger
     _voice_coach_pending = [False]  # True → next transcript is analyzed as voice practice
+    _pending_detail = [None]        # full reply text waiting behind a "Want to hear more?"
+
+    _MORE_YES_RE = re.compile(
+        r'\b(yes|yeah|yep|sure|go ahead|please|tell me|more|continue|expand|elaborate|details?)\b',
+        re.IGNORECASE,
+    )
 
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
@@ -6462,6 +6468,24 @@ def run_device_mode():
             _speak_device(reply)
             _go_ready() if _busy.is_set() else _go_idle()
             return
+
+        # ── Pending detail expansion ──────────────────────────────────────────
+        if _pending_detail[0] and _MORE_YES_RE.search(transcript):
+            detail = _pending_detail[0]
+            _pending_detail[0] = None
+            session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            session.append({"role": "assistant", "content": detail})
+            append_message("assistant", detail)
+            print(f"Zeev [detail]: {detail}")
+            board.set_rgb(*_LED_SPEAKING)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
+            _progressive_speak(detail)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+        else:
+            _pending_detail[0] = None  # any other input clears pending
 
         session.append({"role": "user", "content": transcript})
         append_message("user", transcript)
@@ -6709,7 +6733,13 @@ def run_device_mode():
         short    = _MODEL_SHORT.get(model_id, "?")
 
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
-        sys_prompt   = _build_system_prompt(transcript) + "\n\nVOICE INTERFACE: Reply in 1-2 sentences only. No lists, no bullet points, no preamble."
+        sys_prompt   = _build_system_prompt(transcript) + (
+            "\n\nVOICE INTERFACE: You are speaking aloud. Rules:\n"
+            "1. Always reply in exactly 1-2 sentences. Never more.\n"
+            "2. No lists, bullet points, headers, or preamble.\n"
+            "3. If the topic deserves a longer answer, give a 1-2 sentence summary "
+            "and end with 'Want to hear more?' — do NOT expand further."
+        )
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
         if needs_parsha_reading(transcript):
             tok_limit = 1600  # room to recite several chapters
@@ -6791,6 +6821,17 @@ def run_device_mode():
         speak_text = last_complete.group(1) if last_complete else reply
         if speak_text != reply:
             print(f"[tts] truncated to last sentence ({len(speak_text)}/{len(reply)} chars)", flush=True)
+
+        # If LLM ended with "Want to hear more?", pre-generate the detail in background
+        _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
+        if _WANT_MORE_RE.search(speak_text):
+            def _prefetch_detail():
+                detail_msgs = [{"role": "system", "content": _build_system_prompt(transcript)}] + session
+                r, _ = _groq_post(detail_msgs, model_id, stream=False, max_tokens=600)
+                if r and r.status_code == 200:
+                    _pending_detail[0] = r.json()["choices"][0]["message"]["content"].strip()
+                    print("[detail] pre-generated and ready", flush=True)
+            threading.Thread(target=_prefetch_detail, daemon=True).start()
 
         board.set_rgb(*_LED_SPEAKING)
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)

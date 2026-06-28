@@ -6718,7 +6718,7 @@ def run_device_mode():
         elif model_id in (MODELS["3"][0], MODELS["2"][0]):
             tok_limit = 160
         else:
-            tok_limit = 130
+            tok_limit = 160
         resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
@@ -6729,7 +6729,7 @@ def run_device_mode():
             print(f"[llm] 429 on {short} — retrying with 8B", flush=True)
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
-            tok_limit = 130
+            tok_limit = 160
             resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
@@ -6786,9 +6786,15 @@ def run_device_mode():
                     print(f"[memory] {len(facts)} fact(s) stored", flush=True)
             threading.Thread(target=_bg_memorize, daemon=True).start()
 
+        # Truncate to last complete sentence so TTS never gets a dangling fragment
+        last_complete = re.search(r'^(.*[.!?])\s*$', reply.strip(), re.DOTALL)
+        speak_text = last_complete.group(1) if last_complete else reply
+        if speak_text != reply:
+            print(f"[tts] truncated to last sentence ({len(speak_text)}/{len(reply)} chars)", flush=True)
+
         board.set_rgb(*_LED_SPEAKING)
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-        _progressive_speak(reply)
+        _progressive_speak(speak_text)
         print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 
         _go_ready() if _busy.is_set() else _go_idle()

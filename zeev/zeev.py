@@ -775,8 +775,9 @@ def zeev_cleanup():
     _MUSIC_PROC = None
     _piper_term_proc = None
 
-    # Kill any orphaned processes that were piped through zeev temp files
-    for pattern in ("zeev_music", "zeev_rec.wav"):
+    # Kill any orphaned processes that were piped through zeev temp files or
+    # are known TTS/audio workers that may outlive the Python process.
+    for pattern in ("zeev_music", "zeev_rec.wav", "piper --model", "mpg123"):
         try:
             subprocess.run(
                 ["pkill", "-f", pattern],
@@ -7069,6 +7070,8 @@ def run_device_mode():
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
+    import atexit as _atexit
+    _atexit.register(zeev_cleanup)
 
     while True:
         time.sleep(1)
@@ -7224,6 +7227,8 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+    import atexit as _atexit
+    _atexit.register(zeev_cleanup)
 
     try:
         readline.read_history_file(str(RL_HISTORY))

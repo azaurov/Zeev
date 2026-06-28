@@ -11,6 +11,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse
 - **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; Hebrew gTTS used whenever Hebrew characters appear in a response
 - **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
+- **Weekly reflection** — every Sunday, synthesizes the past week of conversations into a first-person reflection (recurring themes, emotional patterns, open questions, emerging interests) stored in `zeev.db` and injected into every system prompt; uses bosgame llama3.1:8b or Groq 70B
 - **Quantum reasoning** — maps any idea or dilemma to a quantum circuit, simulates interference, and interprets the pattern as insight; compounds daily via `quantum_daily.py` (8 canonical scenarios, cron 6 AM)
 - **Music playback** — natural language YouTube search via yt-dlp + ffmpeg (`play some jazz`, `stop`)
 - **Bluetooth audio** — pair and connect headphones by voice (`scan for bluetooth`, `pair my headphones`, `disconnect bluetooth`); all TTS and music routes through the headphones when connected; `/bt` slash command for manual control
@@ -21,7 +22,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
 - **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
 - **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded to city/region via Nominatim; injected into context automatically on location queries; `/gps` terminal command; `GET /gps` web endpoint
-- **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights) in a single WAL-mode `zeev.db`; no flat files
+- **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights, weekly reflections) in a single WAL-mode `zeev.db`; no flat files
 
 ## zeev-audio daemon
 

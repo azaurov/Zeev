@@ -152,6 +152,10 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 - DB schema: `passages` FTS5 table with `source`, `ref`, `en`, `he` columns. `done` table tracks imported refs.
 - Torah/Sefaria replies force `lang='he'` for TTS regardless of reply script.
 
+### Weekly reflection
+
+`zeev/weekly_reflection.py` — synthesizes the last 7 days of messages into a first-person Zeev reflection (themes, patterns, open questions, emotional context). Stored in `reflections` table; loaded by `init_learning()` and injected into every system prompt under `## Weekly reflection:` (capped at 1500 chars). LLM: bosgame `llama3.1:8b` first, Groq 70B fallback. Cron: `0 7 * * 0` (Sunday 7 AM). `--show` prints latest; `--days N` adjusts window. Skips if fewer than 10 messages in the window.
+
 ### Quantum reasoning
 
 `quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py`: idea → circuit spec → simulate → interpret. `past_insights` (k=3 most recent from `quantum_insights` table) compound learning over time.
@@ -196,7 +200,7 @@ zeev/
   quantum_daily.py          # daily quantum teaching (cron 0 6 * * *)
   quantum_convo.py          # quantum-weighted call topics
   data/                     # runtime files (git-ignored)
-    zeev.db                 # WAL SQLite: messages, facts, notes, settings, quantum_insights
+    zeev.db                 # WAL SQLite: messages, facts, notes, settings, quantum_insights, reflections
     torah.db                # FTS5 corpus (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
 zeev-audio/                 # Go audio daemon (cross-compiled arm64)
   cmd/zeev-audio/main.go

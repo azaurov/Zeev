@@ -4,441 +4,262 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Hardware Environment
 
-This is a Raspberry Pi project (Zeev) using Python with hardware HATs (Whisplay display, PiSugar battery, WM8960 audio). Always verify hardware-related config changes (`config.txt`, I2C/SPI baudrates) before assuming software causes for audio/display failures.
+Raspberry Pi Zero 2W (512 MB RAM, 4× Cortex-A53). Hardware HATs: Whisplay display (1.96" ST7789 LCD, WM8960 audio, RGB LED, KEY on GPIO17), PiSugar battery. Always verify hardware-related config changes (`config.txt`, I2C/SPI baudrates) before assuming software causes for audio/display failures.
 
 ## zeev-audio Go daemon
 
-A companion Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations: Piper TTS (persistent ONNX process, warm on startup), BT detection/scan/pair/connect, WM8960 keepalive, VAD recording, music playback, and SCO call-audio. Python delegates to it via `zeev/audio_client.py`; falls back to its own subprocess implementations when the daemon is unavailable.
+`zeev-audio/` handles latency-sensitive audio: Piper TTS (persistent ONNX, warm on startup), BT detection/scan/pair/connect, WM8960 keepalive, VAD recording, music playback, SCO call-audio. Python delegates via `zeev/audio_client.py`; falls back to its own subprocess implementations when unavailable.
 
-**Wire protocol**: NDJSON over Unix domain socket `/tmp/zeev-audio.sock`. Each request is one JSON line (`{"id": "...", "cmd": "...", ...fields...}\n`); each response is one JSON line (`{"id": "...", "ok": true|false, ...fields...}\n`).
+**Wire protocol**: NDJSON over Unix socket `/tmp/zeev-audio.sock`. One JSON line per request/response.
 
 **Commands**:
 | cmd | purpose |
 |---|---|
 | `speak` / `speak_sync` | Remote Kokoro TTS on bosgame (24kHz) or local Piper fallback; WAV rate parsed from header; ffmpeg resample → aplay |
-| `speak_sco` | Remote Kokoro/Piper → ffmpeg resample to SCO rate → aplay on SCO device (HFP call path) |
+| `speak_sco` | Kokoro/Piper → ffmpeg resample to SCO rate → aplay on SCO device |
 | `vol_get` / `vol_set` | amixer Master → wm8960 Speaker fallback |
-| `bt_detect` / `bt_verify` | bluealsa-aplay PCM query, sets BT rate/channels globals |
+| `bt_detect` / `bt_verify` | bluealsa-aplay PCM query |
 | `bt_scan` / `bt_pair` / `bt_connect` / `bt_disconnect` | bluetoothctl wrappers |
-| `audio_dev` | returns active ALSA PCM string (BT or wired) |
-| `play` / `stop` | yt-dlp → ffmpeg → aplay music playback |
-| `record` | arecord + RMS VAD, returns WAV bytes; `rate` field sets capture Hz (default 16000) |
-| `sco_record` | arecord from SCO capture device at negotiated rate, returns WAV bytes |
+| `audio_dev` | active ALSA PCM string |
+| `play` / `stop` | yt-dlp → ffmpeg → aplay music |
+| `record` | arecord + RMS VAD, returns WAV bytes; `rate` field (default 16000) |
+| `sco_record` | arecord from SCO capture at negotiated rate |
 | `health` | load/mem/battery summary |
 
-**`_init_audio()`** — called at startup in all modes; connects `AudioClient` to the socket. Sets `_audio` global. Falls back silently if socket missing.
+**Daemon startup**: pre-warms Piper ONNX on `Init()`. Pi Zero 2W: ~5s warm / ~20s cold. Also starts WM8960 keepalive goroutine (1s silence every 20s) and `bt.Detect(2)`.
 
-**`AudioClient`** (`zeev/audio_client.py`) — thread-safe Python adapter. Reconnects once on broken pipe. All methods return sensible defaults on error — zeev.py never sees exceptions. Key methods: `speak_sync()`, `sco_speak()`, `sco_record()`, `record()`, `bt_detect()`, `bt_verify()`, `bt_scan()`, `bt_connect()`, `bt_disconnect()`, `bt_pair()`, `play()`, `stop()`, `get_volume()`, `set_volume()`, `audio_dev()`, `health()`.
-
-**Daemon startup**: the Go daemon pre-warms Piper's ONNX model immediately on start (`Init()` calls `p.Start()`). On Pi Zero 2W this takes ~5s warm / ~20s cold. Model is loaded once; all subsequent `speak`/`speak_sco` calls synthesize in ~4s without reload. The daemon also starts the WM8960 keepalive goroutine (1s silence every 20s) and calls `bt.Detect(2)` to find any connected headphones.
-
-**systemd service**: `zeev-audio.service` at `/etc/systemd/system/`, `User=ragnar`, `Restart=on-failure`. Managed with `sudo systemctl start/stop/status zeev-audio`. Logs via `sudo journalctl -u zeev-audio`.
+**systemd**: `zeev-audio.service`, `User=ragnar`, `Restart=on-failure`.
 
 **Building and deploying**:
 ```bash
-cd zeev-audio
-# cross-compile for Pi Zero 2W (aarch64)
-make pi
-# stop daemon, scp binary, restart
+cd zeev-audio && make pi
 ssh ragnar@ragnarok "sudo systemctl stop zeev-audio"
 scp bin/zeev-audio-pi ragnar@ragnarok:~/zeev-audio/zeev-audio
 scp ../zeev/audio_client.py ragnar@ragnarok:~/Zeev/zeev/audio_client.py
 ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 ```
 
-**`speak_sco` SCO note**: the Piper branch in `bt_speak_sco()` delegates to `_audio.sco_speak(text, sco_dev, samplerate)` when daemon available. If daemon returns `ok=True`, the function returns immediately — daemon handled Piper → resample → aplay. Call loop recording (`_vad_collect`) stays in Python: it needs variable `silence_ms` (3000ms for IVR, 900ms for live) that the daemon's fixed-threshold VAD can't match. `sco_record()` exists for other use cases.
-
 ## TTS / Audio
 
-TTS uses Piper with a persistent process for the wired speaker path; do NOT use per-sentence model reloads or short inter-chunk timeouts (the 0.3s timeout caused only the first sentence to play). Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
-
-**Daemon delegation**: when the Go daemon is running, `_speak_device()` and `speak_terminal()` delegate the Piper path to `_audio.speak_sync()` and return immediately — no Python subprocess spawned. The Python Piper subprocess path is retained as fallback. The Python WM8960 keepalive thread and Piper prewarm thread are both skipped when the daemon is available (the daemon handles both).
-
-In device mode, `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio by resetting `_piper_dev_proc = None` and restarting the process — only falls through to espeak-ng if both attempts fail.
-
-**BT vs speaker Piper path**: when BT headphones are connected, `_speak_device()` uses a **one-shot** Piper subprocess (close stdin after writing, read stdout until EOF). This guarantees the full multi-sentence response is captured before playback, avoiding the timeout-truncation problem on the Pi Zero 2W (~2s synthesis per sentence). The persistent process path is only used for the wired speaker.
-
-**BT audio resampling**: all audio going to BlueALSA must match the negotiated A2DP format (`_BT_RATE` / `_BT_CHANNELS`, queried from `bluealsa-aplay --list-pcms`). Both Orpheus (24000Hz mono WAV) and Piper (22050Hz mono raw PCM) are resampled via an inline `ffmpeg` pipeline before `aplay`. Do NOT use `plug:bluealsa:...` ALSA syntax — the parser cannot handle colons in nested params; pass explicit `-f S16_LE -r _BT_RATE -c _BT_CHANNELS` flags to `aplay` instead.
-
-`_collect_piper_audio(p, first_timeout=30.0, idle_timeout=8.0)` — reads from the Piper subprocess with a 30s first-chunk timeout (covers cold ONNX model load on Pi Zero 2W, ~30s cold / ~5s warm) then 8s idle timeout between chunks. Measured inter-sentence gap on warm Pi Zero 2W: ~4.5s; 8s gives a 3.5s safety margin. Previous 2s timeout truncated after sentence one; 5s had only 0.5s margin.
-
-WM8960 auto-powers-down after ~30s of ALSA inactivity. The Go daemon runs a keepalive goroutine (1s silence every 20s). When the daemon is unavailable, device mode runs a Python keepalive thread instead.
-
-All audio output (TTS, music) routes through `bt_audio_dev()` which returns the active BlueALSA PCM string when Bluetooth headphones are connected, or `plughw:wm8960soundcard,0` otherwise. Requires `bluez-alsa-utils` + `libasound2-plugin-bluez` on the Pi.
+**Critical constraints**:
+- Piper persistent process for wired speaker; **do NOT** use per-sentence model reloads or short inter-chunk timeouts (0.3s timeout caused only the first sentence to play — burned us before).
+- `_collect_piper_audio(p, first_timeout=30.0, idle_timeout=8.0)` — 30s first-chunk timeout covers cold ONNX load (~30s cold / ~5s warm). 8s idle timeout between chunks; inter-sentence gap on Pi Zero 2W warm: ~4.5s. Previous 2s timeout truncated after sentence one; 5s had only 0.5s margin.
+- **BT one-shot vs persistent**: when BT headphones are connected, `_speak_device()` uses a **one-shot** Piper subprocess (stdin close → read stdout until EOF) — guarantees full multi-sentence capture before playback. Persistent process only for wired speaker.
+- **BT audio resampling**: all BlueALSA output must match negotiated A2DP format (`_BT_RATE`/`_BT_CHANNELS` from `bluealsa-aplay --list-pcms`). **Do NOT** use `plug:bluealsa:...` ALSA syntax — colons in nested params break the parser. Pass explicit `-f S16_LE -r _BT_RATE -c _BT_CHANNELS` flags to `aplay`.
+- WM8960 auto-powers-down after ~30s ALSA inactivity. Daemon runs keepalive; when unavailable, device mode runs Python keepalive thread.
+- When daemon is running, `_speak_device()` and `speak_terminal()` delegate Piper to `_audio.speak_sync()` immediately — no Python subprocess. Python WM8960 keepalive and Piper prewarm threads are skipped (daemon handles both).
+- `_speak_device()` retries Piper once on `BrokenPipeError`/`OSError` or empty audio before falling through to espeak-ng.
+- Always declare globals (e.g. `_SETTINGS_TTS_ON`) before use to avoid `SyntaxError`s.
+- **`_gtts_fetch_chunk`** uses `urllib.request` (not `requests`) to avoid shared urllib3 connection pool conflicts with the bosgame fallback stream.
 
 ## Bluetooth
 
-- `_BT_AUDIO_DEV` global holds the active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`) when headphones are connected.
-- `_BT_RATE` / `_BT_CHANNELS` globals — store the negotiated A2DP format (e.g. 44100Hz, 1ch), queried from `bluealsa-aplay --list-pcms` at connect/startup.
-- `bt_detect_connected()` — called at device mode startup; queries `bluealsa-aplay --list-pcms`, sets `_BT_AUDIO_DEV`/`_BT_RATE`/`_BT_CHANNELS`. Retries 2× with 1s sleep (BT headphones are optional at boot; users can connect after startup).
-- `bt_verify_connected()` — called at the top of `_speak_device()` on every TTS call; re-queries `bluealsa-aplay --list-pcms` and clears `_BT_AUDIO_DEV`/resets rate+channels if the device is no longer listed. Handles physical disconnects (headphones powered off/out of range) that `bt_disconnect()` would not catch.
-- `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])` (parses all output after completion — avoids readline hang on partial ANSI escape sequences from bluetoothctl); results stored in `_bt_scan_results`.
-- `bt_pair(mac)` — pairs and trusts a device via bluetoothctl.
-- `bt_connect(mac)` / `bt_disconnect(mac)` — connect/disconnect; calls `bt_detect_connected()` after connect to refresh `_BT_AUDIO_DEV`/format.
-- Startup BT volume: raw 50/127 (~39%) via `amixer -D bluealsa cset numid=2 50` when headphones are detected at startup.
-- `extract_bt_intent(text)` — detects 'scan'/'pair'/'connect'/'disconnect' from natural language.
-- Natural language handled before LLM routing in both terminal and device mode.
+- `_BT_AUDIO_DEV` — active BlueALSA device string (`bluealsa:DEV=XX:XX,PROFILE=a2dp`).
+- `_BT_RATE` / `_BT_CHANNELS` — negotiated A2DP format, queried from `bluealsa-aplay --list-pcms`.
+- `bt_detect_connected()` — device mode startup; sets globals; retries 2× with 1s sleep.
+- `bt_verify_connected()` — called at top of every `_speak_device()` call; clears `_BT_AUDIO_DEV` if device no longer listed (handles physical disconnects).
+- `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])`, parses all output after completion (avoids readline hang on partial ANSI escape sequences from bluetoothctl).
+- Startup BT volume: raw 50/127 (~39%) via `amixer -D bluealsa cset numid=2 50`.
 - `/bt` slash command: `scan`, `pair <N>`, `<N>` to connect, `off` to disconnect.
 
 ## Phone Calls (HFP)
 
-Zeev can make and receive phone calls via Bluetooth HFP (Hands-Free Profile) on the Pi. The phone acts as the source; the Pi acts as a hands-free unit.
-
-- **HFP vs A2DP**: HFP is for bidirectional phone calls (uses SCO narrowband audio at 8 or 16 kHz); A2DP is for audio streaming headphones.
-- **SCO audio device**: `bluealsa:DEV=<mac>,PROFILE=sco,SRV=org.bluealsa` — exposed by BlueALSA v4.3.1+ as ALSA PCM for both recording (capture) and playback.
-- **`bt_speak_sco(text, sco_dev, samplerate)`** — speak text through the SCO device so the caller hears Zeev. TTS chain: Groq Orpheus WAV → Cartesia WAV → Piper (via daemon `speak_sco` if available, else Python subprocess) → gTTS MP3. All outputs resampled via ffmpeg to the negotiated SCO rate (S16_LE, mono). When the Go daemon handles Piper, it synthesizes one-shot → resamples → plays in a single round-trip and `bt_speak_sco` returns immediately after.
-- **`bt_hfp_dev(mac)` / `bt_sco_rate(mac)` / `bt_hfp_detect()`** — query the SCO device string and sample rate; detect the phone's MAC from bluealsa output.
-- **`bt_call_dial(number)` / `bt_call_hangup()`** — dial and hang up via AT commands (`ATD`, `AT+CHUP`) sent over D-Bus RFCOMM.
-- **`bt_call_dtmf(mac, digit)`** — send DTMF tone (`AT+VTS=<digit>`) for IVR menu navigation instead of TTS speech.
-- **`bt_call_loop(speak_fn, stt_fn, llm_fn, mac, record_dir, call_intent)`** — main call conversation loop:
-  - Records caller audio via SCO capture + VAD (voice activity detection)
-  - Detects call type on first turn: **voicemail** (voicemail greeting regex) → leave message + hangup; **IVR** (menu prompt regex) → wait for menu, reply with DTMF or listen for next prompt; **live/unknown** → normal conversation
-  - For voicemail: extracts explicit message from call intent ("saying X") or generates via LLM; includes neutral default if neither
-  - For IVR: uses focused system prompt ("reply ONLY with a single digit"); sends DTMF if LLM returns a digit; re-checks for voicemail mid-call (e.g., IVR → voicemail transfer)
-  - For live calls: greeted with "Hello, this is Zeev, Alex's AI assistant." at call start (before listening); uses focused LLM prompt with only call_intent context (no memory facts injected)
-  - Hangup detection skipped in IVR mode (IVR "Goodbye" is part of the menu, not call end)
-  - Call recordings saved to `call_recordings/` dir per turn
-- **`--no-greeting` flag** — suppresses startup TTS greeting (useful for testing calls via piped stdin without audio distraction).
-- **Process lifecycle during calls**: If stdin closes (e.g., piped command), the REPL's exit handler waits for `_IN_CALL` to clear before exiting — ensures call loop runs to completion even if the user's input stream ends.
-- **HFP guard**: Both terminal and device mode call paths call `bt_hfp_detect()` after the post-dial sleep; if it returns empty (phone not connected via HFP), the call is hung up and an error is spoken/printed instead of entering `bt_call_loop` with an invalid SCO device (which previously caused a hard hang).
-- **Whisper hallucination filter**: `bt_call_loop` filters known Whisper hallucinations on ring tone / hold music ("Thank you.", "thanks", "please", "goodbye", etc.) before incrementing `turn` — prevents the call loop from treating ring noise as real speech.
-- **Greeting deferred**: "Hello, this is Zeev, Alex's AI assistant." is spoken only when the call is classified as live/unknown — not before call type is known (voicemail and IVR don't need it).
-- **Fast call detection** (`bt_fast_detect`): replaces VAD on turn 0. Records up to 6s; early-exits at ~3s if speech onset detected within 1.5s (real person said "Hello"). Transcribes with `groq_stt_call()` using `_CALL_WHISPER_PROMPT` (phone vocabulary bias) to suppress hallucinations. **Live-person check runs before voicemail regex**: early onset + short transcript (≤5 words, onset >100ms) → classified `live` immediately without consulting `detect_call_type()` — prevents Whisper hallucinations on 8kHz SCO audio from misclassifying a real pickup as voicemail. Only longer transcripts fall through to regex + LLM. Cuts voicemail detection from 25s timeout to ~6-9s direct.
-- **`_speech_onset_ms(pcm, samplerate)`** — finds millisecond offset of first speech-energy frame (RMS > 400). Onset at 0ms = pickup click/noise, not speech; threshold >100ms required for live-person heuristic.
-- **`groq_stt_call(wav_bytes)`** — Whisper with `_CALL_WHISPER_PROMPT`: "Hello? Hi, who's this? You've reached. Please leave a message after the beep. Press 1 for. Thank you for calling." Biases transcription toward call vocabulary on 8kHz SCO audio.
-- **Speculative pre-generation**: `bt_call_loop` starts a background thread immediately after dialing that pre-generates the voicemail message via `llm_fn` while the phone is ringing. Result stored in `_pregen_msg` list. All three voicemail message sites (turn 0 detection, mid-call IVR→voicemail transition, 25s timeout) check `_pregen_msg` first — if the message is ready, no LLM call is needed at speak time. Turn 0 site does `_pregen_thread.join(timeout=5)` to wait up to 5s if still generating. Cuts post-beep TTS latency from ~14s to ~5s.
-- **SCO TTS chain order**: Groq Orpheus (daniel, male, WAV) → Cartesia (Kurt, male, ~100ms, WAV) → Piper Ryan (male, raw PCM) → gTTS (last resort). Cartesia uses `sonic-2` model via `https://api.cartesia.ai/tts/bytes`. Config: `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` in `.env`.
-- **Live call history**: `bt_call_loop` injects the last 4 exchanges from `call_log` into each live-call LLM prompt, enabling topic continuity across turns.
-- **`zeev/quantum_convo.py`** — generates quantum-weighted conversation topics for calls. Runs a quantum circuit over conversation directions (empathy/vulnerability, playful tone, small talk, depth), decodes top interference outcomes into lead topics, and builds a call intent string. Usage: `python3 zeev/quantum_convo.py --name NAME [--about TOPIC] [--call NUMBER]`. Standalone (prints scenarios) or dials directly.
+- **SCO audio device**: `bluealsa:DEV=<mac>,PROFILE=sco,SRV=org.bluealsa` (BlueALSA v4.3.1+).
+- **`bt_speak_sco` TTS chain**: Groq Orpheus → Cartesia (`sonic-2`, `CARTESIA_API_KEY`/`CARTESIA_VOICE_ID` in `.env`) → Piper (via daemon `speak_sco` or Python subprocess) → gTTS. All resampled via ffmpeg to SCO rate.
+- **`bt_call_loop`**: turn 0 uses `bt_fast_detect` (records ≤6s, early-exits at ~3s on speech onset). **Live-person check runs before voicemail regex**: early onset + short transcript (≤5 words, onset >100ms) → `live` immediately — prevents Whisper hallucinations on 8kHz SCO audio from misclassifying a real pickup as voicemail.
+- **`_speech_onset_ms`** — ms offset of first speech-energy frame (RMS > 400). Onset at 0ms = pickup click, not speech.
+- **Speculative pre-generation**: background thread starts immediately after dialing to pre-generate voicemail message via LLM while ringing. Result in `_pregen_msg`. Cuts post-beep latency from ~14s to ~5s.
+- **Call type detection**: voicemail (regex) → leave message + hangup; IVR (menu prompt regex) → DTMF digits; live/unknown → conversation. IVR hangup detection skipped ("Goodbye" is part of menu).
+- **HFP guard**: `bt_hfp_detect()` called after post-dial sleep; if empty, hang up instead of entering `bt_call_loop` with invalid SCO device (previously caused a hard hang).
+- **Whisper hallucination filter**: known hallucinations on ring tone ("Thank you.", "thanks", etc.) filtered before incrementing `turn`.
+- **`groq_stt_call`** — Whisper with `_CALL_WHISPER_PROMPT` biasing toward call vocabulary on 8kHz audio.
+- **`zeev/quantum_convo.py`** — quantum-weighted conversation topics for calls. Usage: `python3 zeev/quantum_convo.py --name NAME [--about TOPIC] [--call NUMBER]`.
 
 ## Version Control
 
-Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless explicitly asked. Add generated/data files to `.gitignore` by default and confirm before committing.
+Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless explicitly asked. Add generated/data files to `.gitignore` by default.
 
 ## Shell Scripts / Deployment
 
-When generating shell scripts or sudoers/inline commands for the Pi, watch for CRLF line endings from copy-paste; prefer inline commands or strip CRLF explicitly.
-
-## Project: Zeev
-
-A local AI companion running on a Raspberry Pi Zero 2W. It calls the [Groq](https://groq.com) API (OpenAI-compatible) for fast cloud inference and supports both a terminal REPL and a mobile-friendly web UI.
+Watch for CRLF line endings from copy-paste in shell scripts/sudoers; prefer inline commands or strip CRLF explicitly.
 
 ## Running
 
-**Terminal REPL:**
 ```bash
-python3 zeev/zeev.py
+python3 zeev/zeev.py           # terminal REPL
+python3 zeev/zeev.py --web     # web server HTTP port 5000
+python3 zeev/zeev.py --https   # web server HTTPS port 5443
+python3 zeev/zeev.py --device  # Whisplay HAT device mode
+python3 zeev/zeev.py --call <NUMBER> [--intent "TEXT"]
 ```
 
-**Web server (HTTP, port 5000):**
-```bash
-python3 zeev/zeev.py --web
-```
-
-**Web server (HTTPS, port 5443):**
-```bash
-python3 zeev/zeev.py --https
-```
-
-Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and fill in your keys — `zeev.py` loads `.env` automatically at startup via a plain-text parser (no `python-dotenv` needed). `GROQ_API_KEY` is used for chat completions, TTS (Orpheus), and STT (Whisper). No other dependencies beyond the standard library and `requests` (`python3-requests` from apt).
+Requires `GROQ_API_KEY` and `TAVILY_API_KEY` in `.env` (loaded via plain-text parser, no python-dotenv). Only stdlib + `requests` needed.
 
 ## Architecture
 
-Everything lives in `zeev/zeev.py` — a single-file script:
+Single-file app: `zeev/zeev.py`.
 
-- **`stream_reply()`** — POSTs to Groq's `/v1/chat/completions` with `stream: true`, prints tokens as they arrive (terminal mode).
-- **`load_prior()` / `append_message()`** — persistence via `data/zeev.db` SQLite (`messages` table, WAL mode). Loads the last `PRIOR_TURNS=15` turns (`ORDER BY id DESC LIMIT N`, reversed); caps in-session context at 60 messages.
-- **`set_volume(level)` / `get_volume()`** — get/set system volume (0–100). `set_volume()` calls `amixer sset Master N%`; if that fails, falls back to `amixer -c wm8960soundcard sset Speaker` (raw 0–127). State stored in `_VOLUME` global (default 87).
-- **`tavily_search(query)`** — calls Tavily API, returns up to 5 result snippets.
-- **`needs_search(text)`** — returns True if the message matches `_SEARCH_RE`.
-- **`_build_system_prompt(user_text, on_search)`** — assembles the per-turn system prompt: base persona + memory facts + RAG hits + optional Google Calendar events + optional Tavily results. `_with_search()` is an alias kept for compatibility.
-- **`_groq_post(msgs, model, stream, max_tokens=400)`** — thin wrapper around the Groq API call. Token limit is model-aware: Torah queries and 70B/R1 models use 1200; 8B fast uses 600. On connection failure, `_llm_post()` automatically falls back to `_bosgame_stream()` if `BOSGAME_URL` is set. Per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch) tracks a 5-min backoff per model so a 70B rate limit doesn't block 8B calls.
-- **`_bosgame_complete(msgs, max_tokens, json_mode)`** — non-streaming OpenAI-compatible POST to bosgame's Ollama via nginx proxy (`BOSGAME_URL/v1/chat/completions`). Uses `BOSGAME_MODEL` (default `llama3.2:1b`). Called by `extract_memory()` as the preferred (free, local) backend before falling back to Groq.
-- **`_bosgame_stream(msgs, max_tokens)`** — streaming chat fallback via bosgame Ollama (`llama3.1:8b`). Uses `http.client.HTTPSConnection` directly (not `requests`) with a dedicated SSL context to avoid urllib3 pool conflicts. Connect timeout 10s; after connect, socket timeout extended to 300s for slow CPU inference. Returns a `_LineIter` wrapper with `iter_lines()` compatible with `_iter_llm_tokens(..., "groq")`.
-- **`_llm_post(msgs, model, stream, max_tokens)`** — routes to the active LLM provider. For the `groq` provider: on connection errors (`NameResolution`, `Failed to resolve`, `Max retries`, `ConnectionError`, `Connection refused`), prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
-- **`extract_memory(session_msgs)`** — prefers bosgame (`_bosgame_complete`, `llama3.2:1b`, ~5–10s on CPU) over Groq for fact extraction; falls back to Groq on error.
-- **`route_model(text)`** — auto-selects model ID based on keyword heuristics (`_REASONING_RE`, `_SMART_RE`).
-- **`run_web_server()`** — `ThreadingHTTPServer` serving a single-page chat UI (`_WEB_HTML`). Streams SSE tokens to the browser via `/chat`; `/clear` wipes the session; `/memory` returns stored facts; `/memorize` triggers fact extraction; `/tts` accepts POST `{"text": "..."}` and returns WAV audio via Groq Orpheus; `/transcribe` accepts raw audio bytes and returns `{"transcript": "..."}` via Groq Whisper; `/thermal` streams SSE with `{"thermal": {frame, min, max, center, hotspot_row, hotspot_col}}` then optional LLM tokens; `/thermal-status` returns `{"available": bool}`; `/volume` GET returns `{"volume": N}`, POST accepts `{"delta": ±N}` or `{"level": N}` and returns updated `{"volume": N}`.
-- **`run_call_mode(number, intent="")`** — CLI entry point invoked by `python3 zeev/zeev.py --call <NUMBER> [--intent "TEXT"]`. Dials via HFP, sets up SCO speak (via `bt_speak_sco`, not `_speak_device`), STT (Groq Whisper over wrapped 16 kHz mono WAV), and LLM (focused call prompt + recent session, non-streaming 200 max_tokens) callbacks, then runs `bt_call_loop`. SIGINT/SIGTERM hang up cleanly. Use this for one-shot scripted calls from the Pi's shell when device mode isn't running.
-- **`groq_tts(text)`** — calls Groq's `canopylabs/orpheus-v1-english` TTS model (`daniel` voice), returns WAV bytes or `None`. Returns `None` for non-English text (Orpheus is English-only).
-- **`detect_lang(text)`** — returns `'he'` (Hebrew Unicode block), `'ru'` (Cyrillic block), `'es'` (ñ/¿/¡/accented vowels), or `'en'` as default.
-- **`_clean_for_tts(text, lang=None)`** — strips markdown; replaces the Tetragrammaton with `אֲדֹנָי` (Hebrew) or `Adonai` (English) depending on `lang`.
-- **`speak_terminal(text, lang=None)`** — optional `lang` override skips `detect_lang`; routes to Google Translate TTS + mpg123 (he/es/ru) or Piper (en). Runs in a background thread. Torah queries force `lang='he'`.
-- **`_gtts_chunks(text)`** — splits text at sentence boundaries into ≤200-char chunks for Google Translate TTS.
-- **`_gtts_fetch_chunk(chunk, lang)`** — fetches one MP3 chunk from `translate.googleapis.com/translate_tts` using `urllib.request` (not `requests`, to avoid shared urllib3 connection pool conflicts with the bosgame fallback stream). No API key needed.
-- **`_gtts_speak(text, lang, adev=None)`** — plays Google Translate TTS via `mpg123` in a background thread; `adev` selects the ALSA device (used in device mode).
-- **`init_tts()`** — detects Piper binary and populates `PIPER_MODELS` dict (`en`) by scanning `~/piper/` and `~/.local/share/piper/`. Falls back to espeak-ng. Sets `TTS_AVAILABLE`, `PIPER_BIN`, `PIPER_MODELS`.
-- **`init_thermal()`** — tries to connect to the MLX90640 on I2C bus 3 (GPIO5/6 software I2C overlay). Sets `THERMAL_AVAILABLE`.
-- **`init_camera()`** — tries to open a `Picamera2` instance; sets `CAMERA_AVAILABLE`. Called at startup in all modes.
-- **`capture_image(width=1280, height=720)`** — captures a JPEG via picamera2, applies 180° flip if `CAMERA_FLIP` is set, returns base64 string or `None` on failure.
-- **`_build_vision_msgs(image_b64, question="")`** — builds the multimodal messages list (system prompt + image URL + question) for a vision API call.
-- **`VISION_MODEL`** — `"meta-llama/llama-4-scout-17b-16e-instruct"` (Groq). Used by `/look` (terminal), `/snap` (web UI), and natural-language camera queries in device mode.
-- **`_CAMERA_RE`** — regex that matches natural-language camera intents ("what do you see", "take a photo", "can you see anything", etc.). Checked in `_handle_transcript` before text LLM routing; only fires when `CAMERA_AVAILABLE` is True.
-- **`_ensure_cert()`** — generates a self-signed TLS cert (SAN for local IP) when `--https` is used.
-- **`_db()` / `_db_lock` / `_db_con`** — lazy singleton SQLite connection to `data/zeev.db` (`check_same_thread=False`, WAL mode). All storage calls acquire `_db_lock` before executing; this is the thread-safety mechanism for `ThreadingHTTPServer`. Tables: `messages`, `facts`, `notes`, `settings`.
-- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`, runs `pkill -f` for `zeev_music`, `zeev_rec.wav`, `piper --model`, and `mpg123` to catch orphaned TTS/audio processes, and removes `/tmp/zeev_*` temp files. Called at startup (clears crash leftovers) and in every shutdown path. Also registered via `atexit` in `main()` and `run_device_mode()` so it fires on unhandled exceptions in addition to the SIGINT/SIGTERM signal handlers.
-- **`main()`** — terminal REPL with `/clear`, `/forget`, `/model`, `/memory`, `/memorize`, `/forget-fact`, `/tts`, `/vol`, `/look`, `/thermal`, and `quit` commands; readline history in `data/.readline_history`. `/vol` accepts `+`, `-`, `up`, `down`, or a numeric 0–100 value. Speaks a time-of-day greeting to Alex on startup and "Goodbye, Alex." on exit via gTTS+mpg123 (blocking on exit so audio completes before the process dies).
+**Key non-obvious behaviors**:
+- **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B rate limit doesn't block 8B calls. Torah queries and 70B/R1 use 1200 max_tokens; 8B uses 600.
+- **`_bosgame_stream`** — uses `http.client.HTTPSConnection` directly (not `requests`) to avoid urllib3 pool conflicts. Connect timeout 10s; socket timeout extended to 300s after connect for slow CPU inference.
+- **`_llm_post`** — on connection errors, prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
+- **`extract_memory`** — prefers `_bosgame_complete` (llama3.2:1b, ~5–10s) over Groq; falls back on error.
+- **`route_model`** — `_REASONING_RE` → DeepSeek R1; `_SMART_RE` → 70B; default → 8B. No extra API call.
+- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`; `pkill -f` for `zeev_music`, `zeev_rec.wav`, `piper --model`, `mpg123`; removes `/tmp/zeev_*`. Registered via `atexit` in `main()` and `run_device_mode()` so it also fires on unhandled exceptions (not just SIGINT/SIGTERM).
+- **`run_web_server`** — `ThreadingHTTPServer`. Endpoints: `/chat` (SSE stream), `/clear`, `/memory`, `/memorize`, `/tts` (POST text → WAV), `/transcribe` (raw audio → transcript), `/thermal` (SSE), `/thermal-status`, `/volume` (GET/POST), `/snap`, `/gps`.
+- **`_build_system_prompt`** — assembles: base persona + memory facts + RAG hits + optional calendar + optional Tavily results.
+- **SQLite** (`data/zeev.db`, WAL mode): tables `messages`, `facts`, `notes`, `settings`, `quantum_insights`. `_db_lock` guards all writes (thread-safety for ThreadingHTTPServer).
 
 ### Models (Groq)
 
-| Key | Model ID | Description |
+| Key | Model ID | Use |
 |---|---|---|
-| `1` | `llama-3.1-8b-instant` | Fast — casual chat, simple Q&A |
-| `2` | `llama-3.3-70b-versatile` | Smart — explanations, code, writing |
-| `3` | `deepseek-r1-distill-llama-70b` | Reasoning — math, logic, proofs |
-
-Default is **auto-routing**: the model is chosen per message by `route_model()`. Use `/model` to lock to a specific one, or `0` to return to auto.
+| `1` | `llama-3.1-8b-instant` | Fast — casual chat |
+| `2` | `llama-3.3-70b-versatile` | Smart — code, writing |
+| `3` | `deepseek-r1-distill-llama-70b` | Reasoning — math, logic |
 
 ### Key constants
 
-| Constant | Value | Purpose |
-|---|---|---|
-| `PRIOR_TURNS` | 15 | Turns loaded from disk into each new session |
-| `max_tokens` | 600 / 1200 | Max reply length — 600 for 8B, 1200 for 70B/R1 and Torah queries |
-| `temperature` | 0.75 | Sampling temperature |
-
-### System prompt
-
-`SYSTEM_PROMPT` is built at startup: the base persona string plus the contents of `swiftkey_system_prompt_snippet.md` (project root) if present. At runtime, `_build_system_prompt()` prepends user memory facts and RAG context before each Groq call.
-
-### Smart model routing
-
-`route_model(text)` picks a model per message using two keyword regexes — no extra API call:
-
-- `_REASONING_RE` — matches math, logic, proofs, algorithms, calculus/algebra/geometry → DeepSeek R1
-- `_SMART_RE` — matches code, explanations, summaries, comparisons, and natural-language question patterns ("tell me about", "what is/are", "why does/is/are", "history of", "how to", "pros and cons", "recommend", "recite", etc.) → 70B Smart
-- Default → 8B Fast
-
-The terminal prints `[auto → 8B/70B/R1]` before each response. The web UI shows the model as a dim tag below the bubble. Lock/unlock with `/model`.
+| Constant | Value |
+|---|---|
+| `PRIOR_TURNS` | 15 turns loaded from DB per session |
+| `max_tokens` | 600 (8B) / 1200 (70B, R1, Torah) |
+| `temperature` | 0.75 |
+| `VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` |
 
 ### Google Calendar
 
-`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2 credentials from `gcal_auth.py` one-time flow), auto-refreshes the access token when expired (writes updated token back), and fetches events from the Google Calendar API for the next `days` calendar days. Results are cached in-process for 5 minutes per unique `days` value. `needs_calendar(text)` triggers on keywords like "calendar", "schedule", "meeting", "agenda", "am I free", etc. — silently skips if `gcal_token.json` is absent. `gcal_days_from_query(text)` parses natural-language range cues: "tomorrow"→2, "this week"→7, "next week"→14, "next N days"→N, "this month"→30; defaults to 1. When triggered, `_build_system_prompt()` injects events as `## Today's calendar:` (1 day) or `## Calendar (next N days):` (multi-day). Multi-day results prefix each event with weekday (`Mon 3:00 PM`). `maxResults` scales with range (up to 50). No google-auth library required — uses `requests` directly.
-
-### Web search
-
-Zeev uses a keyword heuristic (`_SEARCH_RE`) to decide when to search — no model tool-use. Flow:
-1. If the user message matches `_SEARCH_RE` (words like "weather", "news", "today", "latest", "price", etc.) and `TAVILY_API_KEY` is set, call `tavily_search()`
-2. Inject results into the system prompt for that turn
-3. Stream the Groq response as normal
-
-Both terminal (prints `[searching: query]`) and web UI (sends `{"info": ...}` SSE event) show a status line during search.
+`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2, from `gcal_auth.py`), auto-refreshes token, fetches events, cached 5 min. `needs_calendar(text)` triggers on "calendar", "schedule", "meeting", etc. — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30. Injects as `## Today's calendar:` or `## Calendar (next N days):`.
 
 ### GPS / geolocation
 
-Zeev can report its current location using a tiered pipeline — no GPS hardware required.
+Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) → IP fallback (`ip-api.com`). `gps_locate()` cached 30 min. `_reverse_geocode` via Nominatim/OSM. `GOOGLE_GEOLOC_KEY` in `.env`. `/gps` terminal command; `GET /gps` web endpoint.
 
-- **`_wifi_scan_aps()`** — scans visible WiFi APs via `nmcli` (no sudo); returns list of `{macAddress, signalStrength}`.
-- **`_wifi_geolocate(aps)`** — sends APs to Google Geolocation API first (`GOOGLE_GEOLOC_KEY` in `.env`, free tier 40k req/month, threshold <10 000m), then beacondb (community-sourced, free, threshold <1 000m). Returns `{lat, lon, accuracy, method}` or `None` if both fall back to IP.
-- **`_ip_geolocate()`** — fallback via `ip-api.com` (no key, ~25km accuracy).
-- **`_reverse_geocode(lat, lon)`** — Nominatim/OSM lookup; enriches WiFi-triangulated fixes with city/region/country/zip when those aren't returned by the geolocation service.
-- **`gps_locate()`** — runs the full pipeline; result cached 30 min. Keys always include `lat`, `lon`, `accuracy`, `method` (`wifi+google` / `wifi+beacondb` / `ip`).
-- **`gps_summary(loc)`** — one-liner: `City, Region, Country  (lat°, lon°)  ±Xm via method  timezone`.
-- **`needs_gps(text)`** / `_GPS_RE` — detects natural-language location queries and injects `## Current location:` into the system prompt.
-- **`/gps` terminal command** — shows AP count, location summary, IP/ISP, and full reverse-geocoded address.
-- **`GET /gps` web endpoint** — returns raw location JSON.
-- `GOOGLE_GEOLOC_KEY` read from `.env`; without it the pipeline falls through to beacondb then IP.
+### User memory
 
-### User memory (persistent facts)
-
-Facts about the user are extracted from conversations and stored in `data/zeev.db` (`facts` table). Injected into every system prompt under `## What I know about Alex:`.
-
-- **`load_memory()` / `save_memory()`** — read/write the `facts` table in `zeev.db` (unique text rows, ordered by insertion `id`).
-- **`extract_memory(session_msgs)`** — calls Groq (`llama-3.1-8b-instant`, `response_format: json_object`) with a transcript of the session to extract new facts. Deduplicates against existing facts. Returns `None` on 429 rate-limit. Both `_bosgame_complete` and `_llm_complete` (Groq) recognize HTTP 429 and return `(None, "rate-limited")`; the caller short-circuits to `None` so the quit-handler shows the rate-limit warning instead of a fake success.
-- **Groq 429 backoff** — three cooldown mechanisms after a 429: `_groq_tts_rate_limited_until` (Orpheus TTS, 5 min), `_groq_stt_rate_limited_until` (Whisper STT, 5 min), `_groq_model_rate_limited_until` dict (chat completions via `_groq_post`, per-model 5 min — replaced the old global `_groq_post_rate_limited_until` so 70B limits don't block 8B). Each gate is checked at the top of the relevant function so subsequent calls skip the HTTP request entirely. On a 429 each function logs the model/service name so the cause is visible in `journalctl`.
-- Extraction runs automatically on `quit` in terminal mode. Can also be triggered with `/memorize` (terminal) or the 🧠 → "Memorize this session" button (web UI).
-- Remove individual facts with `/forget-fact N` (terminal) or via the memory panel (web UI).
+`facts` table in `zeev.db`. Injected into every system prompt under `## What I know about Alex:`. `extract_memory()` runs on `quit` or `/memorize`. 429 rate-limit returns `None` — caller shows warning instead of fake success. `/forget-fact N` to remove.
 
 ### History RAG
 
-Past conversations are indexed at startup for keyword-based retrieval. Relevant exchanges are injected into the system prompt for each turn.
-
-- **`build_rag_index()`** — reads the last 500 rows from the `messages` table into `_HISTORY_ENTRIES` and builds an inverted word index (`_HISTORY_INDEX`), filtering stop words (`_STOP_WORDS`). Capped at 500 to prevent OOM on Pi Zero 2W with large history DBs.
-- **`retrieve_relevant(query, k=2, min_score=2)`** — scores past entries by word overlap with the current query, returns up to `k` `(user_msg, assistant_reply)` pairs above `min_score`. Injected as `## Relevant past exchanges:`.
-- **`init_learning()`** — called once at startup by both `main()` and `run_web_server()`; loads memory and builds RAG index.
+`build_rag_index()` — last 500 `messages` rows, inverted word index, stop words filtered. `retrieve_relevant(query, k=2, min_score=2)` — injects as `## Relevant past exchanges:`. Called by `init_learning()` at startup.
 
 ### Torah RAG (Sefaria)
 
-Local SQLite FTS5 database spanning Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min for the full corpus).
+FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Haggadah, Zohar, Dead Sea Scrolls, Sumerian. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min full corpus).
 
-- **`needs_torah(text)`** — returns True if the message matches `_TORAH_RE` (Torah, Talmud, Gemara, halacha, Apocrypha book names, liturgy terms, Zohar/Kabbalah, DSS/Qumran, Sumerian/Gilgamesh, **parsha/parshah/portion**, etc.).
-- **`torah_search(query, k=3)`** — FTS5 full-text search over `data/torah.db`; returns up to `k` `(ref, en_text)` pairs. Injected as `## Relevant Torah/Talmud passages:`. FTS5 skip set includes noise verbs ("recite", "tell", "read", "say") and time words ("week", "today") so they don't pollute passage matching.
-- `_build_system_prompt()` calls `torah_search()` whenever `needs_torah()` is true.
-- DB schema: `passages` FTS5 table with columns `source` (Tanakh/Mishna/Gemara/Apocrypha/Siddur/Haggadah/Zohar/DSS/Sumerian), `ref`, `en`, `he`. `done` table tracks imported refs for resume safety.
-- **Apocrypha**: Ben Sira (51 ch), Tobit (13), Judith (16), 1 Maccabees (16), 2 Maccabees (10), Wisdom of Solomon (18), Prayer of Manasseh (1), Psalm 151. Ben Sira chapters 17/22–24/29/36 use `a`–`g` sub-refs (`_BEN_SIRA_SPLIT`).
-- **Liturgy**: Siddur Ashkenaz (456 sections), Pesach Haggadah, The Jonathan Sacks Haggadah. Sections discovered by walking the Sefaria index tree (`_fetch_index` + `_walk_leaf_sections`); each section fetched as one unit (all paragraphs at once).
-- **Zohar**: ~1806 chapters across all parshiyot + Idra Rabba/Zuta, Sifra DiTzniuta, Addenda. Chapter counts from `index_offsets_by_depth`. Chapters with no EN translation are marked done and skipped.
-- **Dead Sea Scrolls**: ~11,000 fragments in Hebrew/Aramaic from [ETCBC/dss](https://github.com/ETCBC/dss) (Martin Abegg's transcriptions, Text-Fabric format). `import_dss()` fetches 5 TF feature files (scroll.tf, fragment.tf, full.tf, after.tf, oslots.tf), parses oslots in a single pass to get word→line first-sign mapping, groups words by scroll+fragment via bisect. `scroll.tf`/`fragment.tf` are annotated per LINE node (not fragment node).
-- **Sumerian**: 381 ETCSL texts (myths, hymns, Gilgamesh, royal praise, lamentations, proverbs) via a single JSON fetch from GitHub. `import_sumerian()` strips HTML from paragraph content.
+- `needs_torah(text)` / `_TORAH_RE` — matches Torah, Talmud, Gemara, halacha, Apocrypha, liturgy, Zohar, DSS/Qumran, Sumerian, parsha/portion.
+- `torah_search(query, k=3)` — FTS5 search; noise verbs ("recite", "tell", "say") and time words excluded from FTS to avoid polluting passage matching.
+- DB schema: `passages` FTS5 table with `source`, `ref`, `en`, `he` columns. `done` table tracks imported refs.
+- Torah/Sefaria replies force `lang='he'` for TTS regardless of reply script.
 
 ### Quantum reasoning
 
-`quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py` runs the full pipeline: idea → circuit spec → simulate → interpret. `past_insights` (list of `{idea, interpretation}` dicts) is injected into the interpretation prompt to compound learning over time.
+`quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py`: idea → circuit spec → simulate → interpret. `past_insights` (k=3 most recent from `quantum_insights` table) compound learning over time.
 
-- **`zeev/quantum_daily.py`** — 8 canonical human-dilemma scenarios, one runs per day (selected by `day-of-year % 8`). Saves `idea`, `spec_json`, `result_json`, and `interpretation` to the `quantum_insights` table in `zeev.db`. `--all` flag runs every scenario. Cron: `0 6 * * *` on the Pi, logs to `zeev/data/quantum_daily.log`.
-- **`save_quantum_insight(idea, spec, result, interpretation)`** — writes one row to `quantum_insights`.
-- **`load_quantum_insights(k=3)`** — returns the `k` most recent insights (newest first) for injection into the next run's interpretation prompt.
-- All three `quantum_reason()` call sites (web handler, device mode `/quantum`, terminal REPL) load `k=3` past insights before running and save the result afterward.
-- `quantum_insights` table is part of `zeev.db` schema, auto-created by `_db()`.
+`zeev/quantum_daily.py` — 8 human-dilemma scenarios, one per day (`day-of-year % 8`). Cron: `0 6 * * *`.
 
 ### Music playback
 
-- **`youtube_play(query, adev=None)`** — searches YouTube via `yt-dlp --default-search ytsearch1`, downloads best audio, pipes through `ffmpeg` → `mpg123`. Returns `(title, error)`.
-- Terminal: `play <query>` keyword detected before model routing. `/stop` kills the playback process.
-- The user can say natural language like `play some jazz` or `stop the music`.
-
-### Web UI features
-
-- Dark mobile-first chat interface
-- Model selector (Auto / 8B / 70B / DeepSeek R1) — Auto is default; model tag shown on each bubble
-- 🧠 memory panel — view stored facts, trigger memorization
-- TTS: Groq Orpheus (`daniel`) for English; Google Translate TTS (served as MP3 from `/tts`) for he/es/ru; browser `speechSynthesis` as last resort if gTTS fails
-- Chat bubbles and input field use `dir="auto"` for automatic RTL layout with Hebrew
-- Voice input: tap-to-speak (Web Speech Recognition, auto-sends on silence) via 🎤 button
-- Continuous recording: tap ⏺ to start, tap again to stop → audio sent to `/transcribe` (Groq `whisper-large-v3-turbo`) → transcript auto-sent as message
-- 🌡 thermal camera button (shown when MLX90640 detected) — renders a 32×24 canvas heatmap (blue→red gradient, white crosshair on hotspot) with min/max/center stats; optional question sent to LLM
-- Volume control — `🔉` / `🔊` buttons in the header with a live `N%` readout; calls `POST /volume {"delta": ±10}` and syncs on page load via `GET /volume`
-- HTTPS mode with auto-generated self-signed cert (accept once in browser)
+`youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123. `play <query>` / `stop the music` detected before LLM routing. `/stop` kills playback.
 
 ### Multilingual TTS
 
-`detect_lang()` inspects each reply before speaking:
-
-| Language | Detection | Terminal/device engine | Web UI engine |
+| Language | Detection | Terminal/device | Web UI |
 |---|---|---|---|
 | English | default | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Spanish | ñ, ¿, ¡, accented vowels | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `es-MX` |
-| Hebrew | any Hebrew Unicode character | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `he-IL` |
-| Russian | Cyrillic block (U+0400–U+04FF) | Google Translate TTS + mpg123 | Google Translate TTS (MP3) → `speechSynthesis` `ru-RU` |
+| Hebrew | Hebrew Unicode char | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
+| Spanish | ñ/¿/¡/accents | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
+| Russian | Cyrillic U+0400–04FF | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
 
-`detect_lang()` uses `.search()` — a single Hebrew character in the response is enough to trigger Hebrew gTTS. Torah/Sefaria query replies also force `lang='he'` regardless of reply script.
-
-Groq Orpheus only supports English; non-English replies return `None` from `groq_tts()`. The `/tts` endpoint then tries Google Translate TTS (returned as `audio/mpeg`) before falling back to a `503 {"lang": ...}` response that tells the browser to use `speechSynthesis`. Text is split into ≤200-char chunks at sentence boundaries.
+Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
 
 ### Web UI SSE events
 
 | Event | Meaning |
 |---|---|
 | `{"token": "..."}` | Streamed reply chunk |
-| `{"model": "8B"}` | Auto-routed model label (sent before first token) |
-| `{"info": "..."}` | Status message (e.g. search in progress) |
-| `{"error": "..."}` | Error from server |
-| `{"thermal": {...}}` | Thermal frame data: `frame` (768 floats °C), `min`, `max`, `center`, `hotspot_row`, `hotspot_col` |
-| `{"image": "data:image/jpeg;..."}` | Camera snapshot (from `/snap`) |
+| `{"model": "8B"}` | Auto-routed model label |
+| `{"info": "..."}` | Status (search in progress, etc.) |
+| `{"error": "..."}` | Server error |
+| `{"thermal": {...}}` | Thermal frame: `frame` (768 floats °C), min/max/center/hotspot |
+| `{"image": "data:image/jpeg;..."}` | Camera snapshot |
 
 ### File layout
 
 ```
 zeev/
-  zeev.py                        # entire application
-  audio_client.py                # Python adapter for zeev-audio Go daemon
-  mlx90640.py                    # MLX90640 thermal camera helper (I2C bus 3)
-  import_sefaria.py              # populate data/torah.db (Sefaria, ETCBC DSS, ETCSL Sumerian)
-  setup.sh                       # one-time setup script (legacy llama.cpp)
-  migrate_to_sqlite.py           # idempotent flat-file → zeev.db import (run once)
-  test_sqlite_migration.py       # 38-test regression harness (flat-file vs SQLite parity)
-  quantum_daily.py               # daily quantum teaching: 8 scenarios, cron 0 6 * * *
-  quantum_convo.py               # quantum-weighted conversation topics for phone calls
-  data/                          # runtime files (git-ignored)
-    zeev.db                      # WAL-mode SQLite: messages, facts, notes, settings, quantum_insights
-    quantum_daily.log            # stdout from cron runs of quantum_daily.py
-    torah.db                     # FTS5 corpus DB (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
-    .readline_history            # terminal readline history
-    cert.pem / key.pem           # TLS certs (--https mode)
-    piper_voice.onnx             # optional: drop a Piper model here for auto-detection
-zeev-audio/                      # Go audio daemon (cross-compiled for arm64)
-  cmd/zeev-audio/main.go         # entry point, --socket flag, SIGTERM handler
-  internal/proto/proto.go        # NDJSON request/response types
-  internal/piper/piper.go        # persistent Piper process + SynthesizeOneShot
-  internal/audio/alsa.go         # SetVolume, APlay
-  internal/audio/keepalive.go    # WM8960 keepalive goroutine
-  internal/bt/detect.go          # bluealsa-aplay query, Detect/Verify/GetStatus
-  internal/bt/scan.go            # bluetoothctl scan + ANSI stripping
-  internal/bt/connect.go         # Connect/Disconnect/Pair
-  internal/music/music.go        # yt-dlp → ffmpeg → aplay
-  internal/record/record.go      # arecord + RMS VAD; rate is a parameter (default 16000)
-  internal/server/server.go      # Unix socket accept loop + Init()
-  internal/server/handlers.go    # cmd dispatch (speak, speak_sco, sco_record, vol, bt_*, …)
-  Makefile                       # make pi → cross-compile arm64; make deploy → scp + restart
-~/zeev-audio/                    # daemon binary on Pi (outside repo)
-  zeev-audio                     # cross-compiled arm64 binary
-/etc/systemd/system/
-  zeev-audio.service             # User=ragnar, Restart=on-failure
-~/piper/                         # Piper TTS install (outside repo)
-  piper                          # binary (symlinked to ~/.local/bin/piper)
-  en_US-lessac-medium.onnx       # English voice (auto-detected by init_tts and daemon)
-  *.onnx.json                    # voice config
+  zeev.py                   # entire application
+  audio_client.py           # Python adapter for zeev-audio daemon
+  mlx90640.py               # MLX90640 thermal camera (I2C bus 3)
+  import_sefaria.py         # populate data/torah.db
+  migrate_to_sqlite.py      # idempotent flat-file → zeev.db import
+  quantum_daily.py          # daily quantum teaching (cron 0 6 * * *)
+  quantum_convo.py          # quantum-weighted call topics
+  data/                     # runtime files (git-ignored)
+    zeev.db                 # WAL SQLite: messages, facts, notes, settings, quantum_insights
+    torah.db                # FTS5 corpus (Tanakh/Mishna/Gemara/Zohar/DSS/Sumerian/…)
+zeev-audio/                 # Go audio daemon (cross-compiled arm64)
+  cmd/zeev-audio/main.go
+  internal/piper/piper.go   # persistent Piper process + SynthesizeOneShot
+  internal/audio/           # alsa.go, keepalive.go
+  internal/bt/              # detect.go, scan.go, connect.go
+  internal/music/music.go
+  internal/record/record.go # arecord + RMS VAD
+  internal/server/          # server.go (Unix socket), handlers.go (cmd dispatch)
+  Makefile                  # make pi → cross-compile arm64
+~/zeev-audio/zeev-audio     # binary on Pi (outside repo)
+~/piper/                    # Piper TTS (outside repo); en_US-lessac-medium.onnx
 swiftkey_system_prompt_snippet.md  # personal vocabulary appended to system prompt
 ```
 
 ### Thermal camera (MLX90640)
 
-The MLX90640 32×24 thermal camera is connected to the software I2C bus on GPIO5 (SDA) / GPIO6 (SCL), configured in `/boot/firmware/config.txt` as:
-
+Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL). Config in `/boot/firmware/config.txt`:
 ```
 dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10
 ```
-
-It appears at `/dev/i2c-3`, address `0x33`. The hardware I2C bus (`/dev/i2c-1`) is used by the WM8960 audio codec at address `0x19`.
-
-All thermal camera logic lives in `zeev/mlx90640.py`:
-- `init_thermal()` — connects via a `smbus2`-backed busio shim (Adafruit's blinka can't route to bus 3 automatically)
-- `capture_frame()` — returns 768 calibrated °C floats via `adafruit_mlx90640`
-- `frame_summary(frame)` — `{min, max, center, hotspot_row, hotspot_col}`
-- `ascii_map(frame)` — ANSI 24-bit color ASCII heatmap for the terminal
+Address `0x33` on `/dev/i2c-3`. Hardware I2C `/dev/i2c-1` is used by WM8960 at `0x19`. Logic in `zeev/mlx90640.py` uses `smbus2`-backed busio shim (Adafruit blinka can't route to bus 3 automatically).
 
 ### Whisplay HAT device mode
 
-`python3 zeev/zeev.py --device` runs a push-to-talk voice companion on the PiSugar Whisplay HAT (1.96" ST7789 LCD 240×280, WM8960 audio codec, RGB LED, KEY button on GPIO17).
+`python3 zeev/zeev.py --device`
 
-- **TTS priority**: Groq Orpheus (cloud, English) → Google Translate TTS + mpg123 (he/es/ru) → Piper (en fallback, one-shot when BT connected, persistent for speaker) → espeak-ng (last resort)
-- **Speaker volume**: set to raw 110 (~87%) via `amixer` at startup (`hw:wm8960soundcard`, `Speaker` control, raw range 0–127)
-- **BT headphone volume**: set to raw 50/127 (~39%) via `amixer -D bluealsa` at startup when headphones are detected
-- **Recording**: `arecord -f S16_LE -r 16000 -c 1` on `plughw:wm8960soundcard,0`
-- **STT**: Groq Whisper `whisper-large-v3-turbo`
-- **Startup greeting**: played via ElevenLabs + mpg123 (or `_speak_device` fallback). A `_greeting_done` threading.Event gates the wake listener — `_wake_listener` blocks on `_greeting_done.wait()` so it cannot pick up the greeting audio through the mic and self-trigger (the greeting text contains "Miss Minutes", the wake word). `--no-greeting` sets the event immediately.
-- **`_handle_transcript` tok_limit**: mirrors terminal/web — `needs_torah()` → 1200, 70B/R1 → 1200, else 600.
-- **`_handle_transcript` 429 fallback**: if 70B or R1 returns 429 or hits its per-model cooldown (`err == "rate-limited"`), automatically retries with 8B (tok_limit 600) before surfacing an error. Covers both TPM burst limits and daily TPD exhaustion.
-- **LLM error display**: Whisplay screen shows specific messages — "Rate limited" (429), "No network" (connection/timeout errors), or "LLM err \<code\>" — instead of the generic "LLM error". Full error detail (status code + body) is appended to `data/zeev_errors.log` with ISO timestamp for post-hoc diagnosis.
-- **Camera natural language** (`_CAMERA_RE`): phrases like "what do you see", "take a photo", "can you see anything" in device mode trigger `capture_image()` + vision model call (Llama 4 Scout) instead of the text LLM. Requires `CAMERA_AVAILABLE=True` (picamera2 detected at startup via `init_camera()`).
+- **TTS priority**: Groq Orpheus → gTTS + mpg123 (he/es/ru) → Piper (en, one-shot for BT, persistent for speaker) → espeak-ng
+- **Speaker volume**: raw 110 (~87%) via amixer at startup. BT headphone volume: raw 50/127 (~39%).
+- **STT**: Groq Whisper `whisper-large-v3-turbo`.
+- **`_greeting_done` event**: gates the wake listener — `_wake_listener` blocks until greeting finishes so it can't self-trigger on the greeting audio through the mic.
+- **429 fallback**: `_handle_transcript` retries 70B/R1 429s with 8B before surfacing an error.
+- **LLM error display**: Whisplay screen shows "Rate limited", "No network", or "LLM err <code>". Full detail appended to `data/zeev_errors.log`.
+- **`_CAMERA_RE`**: natural-language camera intents → `capture_image()` + Llama 4 Scout vision call (when `CAMERA_AVAILABLE`).
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
 
-## Hardware context
+## Startup / Shutdown
 
-Target device is a **Raspberry Pi Zero 2W** (512 MB RAM, 4× ARM Cortex-A53). Chat inference runs on Groq's cloud. Device mode TTS uses Groq Orpheus (cloud) for English and Google Translate TTS for he/es/ru — both start in ~500ms (no model load). Terminal English TTS uses local Piper (persistent process, no reload delay after first call); Piper's ONNX model takes ~20s to load on cold start, so the startup greeting and shutdown farewell use gTTS+mpg123 directly for fast playback. Web UI TTS is Groq Orpheus (English) or Google Translate TTS (he/es/ru, returned as MP3), with browser `speechSynthesis` as last resort.
+- `zeev_cleanup()` runs at startup in all modes (clear crash leftovers) and is registered via `atexit` in `main()` and `run_device_mode()` so hanging Piper/mpg123 subprocesses are killed on any exit including unhandled exceptions.
+- `main()` startup greeting via gTTS+mpg123 (background, ~2s). Exit: "Goodbye, Alex." synchronously before `sys.exit()`.
+- Journald persistent storage: `journalctl -b -1` works across reboots.
 
-### Startup / shutdown behaviour
+## bosgame Ollama integration
 
-- `zeev_cleanup()` runs at the top of `main()`, `run_web_server()`, and `run_device_mode()` to kill stale processes and temp files from any previous crash. It is also registered with `atexit` in `main()` and `run_device_mode()` so hanging Piper/mpg123 subprocesses are killed even on unhandled exceptions.
-- On startup, `main()` speaks **"Good morning/afternoon/evening, Alex. Ready when you are."** via gTTS+mpg123 (background thread, plays within ~2s).
-- On exit (`quit`, Ctrl-C, or SIGTERM), `main()` speaks **"Goodbye, Alex."** synchronously before calling `sys.exit()`.
-- Journald is configured for persistent storage (`/var/log/journal/`) so logs survive reboots and `journalctl -b -1` works.
+bosgame (LAN `10.0.0.141`) runs Ollama as free local inference backend.
 
-### bosgame Ollama integration
+- **Endpoint**: `https://ollama.sogdiana-gematria.net/ollama/` (grey-cloud DNS → direct LAN, bypasses Cloudflare)
+- **Auth**: `X-Zeev-Key` header (`BOSGAME_KEY` in `.env`)
+- **`.env` keys**: `BOSGAME_URL`, `BOSGAME_MODEL=llama3.2:1b`, `BOSGAME_KEY`
+- **Models**: `llama3.1:8b` (chat fallback), `llama3.2:1b` (memory extraction)
+- **Pi `/etc/hosts`**: `10.0.0.141 ollama.sogdiana-gematria.net` — **required** to avoid NAT hairpin. Persisted via `/etc/cloud/templates/hosts.debian.tmpl` (cloud-init resets `/etc/hosts` on reboot without this).
+- **bosgame nginx**: edit `sites-enabled/default` (NOT `sites-available/default` — they are separate files on bosgame). `/ollama/` location: `proxy_buffering off`, `proxy_read_timeout 300s`.
+- Fallback only works on home LAN.
 
-bosgame (`Maccabeus-Ecolite-Series`, LAN IP `10.0.0.141`) runs Ollama and acts as a free local inference backend. The Pi reaches it via an nginx reverse proxy on `sogdiana-gematria.net`:
+## bosgame Kokoro TTS server
 
-- **Endpoint**: `https://ollama.sogdiana-gematria.net/ollama/` (grey-cloud DNS → `10.0.0.141` direct, bypasses Cloudflare)
-- **Auth**: `X-Zeev-Key` header; value in `.env` as `BOSGAME_KEY`
-- **`.env` keys**: `BOSGAME_URL=https://ollama.sogdiana-gematria.net/ollama`, `BOSGAME_MODEL=llama3.2:1b`, `BOSGAME_KEY=<hash>`
-- **Models available**: `llama3.1:8b` (chat fallback), `llama3.2:1b` (memory extraction, ~5–10s on CPU)
-- **Pi `/etc/hosts`**: `10.0.0.141 ollama.sogdiana-gematria.net` — required to avoid NAT hairpin (Pi on LAN cannot reach the public IP). Entry is persisted via `/etc/cloud/templates/hosts.debian.tmpl` (cloud-init manages `/etc/hosts` and resets it on reboot without this).
-- **Offline coverage**: fallback only works when Pi is on the home LAN. Away from home with no WiFi = no fallback (bosgame unreachable). Use phone hotspot for mobile use.
-- **nginx config** (bosgame `/etc/nginx/sites-enabled/default`): `/ollama/` location with `proxy_buffering off`, `proxy_read_timeout 300s`, auth via `$http_x_zeev_key`. Note: `sites-enabled/default` is a **separate file** from `sites-available/default` on bosgame — always edit `sites-enabled/`.
+Primary English TTS: **Kokoro** on bosgame. Pi daemon calls `https://ollama.sogdiana-gematria.net/piper/tts`.
 
-### bosgame Kokoro TTS server
+- **Server**: `~/piper/tts_server.py` (port 5600, localhost-only). Service: `piper-tts.service`.
+- **Kokoro**: `~/kokoro/kokoro-v1.0.onnx` + `voices-v1.0.bin`. Voice: `am_michael` (24kHz). Latency: ~1-2s.
+- **Piper fallback**: `~/piper/en_US-lessac-medium.onnx` (22050Hz). Latency: ~0.7s.
+- **Go daemon** (`REMOTE_PIPER_URL` env var): parses WAV header bytes 24-27 for sample rate — works with both 22050Hz and 24kHz without recompile.
 
-Zeev's primary English TTS engine is **Kokoro** (~1x RTF on CPU, natural voice) running on bosgame. The Pi daemon calls `https://ollama.sogdiana-gematria.net/piper/tts` (same `/piper/` nginx route, renamed only in comment).
+## User
 
-- **Server**: `~/piper/tts_server.py` (Python 3, port 5600, localhost-only). Kokoro primary, Piper fallback.
-- **Service**: `piper-tts.service` (`sudo systemctl restart piper-tts`). Enabled, auto-restarts.
-- **Kokoro model**: `~/kokoro/kokoro-v1.0.onnx` (311MB) + `~/kokoro/voices-v1.0.bin` (27MB). Voice: `am_michael` (American male, 24kHz).
-- **Piper fallback**: `~/piper/piper` + `~/piper/en_US-lessac-medium.onnx` (22050Hz).
-- **Go daemon** (`REMOTE_PIPER_URL` env var in `zeev-audio.service`): calls the endpoint, parses WAV header bytes 24-27 for sample rate — works with both 22050Hz Piper and 24000Hz Kokoro without recompile.
-- **Latency**: Kokoro ~1-2s for short phrases (synthesis + network). Piper ~0.7s.
-- **Auth**: nginx checks `X-Zeev-Key` header; upstream server binds only to 127.0.0.1 (no re-check needed).
-- **Orpheus attempt**: abandoned — 3B Q4 GGUF on 8-core CPU is 14x real-time (60s for 4s of speech). GGUF stored at `~/orpheus/orpheus-3b-q4_k_m.gguf` but not used.
-
-### User
-
-The user's name is **Alex** (Linux username is `ragnar`). Always address them as Alex in greetings and anywhere the user's name appears in TTS or prompts.
+Name: **Alex** (Linux username: `ragnar`). Always address as Alex in greetings and TTS prompts.

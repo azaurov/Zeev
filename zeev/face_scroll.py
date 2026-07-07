@@ -428,7 +428,10 @@ def _draw_idle_mm(t: float) -> Image.Image | None:
     """Return a full-screen Miss Minutes animation frame, or None if unavailable."""
     if not _load_mm_frames():
         return None
-    idx = int(t * 10) % len(_mm_frames)
+    # Matched to the idle push rate (~6fps, zeev.py _FACE_INTERVAL["idle"] = 1/6)
+    # so each push advances ~1 frame instead of skipping unevenly (was *10 — a
+    # full loop every 1s, faster than the push rate could render smoothly).
+    idx = int(t * 6) % len(_mm_frames)
     return _mm_frames[idx].copy()
 
 

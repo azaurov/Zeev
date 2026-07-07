@@ -11,6 +11,9 @@ Usage:
     python3 zeev/shapes_test.py --auto     # push to LCD, advance every 15s (non-interactive)
     python3 zeev/shapes_test.py --anim [SECONDS]   # animated bouncing ball + rotating
                                                     # polygon on the LCD (default 20s)
+    python3 zeev/shapes_test.py --plasma [SECONDS] # full-frame numpy plasma/interference
+                                                    # effect, no per-pixel Python loop
+                                                    # (default 20s)
 """
 
 import math
@@ -158,6 +161,80 @@ def run_animation(board, duration):
     print(f"  rendered {frame_count} frames")
 
 
+# ── Plasma: fully vectorized, no per-pixel Python loop anywhere ─────────────
+
+_YY, _XX = np.mgrid[0:H, 0:W].astype(np.float32)
+_CX, _CY = W / 2, H / 2
+_DIST = np.sqrt((_XX - _CX) ** 2 + (_YY - _CY) ** 2)
+
+
+def hsv_to_rgb_arr(h, s, v):
+    """Vectorized HSV->RGB. h, s, v are float arrays in [0, 1]. Returns uint8 (..., 3)."""
+    i = np.floor(h * 6.0).astype(np.int32) % 6
+    f = h * 6.0 - np.floor(h * 6.0)
+    p = v * (1 - s)
+    q = v * (1 - f * s)
+    t_ = v * (1 - (1 - f) * s)
+
+    r = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [v, q, p, p, t_, v])
+    g = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [t_, v, v, q, p, p])
+    b = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [p, p, t_, v, v, q])
+
+    rgb = np.stack([r, g, b], axis=-1)
+    return np.clip(rgb * 255, 0, 255).astype(np.uint8)
+
+
+def frame_plasma(t):
+    """Classic demoscene plasma: sum of moving sine fields -> hue, with a
+    breathing radial glow driving brightness. All array ops, no Python loop
+    over pixels — cheap enough to run in real time on a Pi Zero 2W.
+    """
+    wave = (
+        np.sin((_XX + t * 40) / 22.0)
+        + np.sin((_YY - t * 30) / 26.0)
+        + np.sin((_XX + _YY + t * 50) / 30.0)
+        + np.sin(_DIST / 14.0 - t * 2.4)
+    )
+    hue = (wave / 4.0 + 1.0) / 2.0  # normalize to [0, 1]
+    hue = (hue + t * 0.05) % 1.0    # slow overall color drift
+
+    glow = 0.55 + 0.45 * np.sin(_DIST / 20.0 - t * 1.6)
+    val  = np.clip(0.55 + 0.45 * glow, 0.0, 1.0)
+    sat  = np.full_like(hue, 0.95)
+
+    return hsv_to_rgb_arr(hue, sat, val)
+
+
+def push_arr_to_lcd(board, arr_rgb_u8):
+    """Push a (H, W, 3) uint8 RGB array straight to the LCD — no PIL round trip."""
+    arr = arr_rgb_u8.astype(np.uint16)
+    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+    v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+    buf = v.astype(">u2").tobytes()
+    board.draw_image(0, 0, W, H, buf)
+
+
+def run_plasma(board, duration):
+    print(f"  plasma for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        arr = frame_plasma(t)
+        if not saved_preview and t > 0.3:
+            Image.fromarray(arr, "RGB").save(OUT_DIR / "shapes_plasma.png")
+            saved_preview = True
+        if board is not None:
+            push_arr_to_lcd(board, arr)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 def push_to_lcd(board, img):
     arr = np.asarray(img.convert("RGB"), dtype=np.uint16)
     r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
@@ -170,6 +247,7 @@ def main():
     no_lcd = "--no-lcd" in sys.argv
     auto   = "--auto" in sys.argv
     anim   = "--anim" in sys.argv
+    plasma = "--plasma" in sys.argv
 
     board = None
     if not no_lcd:
@@ -198,6 +276,18 @@ def main():
                 pass
         run_animation(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_anim.png")
+        return
+
+    if plasma:
+        idx = sys.argv.index("--plasma")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_plasma(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_plasma.png")
         return
 
     for name, make_frame in FRAMES.items():

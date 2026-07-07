@@ -177,10 +177,14 @@ def main():
         try:
             from whisplay import WhisplayBoard
             board = WhisplayBoard()
-            board.spi.max_speed_hz = 10_000_000
+            spi_hz = 20_000_000
+            if "--spi-hz" in sys.argv:
+                spi_hz = int(sys.argv[sys.argv.index("--spi-hz") + 1])
+            board.spi.max_speed_hz = spi_hz
             board._reset_lcd()
             board._init_display()
             board.set_backlight(100)
+            print(f"  SPI clock: requested {spi_hz} Hz, negotiated {board.spi.max_speed_hz} Hz")
         except ImportError:
             print("Whisplay runtime not found — saving previews only.")
 

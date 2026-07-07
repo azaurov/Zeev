@@ -26,6 +26,8 @@ Usage:
                                                     # (default 20s)
     python3 zeev/shapes_test.py --matrix [SECONDS] # falling green digital rain
                                                     # (default 20s)
+    python3 zeev/shapes_test.py --fire [SECONDS]   # classic demoscene fire effect
+                                                    # (default 20s)
 """
 
 import math
@@ -477,6 +479,79 @@ def run_matrix(board, duration):
     print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
 
 
+# ── Fire: classic demoscene propagating-heat effect ─────────────────────────
+
+_FIRE_W, _FIRE_H = 60, 70   # low-res buffer, upscaled to the full LCD each frame
+_fire_buf = None
+_fire_palette = None
+
+
+def _build_fire_palette():
+    stops = [
+        (0,   (0, 0, 0)),
+        (60,  (110, 0, 0)),
+        (120, (255, 60, 0)),
+        (180, (255, 180, 0)),
+        (255, (255, 255, 220)),
+    ]
+    pal = np.zeros((256, 3), dtype=np.uint8)
+    for (x0, c0), (x1, c1) in zip(stops, stops[1:]):
+        for x in range(x0, x1 + 1):
+            f = (x - x0) / (x1 - x0)
+            pal[x] = [int(c0[i] + (c1[i] - c0[i]) * f) for i in range(3)]
+    return pal
+
+
+def frame_fire():
+    """Propagating-heat fire: each cell averages the row below plus random
+    cooling, mapped through a black->red->orange->yellow->white palette.
+    Computed at low res and upscaled for smooth flames on limited hardware.
+    """
+    global _fire_buf, _fire_palette
+    if _fire_buf is None:
+        _fire_buf = np.zeros((_FIRE_H, _FIRE_W), dtype=np.float32)
+        _fire_palette = _build_fire_palette()
+
+    # Seed the bottom rows — mostly hot, with random gaps for flicker
+    gaps = np.random.random(_FIRE_W) < 0.9
+    _fire_buf[_FIRE_H - 1] = np.where(gaps, np.random.uniform(200, 255, _FIRE_W), 0)
+    _fire_buf[_FIRE_H - 2] = np.where(gaps, np.random.uniform(160, 230, _FIRE_W), 0)
+
+    # Propagate upward: each cell = avg of the row below (self + neighbors) - decay
+    for y in range(_FIRE_H - 2, -1, -1):
+        below = _fire_buf[y + 1]
+        left = np.roll(below, 1)
+        right = np.roll(below, -1)
+        decay = np.random.uniform(0.0, 5.5, _FIRE_W)
+        _fire_buf[y] = np.clip((left + below + right) / 3.0 - decay, 0, 255)
+
+    idx = _fire_buf.astype(np.uint8)
+    rgb_small = _fire_palette[idx]
+    small_img = Image.fromarray(rgb_small, "RGB")
+    return small_img.resize((W, H), Image.BILINEAR)
+
+
+def run_fire(board, duration):
+    print(f"  fire for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        img = frame_fire()
+        if not saved_preview and t > 0.5:
+            img.save(OUT_DIR / "shapes_fire.png")
+            saved_preview = True
+        if board is not None:
+            push_to_lcd(board, img)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 # Moving metaball params: (amp_x, amp_y, speed, phase, hue0, hue_speed, sigma)
 _BLOBS = [
     (70, 90, 0.55, 0.0, 0.00, 0.03, 46),
@@ -623,6 +698,7 @@ def main():
     liquid = "--liquid" in sys.argv
     tunnel = "--tunnel" in sys.argv
     matrix = "--matrix" in sys.argv
+    fire   = "--fire" in sys.argv
 
     board = None
     if not no_lcd:
@@ -723,6 +799,18 @@ def main():
                 pass
         run_matrix(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_matrix.png")
+        return
+
+    if fire:
+        idx = sys.argv.index("--fire")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_fire(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_fire.png")
         return
 
     for name, make_frame in FRAMES.items():

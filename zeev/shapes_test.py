@@ -14,6 +14,9 @@ Usage:
     python3 zeev/shapes_test.py --plasma [SECONDS] # full-frame numpy plasma/interference
                                                     # effect, no per-pixel Python loop
                                                     # (default 20s)
+    python3 zeev/shapes_test.py --cartoon [SECONDS]  # bouncing blob character with
+                                                      # squash-and-stretch, blinking,
+                                                      # drifting clouds (default 20s)
 """
 
 import math
@@ -137,6 +140,119 @@ def frame_anim(t, dt):
     return img
 
 
+# ── Cartoon: bouncing blob with squash-and-stretch, blink, drifting clouds ──
+
+_SKY_TOP    = (120, 190, 235)
+_SKY_BOTTOM = (200, 230, 245)
+_GROUND_Y   = 250
+_CLOUDS     = [(30, 40, 30), (140, 60, 22), (200, 100, 26)]  # (x0, y, radius)
+
+
+def _sky_gradient():
+    img = Image.new("RGB", (W, H), _SKY_BOTTOM)
+    px = img.load()
+    for y in range(_GROUND_Y):
+        f = y / _GROUND_Y
+        col = tuple(int(_SKY_TOP[i] + (_SKY_BOTTOM[i] - _SKY_TOP[i]) * f) for i in range(3))
+        for x in range(W):
+            px[x, y] = col
+    return img
+
+
+_SKY_BASE = None  # built lazily so --no-lcd/preview-only runs still work headless
+
+
+def frame_cartoon(t):
+    global _SKY_BASE
+    if _SKY_BASE is None:
+        _SKY_BASE = _sky_gradient()
+    img = _SKY_BASE.copy()
+    draw = ImageDraw.Draw(img)
+
+    # Ground
+    draw.rectangle([0, _GROUND_Y, W, H], fill=(90, 170, 90))
+    draw.line([0, _GROUND_Y, W, _GROUND_Y], fill=(70, 140, 70), width=2)
+
+    # Drifting clouds, wrapping around screen width
+    for cx0, cy, r in _CLOUDS:
+        cx = (cx0 + t * 12) % (W + 80) - 40
+        draw.ellipse([cx - r, cy - r * 0.6, cx + r, cy + r * 0.6], fill=(245, 248, 252))
+        draw.ellipse([cx - r * 0.6, cy - r * 0.9, cx + r * 0.6, cy + r * 0.3], fill=(245, 248, 252))
+
+    # ── Bouncing blob character (squash-and-stretch bounce cycle) ──────────
+    cycle = 1.1
+    phase = (t % cycle) / cycle          # 0..1 across one bounce
+    height = abs(math.sin(phase * math.pi))  # 0 at ground, 1 at apex
+    base_r = 42
+    cx = W / 2 + 18 * math.sin(t * 0.7)  # gentle side-to-side drift
+
+    # Squash near ground, stretch near apex (classic 12-principles bounce)
+    squash = 1.0 - 0.35 * (1.0 - height) ** 3   # vertical squish factor near ground
+    stretch = 1.0 + 0.12 * height ** 4          # slight vertical stretch at apex
+    ry = base_r * squash * stretch
+    rx = base_r * (2.0 - squash)                # widen when squashed, matching volume
+
+    body_bottom = _GROUND_Y - 2
+    cy = body_bottom - ry * (0.3 + 0.7 * height * 1.4)
+    cy = min(cy, body_bottom - ry * 0.3)
+
+    # Shadow — shrinks/lightens as the blob rises
+    shadow_w = base_r * (1.6 - 0.6 * height)
+    shadow_col = tuple(int(60 + 80 * height) for _ in range(3))
+    draw.ellipse([cx - shadow_w, body_bottom - 4, cx + shadow_w, body_bottom + 6],
+                 fill=shadow_col)
+
+    body_col = (240, 140, 40)
+    draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=body_col, outline=(180, 90, 10), width=3)
+
+    # Blink: closed for a short beat every 2.6s
+    blink = (t % 2.6) < 0.12
+    eye_y = cy - ry * 0.15
+    for ex in (cx - rx * 0.35, cx + rx * 0.35):
+        if blink:
+            draw.line([ex - 7, eye_y, ex + 7, eye_y], fill=(30, 20, 10), width=3)
+        else:
+            draw.ellipse([ex - 8, eye_y - 9, ex + 8, eye_y + 9], fill=(255, 255, 255))
+            draw.ellipse([ex - 3, eye_y - 3, ex + 3, eye_y + 3], fill=(20, 15, 10))
+
+    # Mouth: wider "oh" near the apex (mid-air excitement), smile on the ground
+    mouth_y = cy + ry * 0.35
+    if height > 0.55:
+        draw.ellipse([cx - 10, mouth_y - 6, cx + 10, mouth_y + 10], fill=(120, 40, 40))
+    else:
+        draw.arc([cx - 14, mouth_y - 8, cx + 14, mouth_y + 12], start=15, end=165,
+                  fill=(120, 40, 40), width=3)
+
+    # Little feet, visible mainly during ground contact
+    if height < 0.3:
+        foot_spread = rx * 0.55
+        for fx in (cx - foot_spread, cx + foot_spread):
+            draw.ellipse([fx - 9, body_bottom - 8, fx + 9, body_bottom + 4], fill=(200, 110, 20))
+
+    return img
+
+
+def run_cartoon(board, duration):
+    print(f"  cartoon for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        img = frame_cartoon(t)
+        if not saved_preview and t > 0.5:
+            img.save(OUT_DIR / "shapes_cartoon.png")
+            saved_preview = True
+        if board is not None:
+            push_to_lcd(board, img)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 def run_animation(board, duration):
     print(f"  animating for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
     start = time.time()
@@ -248,6 +364,7 @@ def main():
     auto   = "--auto" in sys.argv
     anim   = "--anim" in sys.argv
     plasma = "--plasma" in sys.argv
+    cartoon = "--cartoon" in sys.argv
 
     board = None
     if not no_lcd:
@@ -288,6 +405,18 @@ def main():
                 pass
         run_plasma(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_plasma.png")
+        return
+
+    if cartoon:
+        idx = sys.argv.index("--cartoon")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_cartoon(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_cartoon.png")
         return
 
     for name, make_frame in FRAMES.items():

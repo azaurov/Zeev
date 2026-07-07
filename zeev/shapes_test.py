@@ -24,15 +24,18 @@ Usage:
                                                     # color metaballs (default 20s)
     python3 zeev/shapes_test.py --tunnel [SECONDS] # zooming rainbow tunnel/vortex
                                                     # (default 20s)
+    python3 zeev/shapes_test.py --matrix [SECONDS] # falling green digital rain
+                                                    # (default 20s)
 """
 
 import math
+import random
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 HERE    = Path(__file__).parent
 OUT_DIR = HERE / "previews"
@@ -380,6 +383,100 @@ def run_psychedelic(board, duration):
     print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
 
 
+# ── Matrix: falling green digital rain ──────────────────────────────────────
+
+_MATRIX_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+_CELL_W, _CELL_H = 12, 14
+_MATRIX_COLS = W // _CELL_W
+_MATRIX_ROWS = H // _CELL_H
+_MATRIX_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ!?$%&#@*+=/\\"
+_TRAIL_LEN = 12
+
+_matrix_font = None
+_matrix_state = None  # lazily built: list of dicts per column
+
+
+def _matrix_init():
+    global _matrix_font, _matrix_state
+    _matrix_font = _load_matrix_font()
+    _matrix_state = []
+    for _ in range(_MATRIX_COLS):
+        _matrix_state.append({
+            "head": random.uniform(-_TRAIL_LEN, _MATRIX_ROWS),
+            "speed": random.uniform(6.0, 16.0),  # rows/sec
+            "chars": [random.choice(_MATRIX_CHARS) for _ in range(_MATRIX_ROWS + _TRAIL_LEN)],
+        })
+
+
+def _load_matrix_font():
+    try:
+        return ImageFont.truetype(_MATRIX_FONT_PATH, 13)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def frame_matrix(dt):
+    """Falling green character columns with fading trails — an original take
+    on the classic 'digital rain' code-cascade look (in the spirit of many
+    open-source cmatrix-style implementations, not any specific film asset).
+    """
+    global _matrix_state
+    if _matrix_state is None:
+        _matrix_init()
+
+    img = Image.new("RGB", (W, H), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    for col_idx, col in enumerate(_matrix_state):
+        col["head"] += col["speed"] * dt
+        if col["head"] - _TRAIL_LEN > _MATRIX_ROWS:
+            col["head"] = random.uniform(-_TRAIL_LEN, -1)
+            col["speed"] = random.uniform(6.0, 16.0)
+
+        x = col_idx * _CELL_W
+        head_row = int(col["head"])
+        for offset in range(_TRAIL_LEN):
+            row = head_row - offset
+            if row < 0 or row >= _MATRIX_ROWS:
+                continue
+            if random.random() < 0.04:  # occasional glyph flicker
+                col["chars"][row % len(col["chars"])] = random.choice(_MATRIX_CHARS)
+            brightness = 1.0 - offset / _TRAIL_LEN
+            if offset == 0:
+                color = (200, 255, 210)  # bright near-white head
+            else:
+                g = int(60 + 160 * brightness)
+                color = (10, g, 40)
+            ch = col["chars"][row % len(col["chars"])]
+            draw.text((x, row * _CELL_H), ch, font=_matrix_font, fill=color)
+
+    return img
+
+
+def run_matrix(board, duration):
+    print(f"  matrix for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    last = start
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        dt = now - last
+        last = now
+        img = frame_matrix(dt)
+        if not saved_preview and t > 0.5:
+            img.save(OUT_DIR / "shapes_matrix.png")
+            saved_preview = True
+        if board is not None:
+            push_to_lcd(board, img)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 # Moving metaball params: (amp_x, amp_y, speed, phase, hue0, hue_speed, sigma)
 _BLOBS = [
     (70, 90, 0.55, 0.0, 0.00, 0.03, 46),
@@ -525,6 +622,7 @@ def main():
     psychedelic = "--psychedelic" in sys.argv
     liquid = "--liquid" in sys.argv
     tunnel = "--tunnel" in sys.argv
+    matrix = "--matrix" in sys.argv
 
     board = None
     if not no_lcd:
@@ -613,6 +711,18 @@ def main():
                 pass
         run_tunnel(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_tunnel.png")
+        return
+
+    if matrix:
+        idx = sys.argv.index("--matrix")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_matrix(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_matrix.png")
         return
 
     for name, make_frame in FRAMES.items():

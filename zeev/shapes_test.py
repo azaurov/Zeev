@@ -17,6 +17,9 @@ Usage:
     python3 zeev/shapes_test.py --cartoon [SECONDS]  # bouncing blob character with
                                                       # squash-and-stretch, blinking,
                                                       # drifting clouds (default 20s)
+    python3 zeev/shapes_test.py --psychedelic [SECONDS]  # kaleidoscopic rainbow
+                                                          # swirl, numpy-vectorized
+                                                          # (default 20s)
 """
 
 import math
@@ -321,6 +324,58 @@ def frame_plasma(t):
     return hsv_to_rgb_arr(hue, sat, val)
 
 
+_THETA = np.arctan2(_YY - _CY, _XX - _CX)  # [-pi, pi]
+_KAL_SEGMENTS = 10
+
+
+def frame_psychedelic(t):
+    """Kaleidoscopic prism swirl: mirrored angular symmetry + a radius-twist,
+    rainbow hue cycling, pulsing concentric rings. All vectorized numpy — an
+    original trippy-concert-visual design, not a reproduction of any
+    particular album art.
+    """
+    # Swirl: rotate more near the centre, less at the edge, drifting over time
+    twist = 2.6 * np.sin(t * 0.5) + 180.0 / (_DIST + 18.0)
+    theta = _THETA + twist + t * 0.6
+
+    # Fold into N mirrored wedges -> kaleidoscope symmetry
+    wedge = (2 * np.pi) / _KAL_SEGMENTS
+    folded = np.abs(((theta % wedge) - wedge / 2))
+
+    # Hue driven by wedge angle + radius ripple + slow global drift
+    hue = (folded / (wedge / 2) * 0.5
+           + np.sin(_DIST / 16.0 - t * 3.0) * 0.15
+           + t * 0.08) % 1.0
+
+    # Pulsing concentric rings for brightness -> prism/strobe feel
+    rings = 0.5 + 0.5 * np.sin(_DIST / 11.0 - t * 4.0)
+    val = np.clip(0.35 + 0.65 * rings, 0.0, 1.0)
+    sat = np.full_like(hue, 1.0)
+
+    return hsv_to_rgb_arr(hue, sat, val)
+
+
+def run_psychedelic(board, duration):
+    print(f"  psychedelic for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        arr = frame_psychedelic(t)
+        if not saved_preview and t > 0.3:
+            Image.fromarray(arr, "RGB").save(OUT_DIR / "shapes_psychedelic.png")
+            saved_preview = True
+        if board is not None:
+            push_arr_to_lcd(board, arr)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 def push_arr_to_lcd(board, arr_rgb_u8):
     """Push a (H, W, 3) uint8 RGB array straight to the LCD — no PIL round trip."""
     arr = arr_rgb_u8.astype(np.uint16)
@@ -365,6 +420,7 @@ def main():
     anim   = "--anim" in sys.argv
     plasma = "--plasma" in sys.argv
     cartoon = "--cartoon" in sys.argv
+    psychedelic = "--psychedelic" in sys.argv
 
     board = None
     if not no_lcd:
@@ -417,6 +473,18 @@ def main():
                 pass
         run_cartoon(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_cartoon.png")
+        return
+
+    if psychedelic:
+        idx = sys.argv.index("--psychedelic")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_psychedelic(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_psychedelic.png")
         return
 
     for name, make_frame in FRAMES.items():

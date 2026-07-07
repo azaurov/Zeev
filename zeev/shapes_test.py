@@ -20,6 +20,10 @@ Usage:
     python3 zeev/shapes_test.py --psychedelic [SECONDS]  # kaleidoscopic rainbow
                                                           # swirl, numpy-vectorized
                                                           # (default 20s)
+    python3 zeev/shapes_test.py --liquid [SECONDS] # liquid light-show: morphing
+                                                    # color metaballs (default 20s)
+    python3 zeev/shapes_test.py --tunnel [SECONDS] # zooming rainbow tunnel/vortex
+                                                    # (default 20s)
 """
 
 import math
@@ -376,6 +380,104 @@ def run_psychedelic(board, duration):
     print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
 
 
+# Moving metaball params: (amp_x, amp_y, speed, phase, hue0, hue_speed, sigma)
+_BLOBS = [
+    (70, 90, 0.55, 0.0, 0.00, 0.03, 46),
+    (85, 60, 0.42, 2.1, 0.18, 0.04, 40),
+    (55, 100, 0.65, 4.2, 0.38, 0.02, 52),
+    (95, 75, 0.35, 1.3, 0.58, 0.05, 44),
+    (65, 55, 0.50, 5.0, 0.78, 0.03, 38),
+]
+
+
+def frame_liquid(t):
+    """Liquid light-show: soft moving color blobs (metaballs) that merge and
+    separate, in the spirit of the oil-and-dye projections used at 60s/70s
+    psychedelic concerts. All vectorized numpy.
+    """
+    total_w = np.zeros((H, W), dtype=np.float32)
+    accum = np.zeros((H, W, 3), dtype=np.float32)
+
+    for amp_x, amp_y, speed, phase, hue0, hue_speed, sigma in _BLOBS:
+        bx = _CX + amp_x * np.sin(t * speed + phase)
+        by = _CY + amp_y * np.cos(t * speed * 1.3 + phase)
+        d2 = (_XX - bx) ** 2 + (_YY - by) ** 2
+        weight = np.exp(-d2 / (2 * sigma * sigma))
+        hue = (hue0 + t * hue_speed) % 1.0
+        col = np.array(hsv_to_rgb(hue, 0.9, 1.0), dtype=np.float32)
+        accum += weight[..., None] * col
+        total_w += weight
+
+    safe_w = np.clip(total_w, 1e-3, None)
+    rgb = accum / safe_w[..., None]
+
+    # Glow boost where blobs overlap, dark background elsewhere (projector-on-
+    # black-screen contrast)
+    glow = np.clip(total_w, 0.0, 1.4) / 1.4
+    rgb = rgb * glow[..., None]
+
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def run_liquid(board, duration):
+    print(f"  liquid light show for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        arr = frame_liquid(t)
+        if not saved_preview and t > 0.3:
+            Image.fromarray(arr, "RGB").save(OUT_DIR / "shapes_liquid.png")
+            saved_preview = True
+        if board is not None:
+            push_arr_to_lcd(board, arr)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
+_LOG_DIST = np.log(_DIST + 1.0)
+
+
+def frame_tunnel(t):
+    """Zooming rainbow tunnel: concentric rings receding toward the centre with
+    radial spokes, log-radius mapping for a classic wormhole/vortex feel.
+    """
+    rings = np.sin(_LOG_DIST * 9.0 - t * 5.0)
+    spokes = np.sin(_THETA * 8.0 + t * 1.2)
+
+    hue = (_LOG_DIST * 0.35 - t * 0.4 + spokes * 0.05) % 1.0
+    val = np.clip(0.62 + 0.28 * rings + 0.1 * spokes, 0.2, 1.0)
+    sat = np.full_like(hue, 1.0)
+
+    return hsv_to_rgb_arr(hue, sat, val)
+
+
+def run_tunnel(board, duration):
+    print(f"  tunnel for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        arr = frame_tunnel(t)
+        if not saved_preview and t > 0.3:
+            Image.fromarray(arr, "RGB").save(OUT_DIR / "shapes_tunnel.png")
+            saved_preview = True
+        if board is not None:
+            push_arr_to_lcd(board, arr)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 def push_arr_to_lcd(board, arr_rgb_u8):
     """Push a (H, W, 3) uint8 RGB array straight to the LCD — no PIL round trip."""
     arr = arr_rgb_u8.astype(np.uint16)
@@ -421,6 +523,8 @@ def main():
     plasma = "--plasma" in sys.argv
     cartoon = "--cartoon" in sys.argv
     psychedelic = "--psychedelic" in sys.argv
+    liquid = "--liquid" in sys.argv
+    tunnel = "--tunnel" in sys.argv
 
     board = None
     if not no_lcd:
@@ -485,6 +589,30 @@ def main():
                 pass
         run_psychedelic(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_psychedelic.png")
+        return
+
+    if liquid:
+        idx = sys.argv.index("--liquid")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_liquid(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_liquid.png")
+        return
+
+    if tunnel:
+        idx = sys.argv.index("--tunnel")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_tunnel(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_tunnel.png")
         return
 
     for name, make_frame in FRAMES.items():

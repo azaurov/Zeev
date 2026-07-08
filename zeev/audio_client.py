@@ -20,6 +20,7 @@ import logging
 log = logging.getLogger(__name__)
 
 SOCKET_PATH = "/tmp/zeev-audio.sock"
+DEFAULT_TIMEOUT = 20.0   # seconds — most commands (vol, bt_verify, health, ...) reply in <1s
 
 
 class _Disconnected(Exception):
@@ -50,6 +51,7 @@ class AudioClient:
     def _connect(self) -> bool:
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(DEFAULT_TIMEOUT)
             s.connect(self.SOCKET)
             self._sock = s
             self._reader = s.makefile("r")
@@ -78,10 +80,15 @@ class AudioClient:
 
     # ── low-level call ───────────────────────────────────────────────────────
 
-    def _call(self, **kwargs) -> dict:
+    def _call(self, _timeout: float = DEFAULT_TIMEOUT, **kwargs) -> dict:
         """
         Send one request and return the parsed response.
-        Reconnects once on broken pipe; raises _Disconnected if still broken.
+        Reconnects once on broken pipe or read timeout; raises _Disconnected
+        if still broken. `_timeout` bounds the whole request (send + reply
+        readline) so a desynced or wedged daemon connection fails fast
+        instead of hanging the caller forever. Leading underscore keeps it
+        out of the way of JSON payload fields like `timeout` (bt_scan uses
+        that name for its own scan-duration field).
         """
         if not self._available:
             raise _Disconnected("daemon not available")
@@ -92,12 +99,13 @@ class AudioClient:
         for attempt in range(2):
             try:
                 with self._lock:
+                    self._sock.settimeout(_timeout)
                     self._sock.sendall(payload)
                     line = self._reader.readline()
                 if not line:
                     raise _Disconnected("daemon closed connection")
                 return json.loads(line)
-            except (BrokenPipeError, OSError, _Disconnected):
+            except (socket.timeout, BrokenPipeError, OSError, _Disconnected):
                 if attempt == 0:
                     if not self._reconnect():
                         raise _Disconnected("daemon unavailable after reconnect")
@@ -105,10 +113,10 @@ class AudioClient:
                     self._available = False
                     raise _Disconnected("daemon unavailable")
 
-    def _call_safe(self, default, **kwargs) -> dict:
+    def _call_safe(self, default, _timeout: float = DEFAULT_TIMEOUT, **kwargs) -> dict:
         """Like _call but returns default on any error."""
         try:
-            return self._call(**kwargs)
+            return self._call(_timeout=_timeout, **kwargs)
         except Exception as e:
             log.debug("audio_client: %s -> %s", kwargs.get("cmd"), e)
             return default
@@ -126,7 +134,10 @@ class AudioClient:
 
     def speak_sync(self, text: str, lang: str = "en", dev: str = "") -> None:
         """Blocking TTS — waits for audio to finish before returning."""
-        self._call_safe({}, cmd="speak_sync", text=text, lang=lang, dev=dev)
+        # Long passages (e.g. Torah/parsha readings) can take well over a
+        # minute to synthesize + play; give this far more headroom than the
+        # default so it isn't mistaken for a wedged connection mid-speech.
+        self._call_safe({}, _timeout=180.0, cmd="speak_sync", text=text, lang=lang, dev=dev)
 
     def get_volume(self) -> int:
         """Return current system volume 0–100."""
@@ -160,12 +171,13 @@ class AudioClient:
 
     def bt_scan(self, timeout: int = 10) -> list[dict]:
         """Scan for BT devices; returns list of {"mac": .., "name": ..}."""
-        r = self._call_safe({"devices": []}, cmd="bt_scan", timeout=timeout)
+        r = self._call_safe({"devices": []}, _timeout=timeout + 10,
+                            cmd="bt_scan", timeout=timeout)
         return r.get("devices", [])
 
     def bt_connect(self, mac: str) -> dict:
         """Connect to a BT device by MAC; returns bt_verify-style dict."""
-        r = self._call_safe({"ok": False, "error": "daemon unavailable"},
+        r = self._call_safe({"ok": False, "error": "daemon unavailable"}, _timeout=30.0,
                             cmd="bt_connect", mac=mac)
         return r
 
@@ -176,12 +188,12 @@ class AudioClient:
 
     def bt_pair(self, mac: str) -> bool:
         """Pair and trust a BT device; returns True on success."""
-        r = self._call_safe({"ok": False}, cmd="bt_pair", mac=mac)
+        r = self._call_safe({"ok": False}, _timeout=30.0, cmd="bt_pair", mac=mac)
         return bool(r.get("ok"))
 
     def play(self, query: str) -> str:
         """Start YouTube playback; returns the resolved title."""
-        r = self._call_safe({"title": ""}, cmd="play", query=query)
+        r = self._call_safe({"title": ""}, _timeout=30.0, cmd="play", query=query)
         return r.get("title", "")
 
     def stop(self) -> None:
@@ -190,8 +202,8 @@ class AudioClient:
 
     def record(self, max_seconds: float = 8.0, vad: bool = True, rate: int = 0) -> bytes:
         """Record audio; returns WAV bytes. rate=0 → 16000 Hz."""
-        r = self._call_safe({"wav_b64": ""}, cmd="record",
-                            max_seconds=max_seconds, vad=vad, rate=rate)
+        r = self._call_safe({"wav_b64": ""}, _timeout=max_seconds + 15,
+                            cmd="record", max_seconds=max_seconds, vad=vad, rate=rate)
         b64 = r.get("wav_b64", "")
         if not b64:
             return b""
@@ -201,7 +213,7 @@ class AudioClient:
         """Synthesize text via Piper and play on the SCO ALSA device.
         sco_rate is the negotiated HFP sample rate (8000 or 16000 Hz).
         Returns True on success."""
-        r = self._call_safe({"ok": False}, cmd="speak_sco",
+        r = self._call_safe({"ok": False}, _timeout=60.0, cmd="speak_sco",
                             text=text, dev=sco_dev, rate=sco_rate)
         return bool(r.get("ok"))
 
@@ -209,8 +221,8 @@ class AudioClient:
                    max_seconds: float = 8.0, vad: bool = True) -> bytes:
         """Record from an SCO capture device at the negotiated rate.
         Returns WAV bytes (header uses sco_rate)."""
-        r = self._call_safe({"wav_b64": ""}, cmd="sco_record",
-                            dev=sco_dev, rate=sco_rate,
+        r = self._call_safe({"wav_b64": ""}, _timeout=max_seconds + 15,
+                            cmd="sco_record", dev=sco_dev, rate=sco_rate,
                             max_seconds=max_seconds, vad=vad)
         b64 = r.get("wav_b64", "")
         if not b64:

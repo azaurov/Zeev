@@ -255,6 +255,33 @@ _CAMERA_RE = re.compile(
     r"|\bcan you see (anything|something|what'?s|me)\b",
     re.IGNORECASE,
 )
+_VISUAL_TRIGGER_RE = re.compile(
+    r"\b(show|display|put on|pull up|do|play|start|run|light up|give me)\b.{0,25}"
+    r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect)\b"
+    r"|\b(fire|matrix|digital rain|psychedelic|kaleidosc\w*|liquid|lava lamp|tunnel|vortex|"
+    r"plasma|bunny|cartoon (face|mode))\b.{0,15}\b(effect|mode|show|animation|visual|screen)\b"
+    r"|\bshow (me )?(some )?(fire|the matrix|matrix|psychedelic|kaleidoscope|liquid|"
+    r"a?\s?tunnel|vortex|plasma|(a |the )?bunny|(a |the )?cartoon)\b",
+    re.IGNORECASE,
+)
+_VISUAL_EFFECT_KEYWORDS = [
+    (re.compile(r"\bfire\b", re.IGNORECASE), "fire"),
+    (re.compile(r"\bmatrix\b|\bdigital rain\b", re.IGNORECASE), "matrix"),
+    (re.compile(r"\bpsychedelic\b|\bkaleidosc\w*\b", re.IGNORECASE), "psychedelic"),
+    (re.compile(r"\bliquid\b|\blava lamp\b", re.IGNORECASE), "liquid"),
+    (re.compile(r"\btunnel\b|\bvortex\b", re.IGNORECASE), "tunnel"),
+    (re.compile(r"\bplasma\b", re.IGNORECASE), "plasma"),
+    (re.compile(r"\bbunny\b|\bcartoon\b", re.IGNORECASE), "cartoon"),
+]
+_VISUAL_EFFECT_LABELS = {
+    "fire":        "some fire",
+    "matrix":      "the matrix",
+    "psychedelic": "a psychedelic light show",
+    "liquid":      "a liquid light show",
+    "tunnel":      "a tunnel",
+    "plasma":      "some plasma",
+    "cartoon":     "a cartoon face",
+}
 _VOICE_COACH_RE = re.compile(
     r"\b(voice\s+(training|coach|coaching|practice|exercise|lesson|feedback|warm.?up)|"
     r"coach\s+(my|me on)\s+(voice|speech|speaking)|"
@@ -5946,6 +5973,7 @@ def run_device_mode():
     _IDLE_SLEEP_SEC = 15          # seconds of idle before screen + LED turn off
     _screen_on      = [True]      # mutable so nested functions can update it
     _last_activity  = [time.time()]
+    _visual_effect_active = [False]  # True while a shapes_test effect owns the SPI/LCD
 
     # Render interval per state — active states get full 12fps; static or
     # slow-changing states are throttled to save CPU and SPI bandwidth.
@@ -5960,7 +5988,7 @@ def run_device_mode():
 
     def _face_loop():
         while True:
-            if not _screen_on[0]:
+            if not _screen_on[0] or _visual_effect_active[0]:
                 time.sleep(0.5)
                 continue
             now = time.time()
@@ -6723,6 +6751,54 @@ def run_device_mode():
             board.set_rgb(*_LED_SPEAKING)
             _set_face("speaking", reply)
             _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Visual-effect natural language handling (Whisplay LCD) ────────────
+        if _have_pil and _VISUAL_TRIGGER_RE.search(transcript):
+            effect_key = "psychedelic"
+            for pat, key in _VISUAL_EFFECT_KEYWORDS:
+                if pat.search(transcript):
+                    effect_key = key
+                    break
+            print(f"[visual] running {effect_key} effect…", flush=True)
+            try:
+                sys.path.insert(0, str(Path(__file__).parent))
+                import shapes_test as _shapes
+            except ImportError as e:
+                _shapes = None
+                print(f"[visual] shapes_test import failed: {e}", flush=True)
+            if _shapes is None:
+                reply = "Sorry, I can't run visual effects right now."
+                _speak_device(reply)
+                session.append({"role": "assistant", "content": reply})
+                append_message("assistant", reply)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+            runner = {
+                "fire":        _shapes.run_fire,
+                "matrix":      _shapes.run_matrix,
+                "psychedelic": _shapes.run_psychedelic,
+                "liquid":      _shapes.run_liquid,
+                "tunnel":      _shapes.run_tunnel,
+                "plasma":      _shapes.run_plasma,
+                "cartoon":     _shapes.run_cartoon,
+            }[effect_key]
+            reply = f"Here's {_VISUAL_EFFECT_LABELS[effect_key]} for you."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(reply)
+            board.set_rgb(*_LED_THINKING)
+            _visual_effect_active[0] = True   # pause face-loop's SPI writes while the effect runs
+            try:
+                runner(board, 12)
+            except Exception as e:
+                print(f"[visual] effect error: {e}", flush=True)
+            finally:
+                _visual_effect_active[0] = False
             _go_ready() if _busy.is_set() else _go_idle()
             return
         # ─────────────────────────────────────────────────────────────────────

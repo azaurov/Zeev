@@ -21,6 +21,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
 - **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
+- **Voice-triggered visual effects** — say "show me some fire" or "do the matrix effect" and Zeev runs demoscene-style fire/matrix/psychedelic/liquid/tunnel/plasma/cartoon animations on the LCD
 - **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded to city/region via Nominatim; injected into context automatically on location queries; `/gps` terminal command; `GET /gps` web endpoint
 - **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights, weekly reflections) in a single WAL-mode `zeev.db`; no flat files
 
@@ -242,6 +243,8 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 2. Google Translate TTS + mpg123 (he/es/ru, ~500ms)
 3. Piper local (English fallback) — retried once on process crash before falling through
 4. espeak-ng (last resort)
+
+**Voice-triggered visual effects:** say "show me some fire", "do the matrix effect", "play a psychedelic light show", or ask for the liquid, tunnel, plasma, or bunny/cartoon effect, and Zeev runs the matching demoscene-style animation from `shapes_test.py` directly on the LCD for a few seconds before returning to the normal face.
 
 **Bluetooth audio** (requires `sudo apt install bluez-alsa-utils libasound2-plugin-bluez`):
 

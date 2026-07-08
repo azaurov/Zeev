@@ -235,6 +235,7 @@ Address `0x33` on `/dev/i2c-3`. Hardware I2C `/dev/i2c-1` is used by WM8960 at `
 - **429 fallback**: `_handle_transcript` retries 70B/R1 429s with 8B before surfacing an error.
 - **LLM error display**: Whisplay screen shows "Rate limited", "No network", or "LLM err <code>". Full detail appended to `data/zeev_errors.log`.
 - **`_CAMERA_RE`**: natural-language camera intents → `capture_image()` + Llama 4 Scout vision call (when `CAMERA_AVAILABLE`).
+- **`_VISUAL_TRIGGER_RE`**: natural-language visual-effect intents ("show me fire", "do the matrix effect", "play a psychedelic light show") → runs the matching `shapes_test.py` effect (`fire`/`matrix`/`psychedelic`/`liquid`/`tunnel`/`plasma`/`cartoon`) directly on `board` for 12s. Sets `_visual_effect_active[0] = True` first so the background `_face_loop` thread skips its own SPI writes for the duration (avoids two threads racing on `board.draw_image`).
 - Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
 
 ## Startup / Shutdown

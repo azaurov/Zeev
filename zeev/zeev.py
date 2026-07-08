@@ -1936,8 +1936,9 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
         print(f"[call] SCO speak error: {e}", flush=True)
 
 
-def bt_call_at(mac: str, cmd: str) -> bool:
-    """Send an AT command to the phone over HFP RFCOMM via BlueALSA D-Bus."""
+def _bt_at_send(mac: str, cmd: str, read_bytes: int = 64, wait: float = 1.0) -> str:
+    """Send an AT command over HFP RFCOMM via BlueALSA D-Bus; return the raw
+    decoded response, or '' if no reply arrived within `wait` seconds."""
     dbus_path = "/org/bluealsa/hci0/dev_" + mac.replace(":", "_") + "/rfcomm"
     try:
         import dbus
@@ -1946,23 +1947,44 @@ def bt_call_at(mac: str, cmd: str) -> bool:
         iface = dbus.Interface(obj, "org.bluealsa.RFCOMM1")
         fd_obj = iface.Open()
         raw_fd = fd_obj.take() if hasattr(fd_obj, "take") else int(fd_obj)
-        import select as _sel
         with os.fdopen(raw_fd, "r+b", closefd=True, buffering=0) as f:
             f.write((cmd + "\r").encode())
-            # Read response (up to 1s) to confirm phone processed the command
-            ready, _, _ = _sel.select([f], [], [], 1.0)
+            ready, _, _ = select.select([f], [], [], wait)
             if ready:
-                resp = f.read(64).decode(errors="replace").strip()
-                ok = "OK" in resp
-                print(f"[call] AT {cmd} → {resp!r}", flush=True)
-                return ok
-        return True  # no response but no error either
+                return f.read(read_bytes).decode(errors="replace").strip()
+        return ""
     except ImportError:
         print("[call] python3-dbus not installed — run: sudo apt install python3-dbus")
-        return False
+        return ""
     except Exception as e:
         print(f"[call] AT command failed ({cmd!r}): {e}")
+        return ""
+
+
+def bt_call_at(mac: str, cmd: str) -> bool:
+    """Send an AT command to the phone over HFP RFCOMM via BlueALSA D-Bus."""
+    resp = _bt_at_send(mac, cmd)
+    if resp:
+        print(f"[call] AT {cmd} → {resp!r}", flush=True)
+        return "OK" in resp
+    return True  # no response but no error either
+
+
+def bt_call_active(mac: str) -> bool:
+    """
+    Query the phone's active-call list via AT+CLCC. Catches a hangup that
+    bt_hfp_detect() alone can miss — BlueALSA sometimes keeps listing the SCO
+    PCM for a beat after the far end/phone has actually ended the call.
+    Returns False only on a definitive "no calls" reply (bare OK, no +CLCC
+    lines); True if a call is listed, or if the query is ambiguous/times out
+    — a flaky AT channel should never cause a false-positive hangup.
+    """
+    resp = _bt_at_send(mac, "AT+CLCC", read_bytes=512, wait=1.5)
+    if "+CLCC:" in resp:
+        return True
+    if "OK" in resp:
         return False
+    return True
 
 
 def bt_call_dtmf(mac: str, digit: str) -> bool:
@@ -2100,11 +2122,18 @@ def bt_call_hangup() -> bool:
 
 
 def _vad_collect(stream_proc: subprocess.Popen, samplerate: int = 16000,
-                 silence_ms: int = 900) -> bytes:
+                 silence_ms: int = 900, read_timeout: float = 5.0) -> bytes:
     """
     Read from an arecord process using energy-based VAD.
     Returns raw PCM when silence_ms of silence follows speech, or after 30s max.
     Falls back to simple energy threshold if webrtcvad is not installed.
+
+    A live SCO capture keeps emitting PCM frames even during real silence, so
+    `read_timeout` (no bytes at all for this long) only fires when the device
+    has actually gone dead — e.g. the far end hung up and the SCO link died.
+    Without this, a plain blocking read() here can hang the whole call loop
+    forever, since the existing hangup checks only run once pcm comes back
+    empty/falsy.
     """
     try:
         import webrtcvad
@@ -2124,6 +2153,9 @@ def _vad_collect(stream_proc: subprocess.Popen, samplerate: int = 16000,
     total_frames = 0
 
     while total_frames < max_frames:
+        ready, _, _ = select.select([stream_proc.stdout], [], [], read_timeout)
+        if not ready:
+            break  # no audio at all for read_timeout seconds — device likely dead
         chunk = stream_proc.stdout.read(frame_bytes)
         if not chunk or len(chunk) < frame_bytes:
             break
@@ -2255,6 +2287,9 @@ def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
         # Read up to 6s in chunks; check for early speech at the 2s mark
         chunk_bytes = int(samplerate * 0.5) * 2  # 500ms chunks
         while len(pcm) < max_bytes:
+            ready, _, _ = select.select([rec.stdout], [], [], 5.0)
+            if not ready:
+                break  # no audio at all for 5s — device likely dead (e.g. call dropped instantly)
             chunk = rec.stdout.read(chunk_bytes)
             if not chunk:
                 break
@@ -2317,6 +2352,16 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         bt_speak_sco(text, sco_dev, samplerate, persona=persona)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
+
+    def _hangup_detected() -> bool:
+        """True once the far end has actually hung up. Checks both the SCO
+        PCM listing (bt_hfp_detect) and the phone's own AT+CLCC call list
+        (bt_call_active) — BlueALSA can keep listing the SCO PCM for a beat
+        after the call has really ended, so bt_hfp_detect() alone is not
+        reliable enough to end the loop on."""
+        if not bt_hfp_detect():
+            return True
+        return not bt_call_active(mac)
 
     # Speculatively pre-generate voicemail message while ringing, so it's ready at the beep
     _pregen_msg: list[str] = []  # list used as mutable container for thread result
@@ -2395,9 +2440,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             print("[call] Listening (fast detect)...", flush=True)
             pcm, detected_type, transcript = bt_fast_detect(sco_dev, samplerate)
             if not pcm:
-                mac_check = bt_hfp_detect()
-                if not mac_check:
-                    print("[call] Call ended (HFP disconnected)", flush=True)
+                if _hangup_detected():
+                    print("[call] Call ended (hangup detected)", flush=True)
                     _IN_CALL = False
                     break
                 continue
@@ -2418,9 +2462,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             rec.terminate()
             rec.wait()
             if not pcm:
-                mac_check = bt_hfp_detect()
-                if not mac_check:
-                    print("[call] Call ended (HFP disconnected)", flush=True)
+                if _hangup_detected():
+                    print("[call] Call ended (hangup detected)", flush=True)
                     _IN_CALL = False
                     break
                 continue

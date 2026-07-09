@@ -388,11 +388,11 @@ def run_psychedelic(board, duration):
 # ── Matrix: falling green digital rain ──────────────────────────────────────
 
 _MATRIX_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-_CELL_W, _CELL_H = 12, 14
+_CELL_W, _CELL_H = 10, 14
 _MATRIX_COLS = W // _CELL_W
 _MATRIX_ROWS = H // _CELL_H
 _MATRIX_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ!?$%&#@*+=/\\"
-_TRAIL_LEN = 12
+_TRAIL_LEN = 18
 
 _matrix_font = None
 _matrix_state = None  # lazily built: list of dicts per column
@@ -432,7 +432,7 @@ def frame_matrix(dt):
     for col_idx, col in enumerate(_matrix_state):
         col["head"] += col["speed"] * dt
         if col["head"] - _TRAIL_LEN > _MATRIX_ROWS:
-            col["head"] = random.uniform(-_TRAIL_LEN, -1)
+            col["head"] = random.uniform(-_TRAIL_LEN * 0.4, -1)
             col["speed"] = random.uniform(6.0, 16.0)
 
         x = col_idx * _CELL_W
@@ -447,7 +447,7 @@ def frame_matrix(dt):
             if offset == 0:
                 color = (200, 255, 210)  # bright near-white head
             else:
-                g = int(60 + 160 * brightness)
+                g = int(90 + 165 * brightness)
                 color = (10, g, 40)
             ch = col["chars"][row % len(col["chars"])]
             draw.text((x, row * _CELL_H), ch, font=_matrix_font, fill=color)

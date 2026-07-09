@@ -260,7 +260,7 @@ _VISUAL_TRIGGER_RE = re.compile(
     r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect)\b"
     r"|\b(fire|matrix|digital rain|psychedelic|kaleidosc\w*|liquid|lava lamp|tunnel|vortex|"
     r"plasma|bunny|cartoon (face|mode))\b.{0,15}\b(effect|mode|show|animation|visual|screen)\b"
-    r"|\bshow (me )?(some )?(fire|the matrix|matrix|psychedelic|kaleidoscope|liquid|"
+    r"|\bshow (me )?(a |an |the |some )?(fire|the matrix|matrix|psychedelic|kaleidoscope|liquid|"
     r"a?\s?tunnel|vortex|plasma|(a |the )?bunny|(a |the )?cartoon)\b",
     re.IGNORECASE,
 )
@@ -273,6 +273,10 @@ _VISUAL_EFFECT_KEYWORDS = [
     (re.compile(r"\bplasma\b", re.IGNORECASE), "plasma"),
     (re.compile(r"\bbunny\b|\bcartoon\b", re.IGNORECASE), "cartoon"),
 ]
+_VISUAL_FALLBACK_RE = re.compile(
+    r"\bshow me (a |an |the |some )?\w+",
+    re.IGNORECASE,
+)
 _VISUAL_EFFECT_LABELS = {
     "fire":        "some fire",
     "matrix":      "the matrix",
@@ -6049,6 +6053,21 @@ def run_device_mode():
 
     threading.Thread(target=_face_loop, daemon=True).start()
 
+    # Pre-warm shapes_test (numpy + PIL import) in the background so the first
+    # "show me fire/matrix/..." request doesn't pay the cold-import cost —
+    # this took 2.5min right after a fresh reboot and left the LCD blank the
+    # whole time since nothing touches the screen during the import.
+    if _have_pil:
+        def _prewarm_shapes():
+            try:
+                sys.path.insert(0, str(Path(__file__).parent))
+                import shapes_test  # noqa: F401 — caches in sys.modules for later use
+                print("[visual] shapes_test pre-warmed", flush=True)
+            except Exception as e:
+                print(f"[visual] shapes_test pre-warm failed: {e}", flush=True)
+
+        threading.Thread(target=_prewarm_shapes, daemon=True).start()
+
     # ── WM8960 keepalive — prevents codec power-save after ~30s of silence ──
     # Plays a brief silent buffer every 20s to keep the codec awake without
     # holding the device open (which would block TTS playback).
@@ -6241,7 +6260,11 @@ def run_device_mode():
                     p2.stdin.close()
                 except BrokenPipeError:
                     pass
-                p2.wait()
+                try:
+                    p2.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    print("[tts] aplay hung — killing", flush=True)
+                    p2.kill()
                 return
             except Exception as e:
                 print(f"Groq TTS playback error: {e}")
@@ -6264,7 +6287,11 @@ def run_device_mode():
                     p1.stdin.close()
                 except BrokenPipeError:
                     pass
-                p1.wait()
+                try:
+                    p1.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    print("[tts] mpg123 hung — killing", flush=True)
+                    p1.kill()
                 _tts_p1 = None
                 return
             for chunk in _gtts_chunks(clean):
@@ -6281,7 +6308,11 @@ def run_device_mode():
                         p1.stdin.close()
                     except BrokenPipeError:
                         pass
-                    p1.wait()
+                    try:
+                        p1.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        print("[tts] mpg123 hung — killing", flush=True)
+                        p1.kill()
             _tts_p1 = None
             return
 
@@ -6361,7 +6392,11 @@ def run_device_mode():
                         p2.stdin.close()
                     except BrokenPipeError:
                         pass
-                    p2.wait()
+                    try:
+                        p2.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        print("[tts] aplay hung — killing", flush=True)
+                        p2.kill()
                     return
             else:
                 # 4. espeak-ng — last resort
@@ -6377,8 +6412,15 @@ def run_device_mode():
                 )
                 p1.stdout.close()
                 _tts_p1, _tts_p2 = p1, p2
-                p2.wait()
-                p1.wait()
+                try:
+                    p2.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    print("[tts] aplay hung — killing", flush=True)
+                    p2.kill()
+                try:
+                    p1.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p1.kill()
         except Exception as e:
             print(f"TTS error: {e}")
         finally:
@@ -6842,6 +6884,26 @@ def run_device_mode():
                 print(f"[visual] effect error: {e}", flush=True)
             finally:
                 _visual_effect_active[0] = False
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Unsupported visual effect ("show me a flying eagle") ──────────────
+        # Catches "show me <something>" requests that clearly want an on-screen
+        # visual but don't name one of the effects we actually have, so Zeev
+        # tells the user what's available instead of silently answering with
+        # ASCII art and leaving the LCD blank.
+        if (_have_pil and _VISUAL_FALLBACK_RE.search(transcript)
+                and not any(pat.search(transcript) for pat, _ in _VISUAL_EFFECT_KEYWORDS)):
+            options = ", ".join(_VISUAL_EFFECT_LABELS[k] for k in
+                                 ("fire", "matrix", "psychedelic", "liquid",
+                                  "tunnel", "plasma", "cartoon"))
+            reply = f"I don't have that one, but I can show you: {options}."
+            print(f"Zeev: {reply}")
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _set_face("speaking", reply)
+            _speak_device(reply)
             _go_ready() if _busy.is_set() else _go_idle()
             return
         # ─────────────────────────────────────────────────────────────────────

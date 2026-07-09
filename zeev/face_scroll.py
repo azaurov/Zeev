@@ -33,7 +33,7 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
 W, H       = 240, 280
-HEADER_H   = 88
+HEADER_H   = 132
 SEP_Y      = HEADER_H          # separator line y-position
 TEXT_Y     = HEADER_H + 1      # text area starts 1 px below separator
 TEXT_H     = H - TEXT_Y        # 191 px
@@ -139,22 +139,50 @@ def _get_symb():
     return _symb_font if _symb_font else None
 
 
-def _draw_miss_minutes_icon(img, draw, state, t):
-    """Draw Miss Minutes — animated PIL clock face with cartoon expressions."""
-    cx, cy = W // 2, 60   # face centre (lowered to leave room for hat)
-    r = 25                  # face radius
+_MOUTH_SHAPES = {
+    # Rendered relative to (cx, my, s) where s is the face scale factor;
+    # ink is the closed-mouth line color.
+    "closed": lambda draw, cx, my, ink, s: draw.line(
+        [cx - 6 * s, my, cx + 6 * s, my], fill=ink, width=max(2, round(2 * s))),
+    "half":   lambda draw, cx, my, ink, s: draw.ellipse(
+        [cx - 5 * s, my - 2 * s, cx + 5 * s, my + 3 * s], fill=(155, 52, 52)),
+    "open":   lambda draw, cx, my, ink, s: draw.ellipse(
+        [cx - 6 * s, my - 4 * s, cx + 6 * s, my + 6 * s], fill=(155, 52, 52)),
+    "e":      lambda draw, cx, my, ink, s: draw.ellipse(
+        [cx - 8 * s, my - 2 * s, cx + 8 * s, my + 2 * s], fill=(155, 52, 52)),
+    "u":      lambda draw, cx, my, ink, s: draw.ellipse(
+        [cx - 3 * s, my - 3 * s, cx + 3 * s, my + 3 * s], fill=(155, 52, 52)),
+}
+
+_FACE_R = 40  # face radius — was 25; grown to make the mouth/lipsync legible
+_FACE_R_ORIG = 25  # radius the original hand-tuned pixel offsets were designed for
+_HAT_TOP = 20  # crown top y — fixed, clears the status-row text above it
+
+
+def _draw_miss_minutes_icon(img, draw, state, t, mouth_shape=None):
+    """Draw Miss Minutes — animated PIL clock face with cartoon expressions.
+
+    mouth_shape: "closed"|"half"|"open"|"e"|"u" from the audio-driven lipsync
+    engine (see lipsync.py), used during "speaking" instead of the fixed-rate
+    flap. None falls back to the old timer-based open/closed toggle.
+    """
+    r = _FACE_R
+    s = r / _FACE_R_ORIG   # scale factor for offsets hand-tuned at r=25
+    # Crown height scales with s so the brim (which extends 5*s above
+    # face_top) never grows back up into the fixed status-row text.
+    face_top = _HAT_TOP + 15 * s
+    cx, cy = W // 2, face_top + r
 
     # Blink: eyes closed for 0.15 s every 4 s
     blink = (t % 4.0) < 0.15
 
     # ── Cowboy hat ───────────────────────────────────────────────────────────
     hat = (48, 32, 10)
-    face_top = cy - r          # y = 35
     # Crown: narrow rect above face, top at y≈20 (clears status-row text)
-    draw.rounded_rectangle([cx - 13, 20, cx + 13, face_top + 2],
-                            radius=4, fill=hat)
+    draw.rounded_rectangle([cx - 13 * s, 20, cx + 13 * s, face_top + 2 * s],
+                            radius=4 * s, fill=hat)
     # Brim: wide ellipse overlapping the crown–face join
-    draw.ellipse([cx - 22, face_top - 5, cx + 22, face_top + 6], fill=hat)
+    draw.ellipse([cx - 22 * s, face_top - 5 * s, cx + 22 * s, face_top + 6 * s], fill=hat)
 
     # ── Clock face ───────────────────────────────────────────────────────────
     face_col = (228, 192, 40)
@@ -164,8 +192,8 @@ def _draw_miss_minutes_icon(img, draw, state, t):
     # Hour tick marks (major at 3/6/9/12, minor elsewhere)
     for i in range(12):
         a   = math.pi * 2 * i / 12 - math.pi / 2
-        r1  = r - 2
-        r2  = r - 7 if i % 3 == 0 else r - 5
+        r1  = r - 2 * s
+        r2  = r - (7 if i % 3 == 0 else 5) * s
         w   = 2 if i % 3 == 0 else 1
         draw.line([cx + int(r1 * math.cos(a)), cy + int(r1 * math.sin(a)),
                    cx + int(r2 * math.cos(a)), cy + int(r2 * math.sin(a))],
@@ -184,40 +212,42 @@ def _draw_miss_minutes_icon(img, draw, state, t):
                cx + int(mn_len * math.cos(ma)), cy + int(mn_len * math.sin(ma))],
               fill=(55, 36, 4), width=2)
     # Centre pin
-    draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(38, 22, 4))
+    draw.ellipse([cx - 2 * s, cy - 2 * s, cx + 2 * s, cy + 2 * s], fill=(38, 22, 4))
 
     # ── Eyes ─────────────────────────────────────────────────────────────────
-    eye_y = cy - 4
+    eye_y = cy - 4 * s
     ink   = (22, 14, 3)
-    for ex in (cx - 8, cx + 8):
+    for ex in (cx - 8 * s, cx + 8 * s):
         if blink or state == "idle":
             # Heavy-lidded / closed: flat line with lower arc
-            draw.line([ex - 4, eye_y, ex + 4, eye_y], fill=ink, width=2)
+            draw.line([ex - 4 * s, eye_y, ex + 4 * s, eye_y], fill=ink, width=max(2, round(2 * s)))
             if not blink:
-                draw.arc([ex - 4, eye_y - 1, ex + 4, eye_y + 5],
-                         start=0, end=180, fill=ink, width=2)
+                draw.arc([ex - 4 * s, eye_y - 1 * s, ex + 4 * s, eye_y + 5 * s],
+                         start=0, end=180, fill=ink, width=max(2, round(2 * s)))
         elif state == "error":
-            draw.line([ex - 3, eye_y - 3, ex + 3, eye_y + 3], fill=ink, width=2)
-            draw.line([ex + 3, eye_y - 3, ex - 3, eye_y + 3], fill=ink, width=2)
+            draw.line([ex - 3 * s, eye_y - 3 * s, ex + 3 * s, eye_y + 3 * s], fill=ink, width=max(2, round(2 * s)))
+            draw.line([ex + 3 * s, eye_y - 3 * s, ex - 3 * s, eye_y + 3 * s], fill=ink, width=max(2, round(2 * s)))
         elif state == "thinking":
             # Squinting upward
-            draw.arc([ex - 4, eye_y - 4, ex + 4, eye_y + 2],
-                     start=200, end=340, fill=ink, width=2)
+            draw.arc([ex - 4 * s, eye_y - 4 * s, ex + 4 * s, eye_y + 2 * s],
+                     start=200, end=340, fill=ink, width=max(2, round(2 * s)))
         else:
             # Open dot
-            draw.ellipse([ex - 3, eye_y - 3, ex + 3, eye_y + 3], fill=ink)
+            draw.ellipse([ex - 3 * s, eye_y - 3 * s, ex + 3 * s, eye_y + 3 * s], fill=ink)
 
     # ── Mouth ────────────────────────────────────────────────────────────────
-    my = cy + 13
-    speaking_open = state == "speaking" and (t % 0.5) < 0.28
-    if speaking_open:
-        draw.ellipse([cx - 6, my - 4, cx + 6, my + 6], fill=(155, 52, 52))
+    my = cy + 13 * s
+    if state == "speaking" and mouth_shape is not None:
+        _MOUTH_SHAPES.get(mouth_shape, _MOUTH_SHAPES["closed"])(draw, cx, my, ink, s)
+    elif state == "speaking" and (t % 0.5) < 0.28:
+        # Fallback flap when no lipsync data is available yet this utterance.
+        draw.ellipse([cx - 6 * s, my - 4 * s, cx + 6 * s, my + 6 * s], fill=(155, 52, 52))
     elif state == "error":
-        draw.arc([cx - 7, my - 4, cx + 7, my + 4], start=200, end=340, fill=ink, width=2)
+        draw.arc([cx - 7 * s, my - 4 * s, cx + 7 * s, my + 4 * s], start=200, end=340, fill=ink, width=max(2, round(2 * s)))
     elif state == "ready":
-        draw.arc([cx - 10, my - 8, cx + 10, my + 6], start=10, end=170, fill=ink, width=2)
+        draw.arc([cx - 10 * s, my - 8 * s, cx + 10 * s, my + 6 * s], start=10, end=170, fill=ink, width=max(2, round(2 * s)))
     else:
-        draw.arc([cx - 8, my - 6, cx + 8, my + 4], start=15, end=165, fill=ink, width=2)
+        draw.arc([cx - 8 * s, my - 6 * s, cx + 8 * s, my + 4 * s], start=15, end=165, fill=ink, width=max(2, round(2 * s)))
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -251,7 +281,7 @@ def _draw_battery(draw, x, y, level, charging):
         draw.line([cx - 1, y + bh // 2, cx + 2, y + bh - 3], fill=(0, 0, 0), width=1)
 
 
-def _draw_header(img, draw, state, col, batt=None, t=0.0):
+def _draw_header(img, draw, state, col, batt=None, t=0.0, mouth_shape=None):
     """batt: (level_float_or_None, charging_bool) or None if unavailable."""
     label = _LABELS.get(state, state)
     clock = datetime.now().strftime("%H:%M")
@@ -285,7 +315,7 @@ def _draw_header(img, draw, state, col, batt=None, t=0.0):
         draw.text((W - clock_w - 8, 5), clock, font=font_sm, fill=(130, 140, 170))
 
     # Miss Minutes clock-face icon
-    _draw_miss_minutes_icon(img, draw, state, t)
+    _draw_miss_minutes_icon(img, draw, state, t, mouth_shape=mouth_shape)
 
     # Separator line
     draw.line([0, SEP_Y - 1, W, SEP_Y - 1], fill=(40, 44, 55), width=1)
@@ -437,16 +467,18 @@ def _draw_idle_mm(t: float) -> Image.Image | None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def draw_frame(state: str, caption: str, t: float, batt=None) -> Image.Image:
+def draw_frame(state: str, caption: str, t: float, batt=None, mouth_shape=None) -> Image.Image:
     """
     Render one 240×280 frame.
 
     Parameters
     ----------
-    state   : "idle" | "ready" | "listening" | "thinking" | "speaking" | "error"
-    caption : full reply text to show in the scrolling area
-    t       : time.time() — drives clock, scroll, and icon animations
-    batt    : (level: float|None, charging: bool) from get_battery(), or None
+    state       : "idle" | "ready" | "listening" | "thinking" | "speaking" | "error"
+    caption     : full reply text to show in the scrolling area
+    t           : time.time() — drives clock, scroll, and icon animations
+    batt        : (level: float|None, charging: bool) from get_battery(), or None
+    mouth_shape : "closed"|"half"|"open"|"e"|"u" from the lipsync engine, or None
+                  to fall back to the fixed-rate flap during "speaking".
     """
     if state == "idle":
         img = _draw_idle_mm(t)
@@ -457,7 +489,7 @@ def draw_frame(state: str, caption: str, t: float, batt=None) -> Image.Image:
     draw = ImageDraw.Draw(img)
     col  = _STATE_COLORS.get(state, (120, 120, 120))
 
-    _draw_header(img, draw, state, col, batt=batt, t=t)
+    _draw_header(img, draw, state, col, batt=batt, t=t, mouth_shape=mouth_shape)
     _draw_text_area(img, draw, caption, t)
 
     return img

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -5859,6 +5860,12 @@ def run_device_mode():
         _have_pil = False
         print("python3-pillow not found — LCD display disabled. Install with: sudo apt install python3-pillow")
 
+    try:
+        import numpy as np
+        _have_numpy = True
+    except ImportError:
+        _have_numpy = False
+
     init_learning()
     init_tts()
     bt_detect_connected()
@@ -6027,6 +6034,20 @@ def run_device_mode():
     _screen_on      = [True]      # mutable so nested functions can update it
     _last_activity  = [time.time()]
     _visual_effect_active = [False]  # True while a shapes_test effect owns the SPI/LCD
+    # Audio-driven lipsync shape, updated during Orpheus-path TTS playback.
+    # None means "no live lipsync data" — face_scroll falls back to its
+    # fixed-rate flap animation for TTS paths that don't chunk audio (Piper,
+    # gTTS, espeak).
+    _mouth_shape = [None]
+
+    _lipsync_engine = None
+    if _have_numpy:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from lipsync import LipSyncEngine
+            _lipsync_engine = LipSyncEngine()
+        except Exception as e:
+            print(f"[lipsync] init failed: {e}", flush=True)
 
     # Render interval per state — active states get full 12fps; static or
     # slow-changing states are throttled to save CPU and SPI bandwidth.
@@ -6051,7 +6072,8 @@ def run_device_mode():
             if _have_pil:
                 try:
                     from face_scroll import draw_frame
-                    img = draw_frame(state, caption, now, batt=get_battery())
+                    img = draw_frame(state, caption, now, batt=get_battery(),
+                                      mouth_shape=_mouth_shape[0])
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
@@ -6223,6 +6245,57 @@ def run_device_mode():
         st.start()
         st.join()  # block until audio finishes
 
+    def _play_pcm_chunked(proc, pcm, rate, channels, sampwidth=2):
+        """Write S16LE PCM to proc.stdin in ~33ms chunks, updating
+        _mouth_shape[0] from each chunk's RMS + spectral centroid via the
+        lipsync engine — so the face's mouth tracks the actual audio instead
+        of a fixed-rate flap. Falls back to one big write if numpy/lipsync
+        engine aren't available, or the format isn't 16-bit PCM.
+        """
+        if not (_have_numpy and _lipsync_engine is not None) or sampwidth != 2:
+            try:
+                proc.stdin.write(pcm)
+            except BrokenPipeError:
+                pass
+            return
+        frame_bytes = sampwidth * channels
+        chunk_frames = max(1, rate // 30)
+        chunk_dur = chunk_frames / rate
+        chunk_bytes = chunk_frames * frame_bytes
+        start_t = time.monotonic()
+        idx = 0
+        try:
+            for off in range(0, len(pcm), chunk_bytes):
+                chunk = pcm[off:off + chunk_bytes]
+                samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
+                if channels > 1 and samples.size:
+                    usable = (samples.size // channels) * channels
+                    samples = samples[:usable].reshape(-1, channels).mean(axis=1)
+                rms = float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+                centroid01 = 0.0
+                if samples.size:
+                    spectrum = np.abs(np.fft.rfft(samples))
+                    nyquist = rate / 2
+                    freqs = np.linspace(0, nyquist, len(spectrum))
+                    den = float(np.sum(spectrum))
+                    if den > 0 and nyquist > 0:
+                        centroid01 = min(1.0, float(np.sum(freqs * spectrum)) / den / nyquist)
+                elapsed = time.monotonic() - start_t
+                _mouth_shape[0] = _lipsync_engine.update(rms, centroid01, elapsed)
+                proc.stdin.write(chunk)
+                idx += 1
+                # Pace to real playback time — the pipe + ALSA buffer can
+                # absorb several seconds of audio without blocking, so
+                # without this the whole loop (and every mouth-shape
+                # update) races far ahead of what's actually audible.
+                target = start_t + idx * chunk_dur
+                now = time.monotonic()
+                if target > now:
+                    time.sleep(target - now)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
     def _speak_device(text, voice="daniel"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
@@ -6247,25 +6320,25 @@ def run_device_mode():
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     )
                     raw, _ = ff.communicate(wav)
-                    p2 = subprocess.Popen(
-                        ["aplay", "-D", adev, "-f", "S16_LE",
-                         "-r", str(_BT_RATE), "-c", str(_BT_CHANNELS), "-q", "-"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
+                    rate, channels, sampwidth = _BT_RATE, _BT_CHANNELS, 2
                 else:
-                    p2 = subprocess.Popen(
-                        ["aplay", "-D", adev, "-q", "-"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    raw = wav
+                    with wave.open(io.BytesIO(wav), "rb") as wf:
+                        rate, channels, sampwidth = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+                        raw = wf.readframes(wf.getnframes())
+                p2 = subprocess.Popen(
+                    # Tight buffer/period (100ms/20ms) so paced chunk writes
+                    # from _play_pcm_chunked actually track what's audible —
+                    # aplay's default buffer can otherwise absorb ~0.5s of
+                    # audio, making the lipsync-driven mouth visibly lead
+                    # the sound by that much.
+                    ["aplay", "-D", adev, "-f", "S16_LE",
+                     "-r", str(rate), "-c", str(channels),
+                     "-B", "100000", "-F", "20000", "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
                 _tts_p1, _tts_p2 = None, p2
-                try:
-                    p2.stdin.write(raw)
-                    p2.stdin.close()
-                except BrokenPipeError:
-                    pass
+                _play_pcm_chunked(p2, raw, rate, channels, sampwidth)
                 try:
                     p2.wait(timeout=60)
                 except subprocess.TimeoutExpired:
@@ -6276,6 +6349,9 @@ def run_device_mode():
                 print(f"Groq TTS playback error: {e}")
             finally:
                 _tts_p1 = _tts_p2 = None
+                _mouth_shape[0] = None
+                if _lipsync_engine:
+                    _lipsync_engine.reset()
 
         # 2. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
         _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}

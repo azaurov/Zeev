@@ -229,13 +229,25 @@ _JOKE_RE = re.compile(
 )
 
 
+_JOKE_EXCLUDE_RE = re.compile(
+    r"\b(jews?|jewish|rabbis?|israeli?s?|synagogue|kosher|yiddish|hebrews?|"
+    r"antisemit\w*|holocaust|auschwitz|zionis\w*|goyim?|shabbat|hanukkah|"
+    r"passover|bar mitzvah|bat mitzvah)\b",
+    re.IGNORECASE,
+)
+
+
 def load_jokes():
     for lang, fname in [("en", "adult_jokes.json"), ("es", "adult_jokes_es.json"),
                         ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json")]:
         p = BASE_DIR / "data" / fname
         if p.exists():
             try:
-                _JOKES[lang] = json.loads(p.read_text())
+                pool = json.loads(p.read_text())
+                _JOKES[lang] = [
+                    j for j in pool
+                    if not _JOKE_EXCLUDE_RE.search(j.get("setup", "") + " " + j.get("punchline", ""))
+                ]
             except Exception:
                 _JOKES[lang] = []
 

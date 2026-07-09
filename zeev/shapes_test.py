@@ -28,6 +28,8 @@ Usage:
                                                     # (default 20s)
     python3 zeev/shapes_test.py --fire [SECONDS]   # classic demoscene fire effect
                                                     # (default 20s)
+    python3 zeev/shapes_test.py --starfield [SECONDS] # hyperspace-warp star streaks
+                                                        # (default 20s)
 """
 
 import math
@@ -680,6 +682,87 @@ def run_plasma(board, duration):
     print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
 
 
+# ── Starfield: perspective hyperspace-warp streaks toward the viewer ────────
+
+_N_STARS = 340
+_STAR_FOV = 220.0   # projection scale
+_STAR_MAX_Z = 400.0
+_stars = None  # lazily built: (N, 3) array of x, y, z (z = depth, decreasing toward viewer)
+
+
+def _starfield_init():
+    global _stars
+    rng = np.random.default_rng()
+    _stars = np.empty((_N_STARS, 3), dtype=np.float32)
+    _stars[:, 0] = rng.uniform(-W / 2, W / 2, _N_STARS)
+    _stars[:, 1] = rng.uniform(-H / 2, H / 2, _N_STARS)
+    _stars[:, 2] = rng.uniform(1, _STAR_MAX_Z, _N_STARS)
+
+
+def frame_starfield(dt, speed=180.0):
+    global _stars
+    if _stars is None:
+        _starfield_init()
+
+    img = Image.new("RGB", (W, H), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx, cy = W / 2, H / 2
+
+    prev_z = _stars[:, 2].copy()
+    _stars[:, 2] -= speed * dt
+    respawn = _stars[:, 2] <= 1
+    n_resp = int(respawn.sum())
+    if n_resp:
+        rng = np.random.default_rng()
+        _stars[respawn, 0] = rng.uniform(-W / 2, W / 2, n_resp)
+        _stars[respawn, 1] = rng.uniform(-H / 2, H / 2, n_resp)
+        _stars[respawn, 2] = _STAR_MAX_Z
+        prev_z[respawn] = _STAR_MAX_Z
+
+    z = np.maximum(_stars[:, 2], 1)
+    pz = np.maximum(prev_z, 1)
+    px = cx + _stars[:, 0] / z * _STAR_FOV
+    py = cy + _stars[:, 1] / z * _STAR_FOV
+    ppx = cx + _stars[:, 0] / pz * _STAR_FOV
+    ppy = cy + _stars[:, 1] / pz * _STAR_FOV
+    brightness = np.clip(1.0 - z / _STAR_MAX_Z, 0.45, 1.0)
+
+    for i in range(_N_STARS):
+        x, y = float(px[i]), float(py[i])
+        if 0 <= x < W and 0 <= y < H:
+            b = float(brightness[i])
+            col = (int(255 * b), int(255 * b), int(200 + 55 * b))
+            width = 3 if b > 0.75 else 2
+            draw.line([float(ppx[i]), float(ppy[i]), x, y], fill=col, width=width)
+            draw.ellipse([x - width / 2, y - width / 2, x + width / 2, y + width / 2], fill=col)
+
+    return img
+
+
+def run_starfield(board, duration):
+    print(f"  starfield for {duration:.0f}s ({'LCD' if board else 'preview only'})...")
+    start = time.time()
+    last = start
+    frame_count = 0
+    saved_preview = False
+    while True:
+        now = time.time()
+        t = now - start
+        if t > duration:
+            break
+        dt = now - last
+        last = now
+        img = frame_starfield(dt)
+        if not saved_preview and t > 0.5:
+            img.save(OUT_DIR / "shapes_starfield.png")
+            saved_preview = True
+        if board is not None:
+            push_to_lcd(board, img)
+        frame_count += 1
+    elapsed = time.time() - start
+    print(f"  rendered {frame_count} frames in {elapsed:.1f}s ({frame_count / elapsed:.1f} fps)")
+
+
 def push_to_lcd(board, img):
     arr = np.asarray(img.convert("RGB"), dtype=np.uint16)
     r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
@@ -699,6 +782,7 @@ def main():
     tunnel = "--tunnel" in sys.argv
     matrix = "--matrix" in sys.argv
     fire   = "--fire" in sys.argv
+    starfield = "--starfield" in sys.argv
 
     board = None
     if not no_lcd:
@@ -727,6 +811,18 @@ def main():
                 pass
         run_animation(board, duration)
         print(f"\nDone. Preview in {OUT_DIR}/shapes_anim.png")
+        return
+
+    if starfield:
+        idx = sys.argv.index("--starfield")
+        duration = 20.0
+        if idx + 1 < len(sys.argv):
+            try:
+                duration = float(sys.argv[idx + 1])
+            except ValueError:
+                pass
+        run_starfield(board, duration)
+        print(f"\nDone. Preview in {OUT_DIR}/shapes_starfield.png")
         return
 
     if plasma:

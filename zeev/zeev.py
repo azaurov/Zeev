@@ -259,9 +259,11 @@ _VISUAL_TRIGGER_RE = re.compile(
     r"\b(show|display|put on|pull up|do|play|start|run|light up|give me)\b.{0,25}"
     r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect)\b"
     r"|\b(fire|matrix|digital rain|psychedelic|kaleidosc\w*|liquid|lava lamp|tunnel|vortex|"
-    r"plasma|bunny|cartoon (face|mode))\b.{0,15}\b(effect|mode|show|animation|visual|screen)\b"
+    r"plasma|bunny|cartoon (face|mode)|starfield|star field|hyperspace|warp speed|bounc\w*|"
+    r"spinning (shapes?|polygon))\b.{0,15}\b(effect|mode|show|animation|visual|screen)\b"
     r"|\bshow (me )?(a |an |the |some )?(fire|the matrix|matrix|psychedelic|kaleidoscope|liquid|"
-    r"a?\s?tunnel|vortex|plasma|(a |the )?bunny|(a |the )?cartoon)\b",
+    r"a?\s?tunnel|vortex|plasma|(a |the )?bunny|(a |the )?cartoon|(a |the )?starfield|"
+    r"(a |the )?star field|hyperspace|warp speed|(a |the )?bouncing ball)\b",
     re.IGNORECASE,
 )
 _VISUAL_EFFECT_KEYWORDS = [
@@ -272,6 +274,8 @@ _VISUAL_EFFECT_KEYWORDS = [
     (re.compile(r"\btunnel\b|\bvortex\b", re.IGNORECASE), "tunnel"),
     (re.compile(r"\bplasma\b", re.IGNORECASE), "plasma"),
     (re.compile(r"\bbunny\b|\bcartoon\b", re.IGNORECASE), "cartoon"),
+    (re.compile(r"\bstarfield\b|\bstar field\b|\bhyperspace\b|\bwarp speed\b", re.IGNORECASE), "starfield"),
+    (re.compile(r"\bbounc\w*\b|\bspinning (shapes?|polygon)\b", re.IGNORECASE), "bounce"),
 ]
 _VISUAL_FALLBACK_RE = re.compile(
     r"\bshow me (a |an |the |some )?\w+",
@@ -285,6 +289,8 @@ _VISUAL_EFFECT_LABELS = {
     "tunnel":      "a tunnel",
     "plasma":      "some plasma",
     "cartoon":     "a cartoon face",
+    "starfield":   "a starfield warp",
+    "bounce":      "a bouncing ball animation",
 }
 _VOICE_COACH_RE = re.compile(
     r"\b(voice\s+(training|coach|coaching|practice|exercise|lesson|feedback|warm.?up)|"
@@ -6869,6 +6875,8 @@ def run_device_mode():
                 "tunnel":      _shapes.run_tunnel,
                 "plasma":      _shapes.run_plasma,
                 "cartoon":     _shapes.run_cartoon,
+                "starfield":   _shapes.run_starfield,
+                "bounce":      _shapes.run_animation,
             }[effect_key]
             reply = f"Here's {_VISUAL_EFFECT_LABELS[effect_key]} for you."
             print(f"Zeev: {reply}")
@@ -6897,7 +6905,7 @@ def run_device_mode():
                 and not any(pat.search(transcript) for pat, _ in _VISUAL_EFFECT_KEYWORDS)):
             options = ", ".join(_VISUAL_EFFECT_LABELS[k] for k in
                                  ("fire", "matrix", "psychedelic", "liquid",
-                                  "tunnel", "plasma", "cartoon"))
+                                  "tunnel", "plasma", "cartoon", "starfield", "bounce"))
             reply = f"I don't have that one, but I can show you: {options}."
             print(f"Zeev: {reply}")
             session.append({"role": "assistant", "content": reply})

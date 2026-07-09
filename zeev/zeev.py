@@ -212,7 +212,7 @@ def extract_music_query(text):
 # Adult jokes
 # ---------------------------------------------------------------------------
 
-_JOKES: dict = {"en": [], "es": [], "ru": [], "he": []}
+_JOKES: dict = {"en": [], "es": [], "ru": [], "he": [], "zh": []}
 _JOKE_RE = re.compile(
     r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
     r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
@@ -224,7 +224,9 @@ _JOKE_RE = re.compile(
     # Russian
     r"|расскажи анекдот|анекдот|рассмеши меня"
     # Hebrew
-    r"|ספר לי בדיחה|בדיחה|תצחיק אותי)",
+    r"|ספר לי בדיחה|בדיחה|תצחיק אותי"
+    # Chinese
+    r"|讲个笑话|说个笑话|来个笑话|笑话)",
     re.IGNORECASE,
 )
 
@@ -239,7 +241,8 @@ _JOKE_EXCLUDE_RE = re.compile(
 
 def load_jokes():
     for lang, fname in [("en", "adult_jokes.json"), ("es", "adult_jokes_es.json"),
-                        ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json")]:
+                        ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json"),
+                        ("zh", "adult_jokes_zh.json")]:
         p = BASE_DIR / "data" / fname
         if p.exists():
             try:
@@ -269,6 +272,8 @@ def joke_lang(text: str) -> str:
         return "he"
     if re.search(r"[Ѐ-ӿ]", text):
         return "ru"
+    if re.search(r"[一-鿿]", text):
+        return "zh"
     if re.search(r"\b(chiste|gracioso|hazme re[ií]r|cu[eé]ntame)\b", text, re.IGNORECASE):
         return "es"
     # Explicit "in <language>" request, spoken/typed in English
@@ -278,6 +283,8 @@ def joke_lang(text: str) -> str:
         return "es"
     if re.search(r"\b(hebrew|עברית)\b", text, re.IGNORECASE):
         return "he"
+    if re.search(r"\b(chinese|mandarin|中文|普通话)\b", text, re.IGNORECASE):
+        return "zh"
     return "en"
 
 

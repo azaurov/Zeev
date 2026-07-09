@@ -259,6 +259,13 @@ def joke_lang(text: str) -> str:
         return "ru"
     if re.search(r"\b(chiste|gracioso|hazme re[ií]r|cu[eé]ntame)\b", text, re.IGNORECASE):
         return "es"
+    # Explicit "in <language>" request, spoken/typed in English
+    if re.search(r"\b(russian|по.русски)\b", text, re.IGNORECASE):
+        return "ru"
+    if re.search(r"\b(spanish|espa[ñn]ol)\b", text, re.IGNORECASE):
+        return "es"
+    if re.search(r"\b(hebrew|עברית)\b", text, re.IGNORECASE):
+        return "he"
     return "en"
 
 

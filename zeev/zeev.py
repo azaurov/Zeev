@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import readline
 import sqlite3
@@ -205,6 +206,60 @@ def extract_music_query(text):
     """Return the song/artist query if text is a play request, else None."""
     m = _MUSIC_RE.match(text.strip())
     return m.group("query").strip() if m else None
+
+
+# ---------------------------------------------------------------------------
+# Adult jokes
+# ---------------------------------------------------------------------------
+
+_JOKES: dict = {"en": [], "es": [], "ru": [], "he": []}
+_JOKE_RE = re.compile(
+    r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
+    r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
+    r"|joke|say a joke|hit me with a joke"
+    r"|make me laugh|say something funny|got any jokes"
+    r"|(dirty|adult|naughty|nasty|raunchy) joke"
+    # Spanish
+    r"|cu[eé]ntame un chiste|chiste|hazme reír|algo gracioso"
+    # Russian
+    r"|расскажи анекдот|анекдот|рассмеши меня"
+    # Hebrew
+    r"|ספר לי בדיחה|בדיחה|תצחיק אותי)",
+    re.IGNORECASE,
+)
+
+
+def load_jokes():
+    for lang, fname in [("en", "adult_jokes.json"), ("es", "adult_jokes_es.json"),
+                        ("ru", "adult_jokes_ru.json"), ("he", "adult_jokes_he.json")]:
+        p = BASE_DIR / "data" / fname
+        if p.exists():
+            try:
+                _JOKES[lang] = json.loads(p.read_text())
+            except Exception:
+                _JOKES[lang] = []
+
+
+def random_joke(lang: str = "en") -> str:
+    """Return a random joke in the given language, falling back to English."""
+    pool = _JOKES.get(lang) or _JOKES.get("en") or []
+    if not pool:
+        return ""
+    j = random.choice(pool)
+    if j.get("punchline"):
+        return f"{j['setup']}\n\n{j['punchline']}"
+    return j["setup"]
+
+
+def joke_lang(text: str) -> str:
+    """Detect which joke language to use from the request text."""
+    if re.search(r"[֐-׿]", text):
+        return "he"
+    if re.search(r"[Ѐ-ӿ]", text):
+        return "ru"
+    if re.search(r"\b(chiste|gracioso|hazme re[ií]r|cu[eé]ntame)\b", text, re.IGNORECASE):
+        return "es"
+    return "en"
 
 
 _BT_SCAN_RE = re.compile(
@@ -3144,6 +3199,7 @@ def init_learning():
     load_settings()
     load_latest_reflection()
     build_rag_index()
+    load_jokes()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
 
 
@@ -5468,6 +5524,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.flush()
                 return
 
+            if user_msg.lower().startswith("/joke") or _JOKE_RE.match(user_msg):
+                joke = random_joke(joke_lang(user_msg))
+                if joke:
+                    sse({"token": joke})
+                else:
+                    sse({"error": "No jokes loaded."})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
             with lock:
                 session.append({"role": "user", "content": user_msg})
                 append_message("user", user_msg)
@@ -6665,6 +6731,28 @@ def run_device_mode():
             _go_ready() if _busy.is_set() else _go_idle()
             return
 
+        # ── Adult jokes ──────────────────────────────────────────────────────
+        if _JOKE_RE.match(transcript):
+            jlang = joke_lang(transcript)
+            joke = random_joke(jlang)
+            if joke:
+                print(f"Zeev [joke]: {joke}")
+                session.append({"role": "user", "content": transcript})
+                append_message("user", transcript)
+                session.append({"role": "assistant", "content": joke})
+                append_message("assistant", joke)
+                _set_face("speaking", joke)
+                board.set_rgb(*_LED_SPEAKING)
+                _speak_device(joke)
+            else:
+                reply = "I don't have any jokes loaded right now."
+                print(f"Zeev: {reply}")
+                _set_face("speaking", reply)
+                board.set_rgb(*_LED_SPEAKING)
+                _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
         # ── Pending detail expansion ──────────────────────────────────────────
         if _pending_detail[0] and _MORE_YES_RE.search(transcript):
             detail = _pending_detail[0]
@@ -7799,6 +7887,17 @@ def main():
             save_settings()
             state = "on" if tts_on else "off"
             print(f"{DIM}Speech {state}.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/joke") or _JOKE_RE.match(user_input):
+            jlang = joke_lang(user_input)
+            joke = random_joke(jlang)
+            if joke:
+                print(f"\n{CYAN}{BOLD}Zeev:{RESET} {joke}\n")
+                if tts_on:
+                    speak_terminal(joke, lang=jlang)
+            else:
+                print(f"{DIM}No jokes loaded.{RESET}\n")
             continue
 
         if user_input.lower() == "/flip":

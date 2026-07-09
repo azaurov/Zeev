@@ -27,6 +27,7 @@ scroll and icon animations.
 
 import math
 import os
+import re
 import time
 from datetime import datetime
 
@@ -42,7 +43,18 @@ _FONT_PATH  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _FONT_NOTO  = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 _FONT_SYMB  = "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf"
+_FONT_CJK   = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
 _NOTO_SIZE  = 109   # only valid bitmap strike size for NotoColorEmoji
+
+# CJK Unified Ideographs + punctuation ranges — DejaVuSans has no glyphs here,
+# so text containing these codepoints is rendered with the WenQuanYi font.
+_CJK_RE = re.compile(
+    r"[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]"
+)
+
+
+def _has_cjk(text):
+    return bool(_CJK_RE.search(text))
 
 _STATE_COLORS = {
     "idle":      (50,  120, 220),
@@ -96,9 +108,45 @@ def _font(path, size):
         return ImageFont.load_default()
 
 
+# Cached per-size CJK font objects (wqy-zenhei.ttc loaded once per size)
+_cjk_fonts = {}
+
+def _cjk_font(size):
+    if size not in _cjk_fonts:
+        try:
+            _cjk_fonts[size] = ImageFont.truetype(_FONT_CJK, size)
+        except Exception:
+            _cjk_fonts[size] = _font(_FONT_PATH, size)
+    return _cjk_fonts[size]
+
+
+def _text_font(text, size):
+    """Pick a font that can render `text` — CJK text needs WenQuanYi."""
+    return _cjk_font(size) if _has_cjk(text) else _font(_FONT_PATH, size)
+
+
 # ── Text wrapping ─────────────────────────────────────────────────────────────
 
 def _wrap(draw, text, font, max_w):
+    if _has_cjk(text):
+        # CJK text has no whitespace between words — wrap character by
+        # character instead, and honor explicit newlines (e.g. joke
+        # setup/punchline breaks).
+        lines, line = [], ""
+        for ch in text:
+            if ch == "\n":
+                lines.append(line)
+                line = ""
+                continue
+            test = line + ch
+            if draw.textbbox((0, 0), test, font=font)[2] > max_w and line:
+                lines.append(line)
+                line = ch
+            else:
+                line = test
+        lines.append(line)
+        return lines or [""]
+
     words = text.split()
     lines, line = [], []
     for w in words:
@@ -376,7 +424,7 @@ def _draw_text_area(img, draw, text, t):
         draw.text((x, y), hint, font=hint_font, fill=(60, 65, 80))
         return
 
-    font   = _font(_FONT_PATH, 18)
+    font   = _text_font(text, 18)
     line_h = 24
     pad_x  = 10
 

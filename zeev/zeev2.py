@@ -51,7 +51,7 @@ TAVILY_URL     = "https://api.tavily.com/search"
 
 # LLM_SERVER: groq | openai | anthropic | gemini | ollama | openrouter
 LLM_SERVER  = os.environ.get("LLM_SERVER",  "groq")
-# STT_SERVER: groq | openai | vosk | faster-whisper
+# STT_SERVER: groq | openai | vosk | faster-whisper | speech-recognition
 STT_SERVER  = os.environ.get("STT_SERVER",  "groq")
 # TTS_SERVER: auto | elevenlabs | orpheus | openai | piper | gtts | espeak
 #   auto = try elevenlabs (en) → orpheus (en) → gtts (he/es/ru) → piper → espeak
@@ -597,6 +597,13 @@ def speak_terminal(text, lang=None):
     if not TTS_AVAILABLE:
         return
     lang = lang or detect_lang(text)
+    if lang == "en":
+        if _HE_RE.search(text):
+            lang = "he"
+        elif _RU_RE.search(text):
+            lang = "ru"
+        elif _ES_RE.search(text):
+            lang = "es"
     clean = _clean_for_tts(text, lang)
     if not clean:
         return
@@ -623,7 +630,7 @@ def groq_tts(text, voice="daniel"):
     if not GROQ_API_KEY or not text.strip():
         return None
     clean = _clean_for_tts(text, "en")
-    if not clean or detect_lang(clean) != "en":
+    if not clean or detect_lang(clean) != "en" or _HE_RE.search(clean) or _RU_RE.search(clean) or _ES_RE.search(clean):
         return None
     try:
         resp = requests.post(
@@ -808,11 +815,30 @@ def _stt_faster_whisper(wav_bytes):
         return ""
 
 
+def _stt_speech_recognition(wav_bytes):
+    """Transcribe with local speech_recognition package. Returns transcript or ''."""
+    try:
+        import speech_recognition as sr
+        import io
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
+            audio_data = recognizer.record(source)
+            lang = FORCED_LANG or "en"
+            lang_bcp47 = {"en": "en-US", "es": "es-MX", "he": "he-IL", "ru": "ru-RU"}.get(lang, "en-US")
+            text = recognizer.recognize_google(audio_data, language=lang_bcp47)
+            return text.strip()
+    except Exception as e:
+        print(f"[stt] speech_recognition error: {e}", flush=True)
+        return ""
+
+
 def stt(wav_bytes):
     """Dispatch to the active STT provider. Returns transcript or ''."""
     if not wav_bytes:
         return ""
     provider = STT_SERVER
+    if provider == "speech-recognition":
+        return _stt_speech_recognition(wav_bytes)
     if provider == "groq":
         return groq_stt(wav_bytes)
     if provider == "openai":
@@ -2761,7 +2787,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 content_type = self.headers.get("Content-Type", "audio/webm")
                 ext = "webm" if "webm" in content_type else "ogg" if "ogg" in content_type else "wav"
                 try:
-                    if STT_SERVER in ("vosk", "faster-whisper") or ext == "wav":
+                    if STT_SERVER in ("vosk", "faster-whisper", "speech-recognition") or ext == "wav":
                         # Convert to WAV via ffmpeg for local providers
                         import tempfile, os as _os
                         with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
@@ -3570,6 +3596,13 @@ def run_device_mode():
     def _speak_device(text):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         lang = detect_lang(text)
+        if lang == "en":
+            if _HE_RE.search(text):
+                lang = "he"
+            elif _RU_RE.search(text):
+                lang = "ru"
+            elif _ES_RE.search(text):
+                lang = "es"
         clean = _clean_for_tts(text, lang)
         if not clean:
             return
@@ -4239,7 +4272,7 @@ def main():
             if not wav:
                 print(f"{DIM}Recording failed.{RESET}\n")
                 continue
-            transcript = groq_stt(wav)
+            transcript = stt(wav)
             if not transcript or not transcript.strip():
                 print(f"{DIM}(nothing heard){RESET}\n")
                 continue

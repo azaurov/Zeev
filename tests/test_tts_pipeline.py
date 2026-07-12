@@ -178,25 +178,27 @@ def test_groq_tts_429_honoured_on_next_call(zeev):
 # B5 — Hebrew / RTL detection: single Hebrew char must trigger 'he' path
 # ============================================================================
 
-@pytest.mark.parametrize("text,expected_lang", [
-    ("שלום",                        "he"),   # pure Hebrew
-    ("Hello שלום",                  "he"),   # mixed — Hebrew wins
-    ("א",                           "he"),   # single char (the critical edge case)
-    ("Привет",                      "ru"),   # Cyrillic
-    ("¿Cómo estás?",                "es"),   # Spanish markers
-    ("Hello world",                 "en"),   # plain English
-    ("こんにちは",                   "en"),   # Japanese — falls through to en
-])
-def test_detect_lang(zeev, text, expected_lang):
+def test_detect_lang(zeev):
     """
-    Bug B5: The Hebrew regex used r'[\\u0590-\\u05FF]' which missed certain
-    Hebrew Unicode extensions.  Fix: r'[֐-׿]' covers U+0590-U+05FF fully.
-    Single-char detection is the sharpest regression: if one Hebrew letter
-    does not trigger 'he', the user hears Orpheus attempting to speak Hebrew.
+    Test that detect_lang returns FORCED_LANG if set, otherwise 'en'.
+    Character-based sniffing was removed by design in commit 9c53f789.
     """
-    assert zeev.detect_lang(text) == expected_lang, (
-        f"detect_lang({text!r}) should be {expected_lang!r} (bug B5)"
-    )
+    import zeev as zeev_mod
+    original_forced = zeev_mod.FORCED_LANG
+    try:
+        zeev_mod.FORCED_LANG = None
+        assert zeev.detect_lang("שלום") == "en"
+        assert zeev.detect_lang("Привет") == "en"
+        assert zeev.detect_lang("Hello") == "en"
+
+        zeev_mod.FORCED_LANG = "he"
+        assert zeev.detect_lang("Hello") == "he"
+        assert zeev.detect_lang("שלום") == "he"
+
+        zeev_mod.FORCED_LANG = "ru"
+        assert zeev.detect_lang("Hello") == "ru"
+    finally:
+        zeev_mod.FORCED_LANG = original_forced
 
 
 # ============================================================================
@@ -576,19 +578,20 @@ def test_groq_post_429_sets_rate_limit_state(zeev):
     mock_resp.text = "rate limit exceeded"
 
     msgs = [{"role": "user", "content": "hi"}]
-    zeev._groq_post_rate_limited_until = 0.0
+    model = "llama-3.1-8b-instant"
+    zeev._groq_model_rate_limited_until[model] = 0.0
 
     with patch("zeev.requests.post", return_value=mock_resp):
         with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
-            resp, err = zeev._groq_post(msgs, "llama-3.1-8b-instant",
+            resp, err = zeev._groq_post(msgs, model,
                                         stream=False, max_tokens=200)
 
     assert resp is mock_resp, "_groq_post must return the response on 429 (caller checks status)"
-    assert zeev._groq_post_rate_limited_until > time.time(), (
+    assert zeev._groq_model_rate_limited_until.get(model, 0) > time.time(), (
         "_groq_post must set a future cooldown timestamp on 429 (bug B14)"
     )
     # cleanup
-    zeev._groq_post_rate_limited_until = 0.0
+    zeev._groq_model_rate_limited_until[model] = 0.0
 
 
 def test_groq_post_429_honoured_on_next_call(zeev):
@@ -596,13 +599,14 @@ def test_groq_post_429_honoured_on_next_call(zeev):
     After a 429 sets the cooldown, the next _groq_post must NOT make an
     HTTP request — return None with a clear rate-limit error.
     """
-    zeev._groq_post_rate_limited_until = time.time() + 3600
+    model = "llama-3.1-8b-instant"
+    zeev._groq_model_rate_limited_until[model] = time.time() + 3600
     try:
         with patch("zeev.requests.post") as mock_post:
             with patch.object(zeev, "GROQ_API_KEY", "fake-key"):
                 resp, err = zeev._groq_post(
                     [{"role": "user", "content": "hi"}],
-                    "llama-3.1-8b-instant", stream=False, max_tokens=200,
+                    model, stream=False, max_tokens=200,
                 )
         assert resp is None, "_groq_post must return None while rate-limited"
         assert err and "rate-limit" in err.lower(), (
@@ -610,4 +614,39 @@ def test_groq_post_429_honoured_on_next_call(zeev):
         )
         mock_post.assert_not_called()
     finally:
-        zeev._groq_post_rate_limited_until = 0.0
+        zeev._groq_model_rate_limited_until[model] = 0.0
+
+
+# ============================================================================
+# Speech Recognition STT Provider Tests
+# ============================================================================
+
+def test_stt_dispatch_to_speech_recognition(zeev):
+    """
+    Test that the stt dispatcher calls the speech_recognition provider
+    when STT_SERVER is configured as 'speech-recognition'.
+    """
+    import zeev as zeev_mod
+    original_server = zeev_mod.STT_SERVER
+    zeev_mod.STT_SERVER = "speech-recognition"
+    fake_wav = b"fake wav data"
+
+    mock_sr = MagicMock()
+    mock_audio_file = MagicMock()
+    mock_audio_data = MagicMock()
+    mock_recognizer = MagicMock()
+
+    mock_recognizer.recognize_google.return_value = "hello from google"
+    mock_sr.Recognizer.return_value = mock_recognizer
+    mock_sr.AudioFile.return_value.__enter__.return_value = mock_audio_file
+    mock_recognizer.record.return_value = mock_audio_data
+
+    try:
+        with patch.dict("sys.modules", {"speech_recognition": mock_sr}):
+            result = zeev.stt(fake_wav)
+            assert result == "hello from google"
+            mock_sr.AudioFile.assert_called_once()
+            mock_recognizer.recognize_google.assert_called_once_with(mock_audio_data, language="en-US")
+    finally:
+        zeev_mod.STT_SERVER = original_server
+

@@ -339,13 +339,13 @@ _CAMERA_RE = re.compile(
 )
 _VISUAL_TRIGGER_RE = re.compile(
     r"\b(show|display|put on|pull up|do|play|start|run|light up|give me)\b.{0,25}"
-    r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect)\b"
+    r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect|gfx|colors)\b"
     r"|\b(fire|matrix|digital rain|psychedelic|kaleidosc\w*|liquid|lava lamp|tunnel|vortex|"
     r"plasma|bunny|cartoon (face|mode)|starfield|star field|hyperspace|warp speed|bounc\w*|"
-    r"spinning (shapes?|polygon))\b.{0,15}\b(effect|mode|show|animation|visual|screen)\b"
+    r"spinning (shapes?|polygon)|gfx|colors)\b.{0,15}\b(effect|mode|show|animation|visual|screen|colors)\b"
     r"|\bshow (me )?(a |an |the |some )?(fire|the matrix|matrix|psychedelic|kaleidoscope|liquid|"
     r"a?\s?tunnel|vortex|plasma|(a |the )?bunny|(a |the )?cartoon|(a |the )?starfield|"
-    r"(a |the )?star field|hyperspace|warp speed|(a |the )?bouncing ball)\b",
+    r"(a |the )?star field|hyperspace|warp speed|(a |the )?bouncing ball|gfx|colors)\b",
     re.IGNORECASE,
 )
 _VISUAL_EFFECT_KEYWORDS = [
@@ -358,6 +358,7 @@ _VISUAL_EFFECT_KEYWORDS = [
     (re.compile(r"\bbunny\b|\bcartoon\b", re.IGNORECASE), "cartoon"),
     (re.compile(r"\bstarfield\b|\bstar field\b|\bhyperspace\b|\bwarp speed\b", re.IGNORECASE), "starfield"),
     (re.compile(r"\bbounc\w*\b|\bspinning (shapes?|polygon)\b", re.IGNORECASE), "bounce"),
+    (re.compile(r"\bgfx\b|\bcolors\b", re.IGNORECASE), "psychedelic"),
 ]
 _VISUAL_FALLBACK_RE = re.compile(
     r"\bshow me (a |an |the |some )?\w+",

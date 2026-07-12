@@ -650,3 +650,29 @@ def test_stt_dispatch_to_speech_recognition(zeev):
     finally:
         zeev_mod.STT_SERVER = original_server
 
+
+def test_detect_active_speaker(zeev):
+    """
+    Test that detect_active_speaker correctly identifies the speaker
+    from user text and session history.
+    """
+    # 1. Direct mention in user text
+    assert zeev.detect_active_speaker("Hi, this is Maria speaking.") == "Maria"
+    assert zeev.detect_active_speaker("I am Maria") == "Maria"
+    assert zeev.detect_active_speaker("I'm Alex") == "Alex"
+
+    # 2. History-based detection
+    session = [
+        {"role": "user", "content": "I am Maria"},
+        {"role": "assistant", "content": "Hello Maria, how are you?"}
+    ]
+    assert zeev.detect_active_speaker("how is the weather?", session) == "Maria"
+
+    # 3. Assistant address detection
+    session2 = [
+        {"role": "user", "content": "how is the weather?"},
+        {"role": "assistant", "content": "It's nice. Hello Alex!"}
+    ]
+    assert zeev.detect_active_speaker("cool", session2) == "Alex"
+
+

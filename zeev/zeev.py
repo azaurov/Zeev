@@ -4011,9 +4011,54 @@ def _bosgame_stream(msgs, max_tokens=600):
         return None, str(e)
 
 
-def _build_system_prompt(user_text, on_search=None):
+def detect_active_speaker(user_text, session=None):
+    """Scan user_text and session history to detect if the active speaker is Alex or Maria."""
+    maria_patterns = [
+        r"\b(?:this is|i'm|i am|it's|here is|here's)\s+maria\b",
+        r"\bmaria\s+(?:speaking|here)\b",
+        r"\b(?:my name is|call me)\s+maria\b"
+    ]
+    alex_patterns = [
+        r"\b(?:this is|i'm|i am|it's|here is|here's)\s+alex\b",
+        r"\balex\s+(?:speaking|here)\b",
+        r"\b(?:my name is|call me)\s+alex\b"
+    ]
+    
+    text_lower = user_text.lower()
+    for p in maria_patterns:
+        if re.search(p, text_lower):
+            return "Maria"
+    for p in alex_patterns:
+        if re.search(p, text_lower):
+            return "Alex"
+            
+    if session:
+        for msg in reversed(session):
+            content = msg.get("content", "").lower()
+            role = msg.get("role", "")
+            if role == "user":
+                for p in maria_patterns:
+                    if re.search(p, content):
+                        return "Maria"
+                for p in alex_patterns:
+                    if re.search(p, content):
+                        return "Alex"
+            elif role == "assistant":
+                if "hello maria" in content or "hi maria" in content or "thanks maria" in content or "thank you maria" in content or "maria, " in content or " maria." in content:
+                    return "Maria"
+                if "hello alex" in content or "hi alex" in content or "thanks alex" in content or "thank you alex" in content or "alex, " in content or " alex." in content:
+                    return "Alex"
+    return "Alex"
+
+
+def _build_system_prompt(user_text, on_search=None, session=None):
     """Assemble system prompt: base + memory facts + RAG hits + optional web search."""
-    parts = [SYSTEM_PROMPT]
+    active_speaker = detect_active_speaker(user_text, session)
+    custom_sys_prompt = SYSTEM_PROMPT
+    if active_speaker == "Maria":
+        custom_sys_prompt = SYSTEM_PROMPT.replace("You are talking to Alex.", "You are talking to Maria (Alex's wife).")
+        
+    parts = [custom_sys_prompt]
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
@@ -4086,8 +4131,8 @@ def _build_system_prompt(user_text, on_search=None):
 
 
 # Keep old name as alias so nothing else breaks
-def _with_search(user_text, on_search=None):
-    return _build_system_prompt(user_text, on_search)
+def _with_search(user_text, on_search=None, session=None):
+    return _build_system_prompt(user_text, on_search, session)
 
 
 # ---------------------------------------------------------------------------
@@ -4216,7 +4261,7 @@ def stream_reply(messages, model):
     def on_search(q):
         print(f"{DIM}[searching: {q}]{RESET}", flush=True)
 
-    sys_prompt = _build_system_prompt(user_text, on_search)
+    sys_prompt = _build_system_prompt(user_text, on_search, messages)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
     if needs_parsha_reading(user_text):
@@ -5449,7 +5494,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     def on_search(q):
                         thermal_sse({"info": f"[searching: {q}]"})
 
-                    sys_prompt   = _build_system_prompt(ctx, on_search)
+                    sys_prompt   = _build_system_prompt(ctx, on_search, session=session)
                     with lock:
                         snapshot = list(session) + [{"role": "user", "content": ctx}]
                     payload = [{"role": "system", "content": sys_prompt}] + snapshot
@@ -5664,7 +5709,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             def on_search(q):
                 sse({"info": f"[searching: {q}]"})
 
-            sys_prompt = _build_system_prompt(user_msg, on_search)
+            sys_prompt = _build_system_prompt(user_msg, on_search, session)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
             if needs_parsha_reading(user_msg):
                 tok_limit = 1600
@@ -7008,7 +7053,7 @@ def run_device_mode():
                             return groq_stt(buf.getvalue())
 
                         def _llm_reply(text: str) -> str:
-                            msgs = [{"role": "system", "content": _build_system_prompt(text, False)}]
+                            msgs = [{"role": "system", "content": _build_system_prompt(text, False, session=session)}]
                             msgs += session[-10:]
                             msgs.append({"role": "user", "content": text})
                             resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
@@ -7170,7 +7215,7 @@ def run_device_mode():
         short    = _MODEL_SHORT.get(model_id, "?")
 
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
-        sys_prompt   = _build_system_prompt(transcript) + (
+        sys_prompt   = _build_system_prompt(transcript, session=session) + (
             "\n\nVOICE INTERFACE: You are speaking aloud. Rules:\n"
             "1. Always reply in exactly 1-2 sentences. Never more.\n"
             "2. No lists, bullet points, headers, or preamble.\n"
@@ -7263,7 +7308,7 @@ def run_device_mode():
         _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
         if _WANT_MORE_RE.search(speak_text):
             def _prefetch_detail():
-                detail_msgs = [{"role": "system", "content": _build_system_prompt(transcript)}] + session
+                detail_msgs = [{"role": "system", "content": _build_system_prompt(transcript, session=session)}] + session
                 r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=600)
                 if r and r.status_code == 200:
                     _pending_detail[0] = r.json()["choices"][0]["message"]["content"].strip()

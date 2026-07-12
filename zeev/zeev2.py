@@ -1453,7 +1453,7 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
         return resp, err, "ollama"
 
     if provider == "openrouter":
-        or_model = model if model and not model.startswith("llama") else "meta-llama/llama-3.1-8b-instruct:free"
+        or_model = model if model and not model.startswith("llama") else "openrouter/free"
         resp, err = _openai_compat_post(
             "https://openrouter.ai/api/v1/chat/completions",
             OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
@@ -1477,7 +1477,7 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
             model = model if model and not model.startswith("llama") else "gpt-4o-mini"
         else:
             url, key = "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
-            model = model if model and not model.startswith("llama") else "meta-llama/llama-3.1-8b-instruct:free"
+            model = model if model and not model.startswith("llama") else "openrouter/free"
         body = {"model": model, "messages": msgs,
                 "temperature": 0.1, "max_tokens": max_tokens, "stream": False}
         if json_mode:

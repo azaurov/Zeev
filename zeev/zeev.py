@@ -3600,6 +3600,30 @@ def _groq_post(msgs, model, stream=True, max_tokens=400):
     return None, last_err
 
 
+_OPENROUTER_FALLBACK_MODEL = {
+    "llama-3.1-8b-instant":   "meta-llama/llama-3.1-8b-instruct:free",
+    "llama-3.3-70b-versatile": "meta-llama/llama-3.3-70b-instruct:free",
+    "openai/gpt-oss-120b":     "openai/gpt-oss-120b:free",
+}
+
+
+def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
+    """Like _groq_post, but on a 429/cooldown falls through to OpenRouter's
+    free tier so a Groq rate limit doesn't stall the whole reply."""
+    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+    rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
+    if rate_limited and OPENROUTER_API_KEY:
+        or_model = _OPENROUTER_FALLBACK_MODEL.get(model, "meta-llama/llama-3.3-70b-instruct:free")
+        print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
+        or_resp, or_err = _openai_compat_post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
+        )
+        if not or_err:
+            return or_resp, or_err
+    return resp, err
+
+
 # ---------------------------------------------------------------------------
 # Multi-provider LLM dispatch
 # ---------------------------------------------------------------------------
@@ -5405,7 +5429,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     payload = [{"role": "system", "content": sys_prompt}] + snapshot
                     thermal_reply = ""
                     try:
-                        resp, err = _groq_post(payload, model_id, max_tokens=600)
+                        resp, err = _groq_post_with_fallback(payload, model_id, max_tokens=600)
                         if err:
                             thermal_sse({"error": err})
                         else:
@@ -5626,7 +5650,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 tok_limit = 600
             full_reply = ""
             try:
-                resp, err = _groq_post(payload_msgs, model, max_tokens=tok_limit)
+                resp, err = _groq_post_with_fallback(payload_msgs, model, max_tokens=tok_limit)
                 if err:
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -7129,7 +7153,7 @@ def run_device_mode():
             tok_limit = 160
         else:
             tok_limit = 160
-        resp, err    = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
+        resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
         # 429 or per-model cooldown on 70B/R1 → fall back to 8B before giving up
@@ -7140,7 +7164,7 @@ def run_device_mode():
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
             tok_limit = 160
-            resp, err = _groq_post(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
+            resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
         # 413 (request too large) → trim oldest history pairs and retry
@@ -7207,7 +7231,7 @@ def run_device_mode():
         if _WANT_MORE_RE.search(speak_text):
             def _prefetch_detail():
                 detail_msgs = [{"role": "system", "content": _build_system_prompt(transcript)}] + session
-                r, _ = _groq_post(detail_msgs, model_id, stream=False, max_tokens=600)
+                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=600)
                 if r and r.status_code == 200:
                     _pending_detail[0] = r.json()["choices"][0]["message"]["content"].strip()
                     print("[detail] pre-generated and ready", flush=True)

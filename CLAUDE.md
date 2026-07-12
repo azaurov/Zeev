@@ -101,6 +101,7 @@ Single-file app: `zeev/zeev.py`.
 
 **Key non-obvious behaviors**:
 - **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B rate limit doesn't block 8B calls. Torah queries and 70B/R1 use 1200 max_tokens; 8B uses 600.
+- **`_groq_post_with_fallback`** — wraps `_groq_post`; on 429/cooldown, retries once via OpenRouter free tier (`_OPENROUTER_FALLBACK_MODEL` maps each Groq model id → its OpenRouter equivalent, default `meta-llama/llama-3.3-70b-instruct:free`). Used by device-mode chat, web `/chat` SSE, thermal SSE, and detail prefetch — not by vision calls (no equivalent free vision model) or the 413 trim-retry loop. `_llm_post`'s own streaming path has a separate, longer OpenRouter→Gemini→bosgame chain and doesn't use this wrapper.
 - **`_bosgame_stream`** — uses `http.client.HTTPSConnection` directly (not `requests`) to avoid urllib3 pool conflicts. Connect timeout 10s; socket timeout extended to 300s after connect for slow CPU inference.
 - **`_llm_post`** — on connection errors, prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
 - **`extract_memory`** — prefers `_bosgame_complete` (llama3.2:1b, ~5–10s) over Groq; falls back on error.

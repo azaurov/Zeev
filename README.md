@@ -78,7 +78,7 @@ Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and 
 
 Use `/model` in the terminal or the model selector in the web UI to lock to a specific model. `/model 0` returns to auto-routing.
 
-**Rate-limit resilience**: if 70B or R1 hits a Groq 429 (TPM burst or daily TPD limit), Zeev automatically retries with 8B instead of surfacing an error. Cooldowns are tracked per-model so a 70B limit never blocks 8B. In device mode, the Whisplay display shows a specific message ("Rate limited", "No network") and errors are logged to `data/zeev_errors.log`.
+**Rate-limit resilience**: if 70B or R1 hits a Groq 429 (TPM burst or daily TPD limit), Zeev automatically retries with 8B instead of surfacing an error. Cooldowns are tracked per-model so a 70B limit never blocks 8B. If Groq itself is rate-limited (any model, including 8B), Zeev falls back to [OpenRouter](https://openrouter.ai)'s free tier for that reply when `OPENROUTER_API_KEY` is set. In device mode, the Whisplay display shows a specific message ("Rate limited", "No network") and errors are logged to `data/zeev_errors.log`.
 
 ## TTS
 

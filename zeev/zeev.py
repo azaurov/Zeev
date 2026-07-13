@@ -74,6 +74,14 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 
+LITELLM_AVAILABLE = False
+try:
+    import litellm
+    from litellm import Router
+    LITELLM_AVAILABLE = True
+except ImportError:
+    pass
+
 # ElevenLabs TTS — best quality, supports Southern accent voices
 # Browse https://elevenlabs.io/voice-library?accent=american&accent=southern
 # Default voice: "Matilda" (warm American female)
@@ -3767,9 +3775,129 @@ def _ollama_stream(msgs, model, max_tokens):
         return None, str(e)
 
 
+_litellm_router = None
+def _get_litellm_router():
+    global _litellm_router
+    if _litellm_router is not None:
+        return _litellm_router
+
+    fast_models = []
+    if GROQ_API_KEY:
+        fast_models.append({
+            "model_name": "zeev-routed-fast",
+            "litellm_params": {
+                "model": "groq/llama-3.1-8b-instant",
+                "api_key": GROQ_API_KEY,
+            }
+        })
+    if GEMINI_API_KEY:
+        fast_models.append({
+            "model_name": "zeev-routed-fast",
+            "litellm_params": {
+                "model": "gemini/gemini-2.0-flash",
+                "api_key": GEMINI_API_KEY,
+            }
+        })
+    if OPENROUTER_API_KEY:
+        fast_models.append({
+            "model_name": "zeev-routed-fast",
+            "litellm_params": {
+                "model": "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+                "api_key": OPENROUTER_API_KEY,
+            }
+        })
+    if BOSGAME_URL:
+        fast_models.append({
+            "model_name": "zeev-routed-fast",
+            "litellm_params": {
+                "model": f"openai/{BOSGAME_MODEL or 'llama3.1:8b'}",
+                "api_base": BOSGAME_URL,
+                "api_key": BOSGAME_KEY or "dummy",
+            }
+        })
+
+    smart_models = []
+    if GROQ_API_KEY:
+        smart_models.append({
+            "model_name": "zeev-routed-smart",
+            "litellm_params": {
+                "model": "groq/llama-3.3-70b-versatile",
+                "api_key": GROQ_API_KEY,
+            }
+        })
+    if GEMINI_API_KEY:
+        smart_models.append({
+            "model_name": "zeev-routed-smart",
+            "litellm_params": {
+                "model": "gemini/gemini-2.5-pro",
+                "api_key": GEMINI_API_KEY,
+            }
+        })
+    if OPENROUTER_API_KEY:
+        smart_models.append({
+            "model_name": "zeev-routed-smart",
+            "litellm_params": {
+                "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+                "api_key": OPENROUTER_API_KEY,
+            }
+        })
+
+    reasoning_models = []
+    if OPENROUTER_API_KEY:
+        reasoning_models.append({
+            "model_name": "zeev-routed-reasoning",
+            "litellm_params": {
+                "model": "openrouter/openai/gpt-oss-120b",
+                "api_key": OPENROUTER_API_KEY,
+            }
+        })
+    if GEMINI_API_KEY:
+        reasoning_models.append({
+            "model_name": "zeev-routed-reasoning",
+            "litellm_params": {
+                "model": "gemini/gemini-2.5-pro",
+                "api_key": GEMINI_API_KEY,
+            }
+        })
+    if OPENAI_API_KEY:
+        reasoning_models.append({
+            "model_name": "zeev-routed-reasoning",
+            "litellm_params": {
+                "model": "gpt-4o",
+                "api_key": OPENAI_API_KEY,
+            }
+        })
+
+    if not fast_models:
+        fast_models.append({"model_name": "zeev-routed-fast", "litellm_params": {"model": "gpt-4o-mini", "api_key": OPENAI_API_KEY or "dummy"}})
+    if not smart_models:
+        smart_models.append({"model_name": "zeev-routed-smart", "litellm_params": {"model": "gpt-4o", "api_key": OPENAI_API_KEY or "dummy"}})
+    if not reasoning_models:
+        reasoning_models.append({"model_name": "zeev-routed-reasoning", "litellm_params": {"model": "gpt-4o", "api_key": OPENAI_API_KEY or "dummy"}})
+
+    all_models = fast_models + smart_models + reasoning_models
+
+    from litellm import Router
+    _litellm_router = Router(
+        model_list=all_models,
+        routing_strategy="simple-shuffle",
+        num_retries=3,
+        timeout=20.0
+    )
+    return _litellm_router
+
+
 def _iter_llm_tokens(resp, provider):
     """Yield text tokens from a streaming response for the given provider."""
-    if provider in ("groq", "openai", "openrouter"):
+    if provider == "litellm":
+        for chunk in resp:
+            try:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+            except (AttributeError, IndexError):
+                pass
+    elif provider in ("groq", "openai", "openrouter"):
         for line in resp.iter_lines():
             if not line or not line.startswith(b"data: "):
                 continue
@@ -3818,6 +3946,27 @@ def _iter_llm_tokens(resp, provider):
 def _llm_post(msgs, model, stream=True, max_tokens=400):
     """Route to the active LLM provider. Returns (resp_or_iter, error, provider)."""
     provider = LLM_SERVER
+
+    if provider == "litellm":
+        if not LITELLM_AVAILABLE:
+            return None, "litellm package not installed", "litellm"
+        router = _get_litellm_router()
+        if "gpt-oss" in str(model) or "reasoning" in str(model):
+            route_model = "zeev-routed-reasoning"
+        elif "70b" in str(model) or "smart" in str(model):
+            route_model = "zeev-routed-smart"
+        else:
+            route_model = "zeev-routed-fast"
+        try:
+            resp = router.completion(
+                model=route_model,
+                messages=msgs,
+                stream=stream,
+                max_tokens=max_tokens
+            )
+            return resp, None, "litellm"
+        except Exception as e:
+            return None, f"litellm stream error: {e}", "litellm"
 
     if provider == "groq":
         resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
@@ -3883,6 +4032,31 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
 def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
     """Non-streaming LLM call. Returns (text, error). Used for memory extraction etc."""
     provider = LLM_SERVER
+
+    if provider == "litellm":
+        if not LITELLM_AVAILABLE:
+            return None, "litellm package not installed"
+        router = _get_litellm_router()
+        if "gpt-oss" in str(model) or "reasoning" in str(model):
+            route_model = "zeev-routed-reasoning"
+        elif "70b" in str(model) or "smart" in str(model):
+            route_model = "zeev-routed-smart"
+        else:
+            route_model = "zeev-routed-fast"
+        try:
+            kwargs = {
+                "model": route_model,
+                "messages": msgs,
+                "temperature": 0.1,
+                "max_tokens": max_tokens,
+                "stream": False
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = router.completion(**kwargs)
+            return resp.choices[0].message.content, None
+        except Exception as e:
+            return None, f"litellm complete: {e}"
 
     if provider in ("groq", "openai", "openrouter"):
         if provider == "groq":

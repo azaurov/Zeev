@@ -1,0 +1,21 @@
+model_list:
+  - model_name: zeev-primary
+    litellm_params:
+      model: groq/llama3-70b-8192
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: zeev-primary
+    litellm_params:
+      model: gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: zeev-primary
+    litellm_params:
+      model: claude-3-haiku-20240307
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  routing_strategy: usage-based-routing
+  num_retries: 2
+  timeout: 15
+
+general_settings:
+  master_key: sk-zeev-1234

@@ -6680,55 +6680,7 @@ def run_device_mode():
             return
         adev = bt_audio_dev()
 
-        # 1. Orpheus / OpenAI — WAV output via aplay
-        wav = groq_tts(clean, voice=voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
-              _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
-        if not wav:
-            print(f"[tts] Orpheus failed — falling back to Piper", flush=True)
-        if wav:
-            try:
-                # BT (bluealsa) requires exact format match; resample WAV via ffmpeg
-                if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
-                    ff = subprocess.Popen(
-                        ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
-                         "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    )
-                    raw, _ = ff.communicate(wav)
-                    rate, channels, sampwidth = _BT_RATE, _BT_CHANNELS, 2
-                else:
-                    with wave.open(io.BytesIO(wav), "rb") as wf:
-                        rate, channels, sampwidth = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
-                        raw = wf.readframes(wf.getnframes())
-                p2 = subprocess.Popen(
-                    # Tight buffer/period (100ms/20ms) so paced chunk writes
-                    # from _play_pcm_chunked actually track what's audible —
-                    # aplay's default buffer can otherwise absorb ~0.5s of
-                    # audio, making the lipsync-driven mouth visibly lead
-                    # the sound by that much.
-                    ["aplay", "-D", adev, "-f", "S16_LE",
-                     "-r", str(rate), "-c", str(channels),
-                     "-B", "100000", "-F", "20000", "-q", "-"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                _tts_p1, _tts_p2 = None, p2
-                _play_pcm_chunked(p2, raw, rate, channels, sampwidth)
-                try:
-                    p2.wait(timeout=60)
-                except subprocess.TimeoutExpired:
-                    print("[tts] aplay hung — killing", flush=True)
-                    p2.kill()
-                return
-            except Exception as e:
-                print(f"Groq TTS playback error: {e}")
-            finally:
-                _tts_p1 = _tts_p2 = None
-                _mouth_shape[0] = None
-                if _lipsync_engine:
-                    _lipsync_engine.reset()
-
-        # 2. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
+        # 1. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
         _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
         if lang in _GTTS_LANGS and shutil.which("mpg123"):
             mp3_full = elevenlabs_tts(clean, lang=lang) if ELEVENLABS_API_KEY else None
@@ -6773,7 +6725,7 @@ def run_device_mode():
             _tts_p1 = None
             return
 
-        # 3. Piper — daemon (Go process, warm model) or Python fallback
+        # 2. Piper — daemon (Go process, warm model) or Python fallback
         model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
         try:
             if _audio and _audio.available:
@@ -6855,31 +6807,82 @@ def run_device_mode():
                         print("[tts] aplay hung — killing", flush=True)
                         p2.kill()
                     return
-            else:
-                # 4. espeak-ng — last resort
-                espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
-                p1 = subprocess.Popen(
-                    ["espeak-ng", "-s", "145", "-v", espeak_lang, "--stdout", clean],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                )
+        except Exception as e:
+            print(f"Piper TTS fallback error: {e}")
+
+        # 3. Orpheus / OpenAI — WAV output via aplay
+        wav = groq_tts(clean, voice=voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+              _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
+        if not wav:
+            print(f"[tts] Orpheus failed — falling back to espeak-ng", flush=True)
+        if wav:
+            try:
+                # BT (bluealsa) requires exact format match; resample WAV via ffmpeg
+                if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
+                    ff = subprocess.Popen(
+                        ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
+                         "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    )
+                    raw, _ = ff.communicate(wav)
+                    rate, channels, sampwidth = _BT_RATE, _BT_CHANNELS, 2
+                else:
+                    with wave.open(io.BytesIO(wav), "rb") as wf:
+                        rate, channels, sampwidth = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+                        raw = wf.readframes(wf.getnframes())
                 p2 = subprocess.Popen(
-                    ["aplay", "-D", adev,
-                     "-f", "S16_LE", "-r", "22050", "-t", "raw", "-c", "1", "-q", "-"],
-                    stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    # Tight buffer/period (100ms/20ms) so paced chunk writes
+                    # from _play_pcm_chunked actually track what's audible —
+                    # aplay's default buffer can otherwise absorb ~0.5s of
+                    # audio, making the lipsync-driven mouth visibly lead
+                    # the sound by that much.
+                    ["aplay", "-D", adev, "-f", "S16_LE",
+                     "-r", str(rate), "-c", str(channels),
+                     "-B", "100000", "-F", "20000", "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                p1.stdout.close()
-                _tts_p1, _tts_p2 = p1, p2
+                _tts_p1, _tts_p2 = None, p2
+                _play_pcm_chunked(p2, raw, rate, channels, sampwidth)
                 try:
                     p2.wait(timeout=60)
                 except subprocess.TimeoutExpired:
                     print("[tts] aplay hung — killing", flush=True)
                     p2.kill()
-                try:
-                    p1.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    p1.kill()
+                return
+            except Exception as e:
+                print(f"Groq TTS playback error: {e}")
+            finally:
+                _tts_p1 = _tts_p2 = None
+                _mouth_shape[0] = None
+                if _lipsync_engine:
+                    _lipsync_engine.reset()
+
+        # 4. espeak-ng — last resort
+        try:
+            espeak_lang = {"he": "he", "es": "es", "ru": "ru"}.get(lang, "en")
+            p1 = subprocess.Popen(
+                ["espeak-ng", "-s", "145", "-v", espeak_lang, "--stdout", clean],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            p2 = subprocess.Popen(
+                ["aplay", "-D", adev,
+                 "-f", "S16_LE", "-r", "22050", "-t", "raw", "-c", "1", "-q", "-"],
+                stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            p1.stdout.close()
+            _tts_p1, _tts_p2 = p1, p2
+            try:
+                p2.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                print("[tts] aplay hung — killing", flush=True)
+                p2.kill()
+            try:
+                p1.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p1.kill()
         except Exception as e:
-            print(f"TTS error: {e}")
+            print(f"espeak-ng fallback error: {e}")
         finally:
             _tts_p1 = _tts_p2 = None
 

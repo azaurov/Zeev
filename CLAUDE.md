@@ -83,6 +83,8 @@ Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless expli
 
 Watch for CRLF line endings from copy-paste in shell scripts/sudoers; prefer inline commands or strip CRLF explicitly.
 
+- **Deployment workflow**: Before running `./deploy.sh`, ALWAYS commit any local changes. The deploy script relies on `git push origin main`, so uncommitted changes will not be deployed.
+
 ## Running
 
 ```bash

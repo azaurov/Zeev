@@ -110,7 +110,7 @@ Single-file app: `zeev/zeev.py`.
 - **`route_model`** — `_REASONING_RE` → DeepSeek R1; `_SMART_RE` → 70B; default → 8B. No extra API call.
 - **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`; `pkill -f` for `zeev_music`, `zeev_rec.wav`, `piper --model`, `mpg123`; removes `/tmp/zeev_*`. Registered via `atexit` in `main()` and `run_device_mode()` so it also fires on unhandled exceptions (not just SIGINT/SIGTERM).
 - **`run_web_server`** — `ThreadingHTTPServer`. Endpoints: `/chat` (SSE stream), `/clear`, `/memory`, `/memorize`, `/tts` (POST text → WAV), `/transcribe` (raw audio → transcript), `/thermal` (SSE), `/thermal-status`, `/volume` (GET/POST), `/snap`, `/gps`.
-- **`_build_system_prompt`** — assembles: base persona + memory facts + RAG hits + optional calendar + optional Tavily results.
+- **`_build_system_prompt`** — assembles: base persona + memory facts + RAG hits + optional calendar + optional Tavily results. `needs_weather(text)` (subset of `needs_search`, matches "weather"/"forecast"/etc.) appends a units instruction telling the model to spell out `°F`→"degrees Fahrenheit" and `mph`→"miles per hour" in full words, since replies are spoken via TTS.
 - **SQLite** (`data/zeev.db`, WAL mode): tables `messages`, `facts`, `notes`, `settings`, `quantum_insights`. `_db_lock` guards all writes (thread-safety for ThreadingHTTPServer).
 
 ### Models (Groq)

@@ -5,7 +5,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 ## Features
 
 - **Fast chat** — auto-routes each message to the right model (8B fast, 70B smart, DeepSeek R1 for reasoning)
-- **Web search** — keyword heuristic triggers [Tavily](https://tavily.com) search and injects results into the reply
+- **Web search** — keyword heuristic triggers [Tavily](https://tavily.com) search and injects results into the reply; weather replies spell out units in full words (e.g. "degrees Fahrenheit", "miles per hour") instead of symbols, since replies are spoken aloud
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
 - **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse

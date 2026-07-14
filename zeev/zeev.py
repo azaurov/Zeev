@@ -204,6 +204,11 @@ _SEARCH_RE = re.compile(
 def needs_search(text):
     return bool(_SEARCH_RE.search(text))
 
+_WEATHER_RE = re.compile(r"\b(weather|forecast|temperature outside|how (hot|cold) is it)\b", re.IGNORECASE)
+
+def needs_weather(text):
+    return bool(_WEATHER_RE.search(text))
+
 _MUSIC_RE = re.compile(
     r"^(start playing|can you play|put on|play me|i want to hear|i want to listen to|"
     r"throw on|blast|queue|play)\s+(?P<query>.+)",
@@ -4299,6 +4304,13 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             on_search(user_text)
         results = tavily_search(user_text)
         parts.append(f"\n\n[Web search results for '{user_text}']\n{results}")
+        if needs_weather(user_text):
+            parts.append(
+                "\n\n## Units instruction: These replies are spoken aloud via TTS. "
+                "When reporting weather, always spell out units in full words instead of "
+                "symbols or abbreviations — write \"72 degrees Fahrenheit\" not \"72°F\", "
+                "and \"10 miles per hour\" not \"10 mph\"."
+            )
 
     _LANG_INSTRUCTIONS = {
         "en": "Reply in English only.",

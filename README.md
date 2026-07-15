@@ -86,10 +86,10 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 |----------|---------|----------|--------|-------------|
 | English | default (always) | Piper via Go daemon (warm, ~4s) | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
 | Spanish | `/lang es` (terminal/web) or say "speak Spanish" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
-| Russian | `/lang ru` (terminal/web) or say "speak Russian" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Russian | `/lang ru` (terminal/web) or say "speak Russian" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | **local Piper voice "Irina"**, gTTS if Piper fails |
 | Hebrew | `/lang he` (terminal/web) or say "speak Hebrew" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 
-Language always defaults to English — no automatic detection from character sets. In the terminal and web UI, switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). In device mode, say a phrase like "speak Russian", "switch to Hebrew", or "answer in Spanish" — Zeev confirms the switch aloud in the new language; say "switch back to English" to reset. Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
+Language always defaults to English — no automatic detection from character sets. In the terminal and web UI, switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). In device mode, say a phrase like "speak Russian", "switch to Hebrew", or "answer in Spanish" — Zeev confirms the switch aloud in the new language; say "switch back to English" to reset. Device mode tries Groq Orpheus first (English only, ~200ms); Russian instead goes straight to a local Piper voice (female, "Irina") since the Go audio daemon only speaks Piper for English, falling back to Google Translate TTS if Piper fails; other non-English languages use Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
 
 ### Installing Piper (terminal TTS)
 

@@ -177,9 +177,11 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 | English | default (always) | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
 | Hebrew | `/lang he` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
 | Spanish | `/lang es` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
-| Russian | `/lang ru` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
+| Russian | `/lang ru` (terminal/web) or voice (device) | **device**: local Piper `ru_RU-irina-medium` (female) tried first via `_piper_direct()`, gTTS fallback on failure; **terminal**: gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
 
 `detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Terminal/web change language via `/lang` command only — device mode (`run_device_mode()`) has no `/lang` handler, so it instead uses `lang_switch_intent()` (`zeev.py:720`): a voice trigger requiring a speak/talk/switch/say verb within 20 chars of the language name (guards against incidental mentions like "I have a Russian friend", mirroring `_bt_call_match`'s proximity check). Wired into `_handle_transcript()` right after the voice-coach intent block; sets `FORCED_LANG` and speaks a confirmation in the target language. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
+
+**Device-mode Piper is not daemon-routed for non-English**: the Go audio daemon (`zeev-audio/internal/server/handlers.go`) only speaks Piper for `req.Lang in ("", "en")`, falling back to espeak-ng for anything else — so `_audio.speak_sync(lang="ru")` would silently produce a robot voice, not the local Piper Russian model. `_speak_device()` therefore has a step 0 that calls `_piper_direct()` (bypasses the daemon, invokes `PIPER_BIN` directly) for Russian before reaching the ElevenLabs/gTTS step. `_piper_direct()` is also reused by the generic Piper fallback (step 2) — extracted to avoid duplicating the BT-one-shot-vs-persistent-process/ffmpeg-resample/aplay logic. `PIPER_MODELS["ru"]` prefers `ru_RU-irina-medium.onnx` (female) over `ru_RU-dmitri-medium.onnx` if both are present (`init_tts()`).
 
 ### Web UI SSE events
 

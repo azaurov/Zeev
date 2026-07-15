@@ -175,11 +175,11 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 | Language | Detection | Terminal/device | Web UI |
 |---|---|---|---|
 | English | default (always) | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
-| Hebrew | `/lang he` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
-| Spanish | `/lang es` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
-| Russian | `/lang ru` explicit | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
+| Hebrew | `/lang he` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
+| Spanish | `/lang es` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
+| Russian | `/lang ru` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
 
-`detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Language only changes via `/lang` command. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
+`detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Terminal/web change language via `/lang` command only — device mode (`run_device_mode()`) has no `/lang` handler, so it instead uses `lang_switch_intent()` (`zeev.py:720`): a voice trigger requiring a speak/talk/switch/say verb within 20 chars of the language name (guards against incidental mentions like "I have a Russian friend", mirroring `_bt_call_match`'s proximity check). Wired into `_handle_transcript()` right after the voice-coach intent block; sets `FORCED_LANG` and speaks a confirmation in the target language. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
 
 ### Web UI SSE events
 

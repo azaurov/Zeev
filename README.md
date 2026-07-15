@@ -9,7 +9,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
 - **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
 - **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse
-- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; language defaults to English and only switches via explicit `/lang` command (no character-based auto-detection); device mode voice is **Sarina** (Zeev's secretary, Kokoro `af_heart`); Zeev's own voice is Groq Orpheus `daniel`; voice selectable per-request via the Go daemon
+- **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; language defaults to English and switches via explicit `/lang` command in terminal/web, or by voice in device mode ("speak Russian", "switch to Hebrew") — no character-based auto-detection; device mode voice is **Sarina** (Zeev's secretary, Kokoro `af_heart`); Zeev's own voice is Groq Orpheus `daniel`; voice selectable per-request via the Go daemon
 - **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
 - **Weekly reflection** — every Sunday, synthesizes the past week of conversations into a first-person reflection (recurring themes, emotional patterns, open questions, emerging interests) stored in `zeev.db` and injected into every system prompt; uses bosgame llama3.1:8b or Groq 70B
 - **Quantum reasoning** — maps any idea or dilemma to a quantum circuit, simulates interference, and interprets the pattern as insight; compounds daily via `quantum_daily.py` (8 canonical scenarios, cron 6 AM)
@@ -85,11 +85,11 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 | Language | Set via | Terminal | Web UI | Device mode |
 |----------|---------|----------|--------|-------------|
 | English | default (always) | Piper via Go daemon (warm, ~4s) | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
-| Spanish | `/lang es` | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
-| Russian | `/lang ru` | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
-| Hebrew | `/lang he` | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Spanish | `/lang es` (terminal/web) or say "speak Spanish" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Russian | `/lang ru` (terminal/web) or say "speak Russian" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Hebrew | `/lang he` (terminal/web) or say "speak Hebrew" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
 
-Language always defaults to English — no automatic detection from character sets. Switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
+Language always defaults to English — no automatic detection from character sets. In the terminal and web UI, switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). In device mode, say a phrase like "speak Russian", "switch to Hebrew", or "answer in Spanish" — Zeev confirms the switch aloud in the new language; say "switch back to English" to reset. Device mode tries Groq Orpheus first (English only, ~200ms), then Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
 
 ### Installing Piper (terminal TTS)
 

@@ -74,6 +74,7 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 - **Whisper hallucination filter**: known hallucinations on ring tone ("Thank you.", "thanks", etc.) filtered before incrementing `turn`.
 - **`groq_stt_call`** — Whisper with `_CALL_WHISPER_PROMPT` biasing toward call vocabulary on 8kHz audio.
 - **`zeev/quantum_convo.py`** — quantum-weighted conversation topics for calls. Usage: `python3 zeev/quantum_convo.py --name NAME [--about TOPIC] [--call NUMBER]`.
+- **Call-intent detection**: `_bt_call_match()` (not raw `_BT_CALL_RE.search()`) gates both call sites (device mode and terminal REPL) — it requires the call/dial/phone/ring trigger to appear within the first 15 chars of the transcript, so incidental mentions mid-sentence ("...my nieces call me Uncle Sasha...") aren't misread as a dial command.
 
 ## Version Control
 

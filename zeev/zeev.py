@@ -6828,10 +6828,34 @@ def run_device_mode():
             return
         adev = bt_audio_dev()
 
-        # 0. Russian: prefer the local Piper voice (Irina) over gTTS/ElevenLabs —
-        # falls through to step 1 on failure (model missing, synthesis error, etc.)
-        if lang == "ru" and PIPER_BIN and PIPER_MODELS.get("ru"):
-            if _piper_direct(PIPER_MODELS["ru"], clean, adev):
+        # 0. Russian: prefer the local Piper voice (Irina) over gTTS/ElevenLabs.
+        # Synthesized+played sentence-by-sentence (not one big blob) so the
+        # first sentence starts playing after only its own inference time,
+        # not the whole reply's — Piper's real-time factor on a Pi Zero 2W is
+        # ~2.6x, so a multi-sentence reply synthesized in one shot can leave
+        # 30-60s of dead air before any sound plays. Chunking doesn't reduce
+        # total synthesis time, just how much of it happens before playback
+        # starts — long replies still cost more overall, so replies over
+        # _PIPER_RU_MAX_WORDS skip Piper entirely and go straight to gTTS,
+        # which is cloud-synthesized and faster end-to-end for long text.
+        _PIPER_RU_MAX_WORDS = 35
+        if (lang == "ru" and PIPER_BIN and PIPER_MODELS.get("ru")
+                and len(clean.split()) <= _PIPER_RU_MAX_WORDS):
+            chunks = list(_gtts_chunks(clean, limit=150))
+            all_ok = True
+            any_played = False
+            for chunk in chunks:
+                if _piper_direct(PIPER_MODELS["ru"], chunk, adev):
+                    any_played = True
+                else:
+                    all_ok = False
+                    break
+            if all_ok:
+                return
+            if any_played:
+                # Partial audio already played — don't re-speak the full
+                # text via gTTS below, that would duplicate what was heard.
+                print("[tts] Piper Russian failed mid-reply — not re-falling-back to avoid duplicate audio", flush=True)
                 return
             print("[tts] Piper Russian failed — falling back to gTTS", flush=True)
 

@@ -765,6 +765,8 @@ def init_tts():
             share_dir / "es_MX-ald-medium.onnx",
         ])
         PIPER_MODELS["ru"] = _find([
+            piper_dir / "ru_RU-irina-medium.onnx",
+            share_dir / "ru_RU-irina-medium.onnx",
             piper_dir / "ru_RU-dmitri-medium.onnx",
             share_dir / "ru_RU-dmitri-medium.onnx",
         ])
@@ -6724,6 +6726,92 @@ def run_device_mode():
         except BrokenPipeError:
             pass
 
+    def _piper_direct(model, clean, adev):
+        """Synthesize+play `clean` with a local Piper model via direct
+        subprocess invocation, bypassing the Go audio daemon — the daemon
+        only speaks English (zeev-audio/internal/server/handlers.go gates
+        Piper on req.Lang in ("", "en") and falls back to espeak-ng for
+        anything else). Returns True on success."""
+        nonlocal _tts_p1, _tts_p2, _piper_dev_proc
+        try:
+            audio = None
+            if _BT_AUDIO_DEV:
+                # BT path: one-shot Piper invocation so we read until EOF (no
+                # timeout gaps between sentences on slow Pi Zero 2W hardware)
+                p1 = subprocess.Popen(
+                    [PIPER_BIN, "--model", model, "--output_raw"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                _tts_p1 = p1
+                try:
+                    p1.stdin.write(clean.encode() + b"\n")
+                    p1.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                audio = p1.stdout.read()
+                p1.wait()
+            else:
+                for attempt in range(2):
+                    # Reuse or (re)start the persistent piper process.
+                    if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
+                        _piper_dev_proc = subprocess.Popen(
+                            [PIPER_BIN, "--model", model, "--output_raw"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    p1 = _piper_dev_proc
+                    _tts_p1, _tts_p2 = p1, None
+                    try:
+                        p1.stdin.write(clean.encode() + b"\n")
+                        p1.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        _piper_dev_proc = None
+                        continue
+                    audio = _collect_piper_audio(p1, idle_timeout=8.0)
+                    if audio:
+                        break
+                    _piper_dev_proc = None
+            if not audio:
+                return False
+            # BT needs exact format match; resample Piper 22050Hz mono via ffmpeg
+            if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
+                ff = subprocess.Popen(
+                    ["ffmpeg", "-loglevel", "quiet",
+                     "-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0",
+                     "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                audio, _ = ff.communicate(audio)
+                p2 = subprocess.Popen(
+                    ["aplay", "-D", adev, "-f", "S16_LE",
+                     "-r", str(_BT_RATE), "-c", str(_BT_CHANNELS), "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            else:
+                p2 = subprocess.Popen(
+                    ["aplay", "-D", adev,
+                     "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            _tts_p2 = p2
+            try:
+                p2.stdin.write(audio)
+                p2.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                p2.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                print("[tts] aplay hung — killing", flush=True)
+                p2.kill()
+            return True
+        except Exception as e:
+            print(f"Piper direct TTS error: {e}")
+            return False
+
     def _speak_device(text, voice="daniel"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
@@ -6739,6 +6827,13 @@ def run_device_mode():
         if not clean:
             return
         adev = bt_audio_dev()
+
+        # 0. Russian: prefer the local Piper voice (Irina) over gTTS/ElevenLabs —
+        # falls through to step 1 on failure (model missing, synthesis error, etc.)
+        if lang == "ru" and PIPER_BIN and PIPER_MODELS.get("ru"):
+            if _piper_direct(PIPER_MODELS["ru"], clean, adev):
+                return
+            print("[tts] Piper Russian failed — falling back to gTTS", flush=True)
 
         # 1. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
         _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}
@@ -6793,80 +6888,8 @@ def run_device_mode():
                 # ffmpeg resampling, and aplay — all in Go.
                 _audio.speak_sync(clean, lang=lang, dev=adev)
                 return
-            elif model:
-                audio = None
-                if _BT_AUDIO_DEV:
-                    # BT path: one-shot Piper invocation so we read until EOF (no timeout gaps
-                    # between sentences on slow Pi Zero 2W hardware)
-                    p1 = subprocess.Popen(
-                        [PIPER_BIN, "--model", model, "--output_raw"],
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    _tts_p1 = p1
-                    try:
-                        p1.stdin.write(clean.encode() + b"\n")
-                        p1.stdin.close()
-                    except (BrokenPipeError, OSError):
-                        pass
-                    audio = p1.stdout.read()
-                    p1.wait()
-                else:
-                    for attempt in range(2):
-                        # Reuse or (re)start the persistent piper process.
-                        if _piper_dev_proc is None or _piper_dev_proc.poll() is not None:
-                            _piper_dev_proc = subprocess.Popen(
-                                [PIPER_BIN, "--model", model, "--output_raw"],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL,
-                            )
-                        p1 = _piper_dev_proc
-                        _tts_p1, _tts_p2 = p1, None
-                        try:
-                            p1.stdin.write(clean.encode() + b"\n")
-                            p1.stdin.flush()
-                        except (BrokenPipeError, OSError):
-                            _piper_dev_proc = None
-                            continue
-                        audio = _collect_piper_audio(p1, idle_timeout=8.0)
-                        if audio:
-                            break
-                        _piper_dev_proc = None
-                if audio:
-                    # BT needs exact format match; resample Piper 22050Hz mono via ffmpeg
-                    if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
-                        ff = subprocess.Popen(
-                            ["ffmpeg", "-loglevel", "quiet",
-                             "-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0",
-                             "-f", "s16le", "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        )
-                        audio, _ = ff.communicate(audio)
-                        p2 = subprocess.Popen(
-                            ["aplay", "-D", adev, "-f", "S16_LE",
-                             "-r", str(_BT_RATE), "-c", str(_BT_CHANNELS), "-q", "-"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                    else:
-                        p2 = subprocess.Popen(
-                            ["aplay", "-D", adev,
-                             "-r", "22050", "-f", "S16_LE", "-t", "raw", "-q", "-"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                    _tts_p2 = p2
-                    try:
-                        p2.stdin.write(audio)
-                        p2.stdin.close()
-                    except BrokenPipeError:
-                        pass
-                    try:
-                        p2.wait(timeout=60)
-                    except subprocess.TimeoutExpired:
-                        print("[tts] aplay hung — killing", flush=True)
-                        p2.kill()
-                    return
+            elif model and _piper_direct(model, clean, adev):
+                return
         except Exception as e:
             print(f"Piper TTS fallback error: {e}")
 

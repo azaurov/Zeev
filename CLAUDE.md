@@ -183,6 +183,8 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 
 **Device-mode Piper is not daemon-routed for non-English**: the Go audio daemon (`zeev-audio/internal/server/handlers.go`) only speaks Piper for `req.Lang in ("", "en")`, falling back to espeak-ng for anything else — so `_audio.speak_sync(lang="ru")` would silently produce a robot voice, not the local Piper Russian model. `_speak_device()` therefore has a step 0 that calls `_piper_direct()` (bypasses the daemon, invokes `PIPER_BIN` directly) for Russian before reaching the ElevenLabs/gTTS step. `_piper_direct()` is also reused by the generic Piper fallback (step 2) — extracted to avoid duplicating the BT-one-shot-vs-persistent-process/ffmpeg-resample/aplay logic. `PIPER_MODELS["ru"]` prefers `ru_RU-irina-medium.onnx` (female) over `ru_RU-dmitri-medium.onnx` if both are present (`init_tts()`).
 
+**LLM must output actual Cyrillic, not transliteration**: the 8B model reliably romanizes Russian ("Zdravstvuy, Sashen'ka...") and adds parenthetical English glosses even when told "Reply in Russian only" — Piper's Cyrillic phonemizer mispronounces Latin-letter input, so this isn't a synthesis bug, it's a prompt-compliance one. `_LANG_INSTRUCTIONS["ru"]`/`["he"]` (`zeev.py:4364`) explicitly forbid transliteration and English parentheticals, with a concrete before/after example for Russian — verified against the live Groq API across several prompts before landing. If garbled/wrong-language audio recurs, check the raw LLM reply text first (`journalctl -u zeev-device | grep 'Zeev \[8B\]'`) before assuming a TTS-layer bug.
+
 ### Web UI SSE events
 
 | Event | Meaning |

@@ -695,6 +695,37 @@ _RU_RE = re.compile(r"[Ѐ-ӿ]")
 # Spanish markers: ñ, ¿, ¡, or common accented vowels
 _ES_RE = re.compile(r"[ñÑ¿¡áéíóúüÁÉÍÓÚÜ]")
 
+# Voice-triggered language switch ("speak Russian", "switch to Hebrew", …) —
+# requires a speak/switch verb near the language name so incidental mentions
+# ("I have a Russian friend") don't misfire, mirroring _bt_call_match.
+_LANG_SWITCH_RE = re.compile(
+    r"\b(speak|talk|answer|reply|respond|switch|say)\b[^.?!]{0,20}"
+    r"\b(in\s+)?(russian|по.русски|hebrew|עברית|spanish|espa[ñn]ol|english)\b",
+    re.IGNORECASE,
+)
+_LANG_WORD_TO_CODE = {
+    "russian": "ru", "по-русски": "ru",
+    "hebrew": "he", "עברית": "he",
+    "spanish": "es", "español": "es", "espanol": "es",
+    "english": "en",
+}
+_LANG_SWITCH_CONFIRM = {
+    "en": "Switching to English.",
+    "he": "עובר לעברית.",
+    "es": "Cambiando a español.",
+    "ru": "Переключаюсь на русский.",
+}
+
+
+def lang_switch_intent(text):
+    """Return the target lang code ('en'/'he'/'es'/'ru') for a spoken
+    language-switch request, or None if the transcript isn't one."""
+    m = _LANG_SWITCH_RE.search(text)
+    if not m:
+        return None
+    word = re.sub(r"[\s\-]+", "-", m.group(3).lower())
+    return _LANG_WORD_TO_CODE.get(word)
+
 
 def detect_lang(text):
     """Return FORCED_LANG if set, otherwise 'en'. No auto-detection from characters."""
@@ -7062,6 +7093,23 @@ def run_device_mode():
             reply = "Sure! Hold the button and say whatever you'd like to practice. I'll give you feedback when you're done."
             _voice_coach_pending[0] = True
             print(f"Zeev: {reply}")
+            session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            _set_face("speaking", reply)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(reply)
+            _go_ready() if _busy.is_set() else _go_idle()
+            return
+
+        # ── Voice-triggered language switch ─────────────────────────────────
+        lang_code = lang_switch_intent(transcript)
+        if lang_code:
+            global FORCED_LANG
+            FORCED_LANG = None if lang_code == "en" else lang_code
+            reply = _LANG_SWITCH_CONFIRM[lang_code]
+            print(f"Zeev [lang]: {reply}")
             session.append({"role": "user", "content": transcript})
             append_message("user", transcript)
             session.append({"role": "assistant", "content": reply})

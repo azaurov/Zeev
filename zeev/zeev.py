@@ -4363,9 +4363,9 @@ def _build_system_prompt(user_text, on_search=None, session=None):
 
     _LANG_INSTRUCTIONS = {
         "en": "Reply in English only.",
-        "he": "Reply in Hebrew (עברית) only.",
+        "he": "Reply in Hebrew (עברית) only, using Hebrew script. Never transliterate into Latin letters, and never add an English translation in parentheses — the reply is spoken aloud via TTS in Hebrew.",
         "es": "Reply in Spanish (Español) only.",
-        "ru": "Reply in Russian (Русский) only.",
+        "ru": "Reply in Russian (Русский) only, using Cyrillic script. Never transliterate into Latin letters (e.g. do not write \"Zdravstvuy\" — write \"Здравствуй\"), and never add an English translation in parentheses — the reply is spoken aloud via TTS in Russian, and Latin-letter text will be mispronounced.",
     }
     if FORCED_LANG and FORCED_LANG in _LANG_INSTRUCTIONS:
         parts.append(f"\n\n{_LANG_INSTRUCTIONS[FORCED_LANG]}")

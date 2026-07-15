@@ -398,9 +398,25 @@ _VOICE_COACH_RE = re.compile(
     re.IGNORECASE,
 )
 _BT_CALL_RE = re.compile(
-    r"\b(call|phone|dial|ring)\b.{0,40}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b|\b\w+\b)",
+    r"\b(call|phone|dial|ring)\b.{0,30}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b)\b",
     re.IGNORECASE,
 )
+# Max chars into the transcript the trigger word may start at — keeps
+# incidental uses ("...my nieces call me Uncle Sasha...") mid-sentence
+# from being misread as a dial command; real requests lead with it.
+_BT_CALL_MAX_START = 15
+
+
+def _bt_call_match(transcript: str):
+    """Return the _BT_CALL_RE match only if it's near the start of the
+    utterance, so long rambling turns that merely mention "call" don't
+    get misclassified as a phone-call intent."""
+    m = _BT_CALL_RE.search(transcript)
+    if m and m.start() <= _BT_CALL_MAX_START:
+        return m
+    return None
+
+
 _CALL_IVR_RE = re.compile(
     r"\bpress\s+\d\b"
     r"|\bfor\s+\w[\w\s]{0,20},?\s+press\b"
@@ -7218,7 +7234,7 @@ def run_device_mode():
             _go_ready() if _busy.is_set() else _go_idle()
             return
 
-        if not _IN_CALL and _BT_CALL_RE.search(transcript):
+        if not _IN_CALL and _bt_call_match(transcript):
             # Extract number and optional intent ("call 555-1234 to check my balance")
             number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', transcript)
             if number_m:
@@ -8654,7 +8670,7 @@ def main():
             print(f"\n{CYAN}{BOLD}Zeev:{RESET} Hanging up.\n")
             continue
 
-        if not _IN_CALL and _BT_CALL_RE.search(user_input):
+        if not _IN_CALL and _bt_call_match(user_input):
             number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', user_input)
             if number_m:
                 number = number_m.group(1).strip()

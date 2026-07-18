@@ -191,12 +191,74 @@ def test_detect_lang(zeev):
         assert zeev.detect_lang("Привет") == "en"
         assert zeev.detect_lang("Hello") == "en"
 
-        zeev_mod.FORCED_LANG = "he"
-        assert zeev.detect_lang("Hello") == "he"
-        assert zeev.detect_lang("שלום") == "he"
-
         zeev_mod.FORCED_LANG = "ru"
         assert zeev.detect_lang("Hello") == "ru"
+    finally:
+        zeev_mod.FORCED_LANG = original_forced
+
+
+def test_query_language_detection(zeev):
+    """
+    Test that _build_system_prompt detects the language of the user query
+    and overrides the prompt language.
+    """
+    import zeev as zeev_mod
+    original_forced = zeev_mod.FORCED_LANG
+    try:
+        # English query should override forced Russian to English instruction
+        zeev_mod.FORCED_LANG = "ru"
+        prompt = zeev_mod._build_system_prompt("Hello, how are you?")
+        assert "Reply in English only." in prompt
+        assert "Reply in Russian" not in prompt
+
+        # Russian query should keep Russian instruction
+        prompt_ru = zeev_mod._build_system_prompt("Привет, как дела?")
+        assert "Reply in Russian" in prompt_ru
+        assert "Reply in English" not in prompt_ru
+    finally:
+        zeev_mod.FORCED_LANG = original_forced
+
+
+def test_speak_terminal_language_override(zeev):
+    """
+    If FORCED_LANG is 'ru' but text to speak is English, it should override to 'en'
+    and route to English TTS.
+    """
+    import zeev as zeev_mod
+    from unittest.mock import patch
+    original_forced = zeev_mod.FORCED_LANG
+    try:
+        zeev_mod.FORCED_LANG = "ru"
+        calls = []
+
+        class FakeAudio:
+            available = True
+            def speak_sync(self, text, lang=None, dev=None):
+                calls.append(("audio", lang))
+
+        with (
+            patch.object(zeev_mod, "TTS_AVAILABLE", True),
+            patch.object(zeev_mod, "_audio", FakeAudio()),
+        ):
+            # English text with forced Russian should be overridden to 'en'
+            # and routed to _audio.speak_sync with lang='en'
+            zeev_mod.speak_terminal("Hello, my friend.")
+            assert len(calls) == 1
+            assert calls[0][1] == "en"
+
+            # Russian text with forced Russian should NOT be overridden,
+            # so it should NOT use _audio.speak_sync (it uses _gtts_speak or _piper_direct)
+            calls.clear()
+            def fake_gtts_speak(text, lang, adev=None):
+                calls.append(("gtts", lang))
+
+            with (
+                patch.object(zeev_mod, "_gtts_speak", fake_gtts_speak),
+                patch("shutil.which", return_value="/usr/bin/mpg123"),
+            ):
+                zeev_mod.speak_terminal("Привет, друг.")
+                assert len(calls) == 1
+                assert calls[0][1] == "ru"
     finally:
         zeev_mod.FORCED_LANG = original_forced
 

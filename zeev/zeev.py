@@ -1125,6 +1125,10 @@ def speak_terminal(text, lang=None):
     if not TTS_AVAILABLE:
         return
     lang = lang or detect_lang(text)
+    if lang == "ru" and not _RU_RE.search(text):
+        lang = "en"
+    elif lang == "he" and not _HE_RE.search(text):
+        lang = "en"
     if lang == "en":
         if _HE_RE.search(text):
             lang = "he"
@@ -4370,14 +4374,28 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 "and \"10 miles per hour\" not \"10 mph\"."
             )
 
+    # Detect target language of this turn based on query characters
+    lang = "en"
+    if _HE_RE.search(user_text):
+        lang = "he"
+    elif _RU_RE.search(user_text):
+        lang = "ru"
+    elif _ES_RE.search(user_text):
+        lang = "es"
+    else:
+        if FORCED_LANG in ("ru", "he"):
+            lang = "en"
+        else:
+            lang = FORCED_LANG or "en"
+
     _LANG_INSTRUCTIONS = {
         "en": "Reply in English only.",
         "he": "Reply in Hebrew (עברית) only, using Hebrew script. Never transliterate into Latin letters, and never add an English translation in parentheses — the reply is spoken aloud via TTS in Hebrew.",
         "es": "Reply in Spanish (Español) only.",
         "ru": "Reply in Russian (Русский) only, using Cyrillic script. Never transliterate into Latin letters (e.g. do not write \"Zdravstvuy\" — write \"Здравствуй\"), and never add an English translation in parentheses — the reply is spoken aloud via TTS in Russian, and Latin-letter text will be mispronounced.",
     }
-    if FORCED_LANG and FORCED_LANG in _LANG_INSTRUCTIONS:
-        parts.append(f"\n\n{_LANG_INSTRUCTIONS[FORCED_LANG]}")
+    if lang in _LANG_INSTRUCTIONS:
+        parts.append(f"\n\n{_LANG_INSTRUCTIONS[lang]}")
 
     return "".join(parts)
 
@@ -6825,6 +6843,10 @@ def run_device_mode():
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
         lang = detect_lang(text)
+        if lang == "ru" and not _RU_RE.search(text):
+            lang = "en"
+        elif lang == "he" and not _HE_RE.search(text):
+            lang = "en"
         if lang == "en":
             if _HE_RE.search(text):
                 lang = "he"

@@ -3684,6 +3684,7 @@ def gcal_fetch(days=1) -> str:
 
 def _groq_post(msgs, model, stream=True, max_tokens=400):
     """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
+    msgs = _apply_language_suffix(msgs)
     global _groq_model_rate_limited_until
     if time.time() < _groq_model_rate_limited_until.get(model, 0):
         return None, "rate-limited"   # skip this model until cooldown expires
@@ -3719,6 +3720,7 @@ _OPENROUTER_FALLBACK_MODEL = {
 def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
     """Like _groq_post, but on a 429/cooldown falls through to OpenRouter's
     free tier so a Groq rate limit doesn't stall the whole reply."""
+    msgs = _apply_language_suffix(msgs)
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
     rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
     if rate_limited and OPENROUTER_API_KEY:
@@ -4026,10 +4028,11 @@ def _apply_language_suffix(msgs):
         suffix = " (reply in English only)"
 
     if suffix and msgs[-1].get("role") == "user" and isinstance(msgs[-1].get("content"), str):
-        msgs = list(msgs)
-        last_msg = dict(msgs[-1])
-        last_msg["content"] = last_msg["content"] + suffix
-        msgs[-1] = last_msg
+        if not msgs[-1]["content"].endswith(suffix):
+            msgs = list(msgs)
+            last_msg = dict(msgs[-1])
+            last_msg["content"] = last_msg["content"] + suffix
+            msgs[-1] = last_msg
     return msgs
 
 

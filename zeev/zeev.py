@@ -557,6 +557,7 @@ CAMERA_AVAILABLE  = False   # set by init_camera()
 THERMAL_AVAILABLE = False   # set by init_thermal()
 CAMERA_FLIP       = False   # set by load_settings()
 FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
+_LAST_VOICE       = "sarina" # Tracks the last speaker voice for detail continuation
 _MUSIC_PROC       = None    # active mpg123 playback process
 _VOLUME           = 89      # 0–100; applied via amixer
 
@@ -6329,6 +6330,7 @@ def pick_model(current_locked=None):
 
 def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
+    global _LAST_VOICE
     zeev_cleanup()   # clear any crash leftovers from a previous run
     _init_audio()
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
@@ -6701,7 +6703,7 @@ def run_device_mode():
             result.append(buf)
         return result or [text]
 
-    def _progressive_speak(reply):
+    def _progressive_speak(reply, voice="sarina"):
         """Speak reply while progressively revealing sentences on screen."""
         sents = _split_sentences(reply)
         # Kokoro 1.4x speed ≈ 15 chars/sec of spoken content
@@ -6709,7 +6711,7 @@ def run_device_mode():
         speech_done = threading.Event()
 
         def _speak_th():
-            _speak_device(reply)
+            _speak_device(reply, voice=voice)
             speech_done.set()
 
         def _caption_th():
@@ -6866,7 +6868,7 @@ def run_device_mode():
             print(f"Piper direct TTS error: {e}")
             return False
 
-    def _speak_device(text, voice="daniel"):
+    def _speak_device(text, voice="sarina"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
         bt_verify_connected()
         lang = detect_lang(text)
@@ -6885,6 +6887,15 @@ def run_device_mode():
         if not clean:
             return
         adev = bt_audio_dev()
+
+        # Voice mapping for remote Kokoro via Go daemon
+        daemon_voice = ""
+        if voice == "daniel":
+            daemon_voice = "am_adam"
+        elif voice == "sarina":
+            daemon_voice = "af_heart"
+        else:
+            daemon_voice = voice
 
         # 0. Russian: prefer the local Piper voice (Irina) over gTTS/ElevenLabs.
         # Synthesized+played sentence-by-sentence (not one big blob) so the
@@ -6968,7 +6979,7 @@ def run_device_mode():
             if _audio and _audio.available:
                 # Delegate to the Go daemon: handles persistent process, BT one-shot,
                 # ffmpeg resampling, and aplay — all in Go.
-                _audio.speak_sync(clean, lang=lang, dev=adev)
+                _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice)
                 return
             elif model and _piper_direct(model, clean, adev):
                 return
@@ -6976,7 +6987,10 @@ def run_device_mode():
             print(f"Piper TTS fallback error: {e}")
 
         # 3. Orpheus / OpenAI — WAV output via aplay
-        wav = groq_tts(clean, voice=voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+        orpheus_voice = voice
+        if voice == "sarina":
+            orpheus_voice = "autumn"
+        wav = groq_tts(clean, voice=orpheus_voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
               _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if not wav:
             print(f"[tts] Orpheus failed — falling back to espeak-ng", flush=True)
@@ -7258,7 +7272,7 @@ def run_device_mode():
             print(f"Zeev [detail]: {detail}")
             board.set_rgb(*_LED_SPEAKING)
             print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
-            _progressive_speak(detail)
+            _progressive_speak(detail, voice=_LAST_VOICE)
             print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
             _go_ready() if _busy.is_set() else _go_idle()
             return
@@ -7683,7 +7697,8 @@ def run_device_mode():
 
         board.set_rgb(*_LED_SPEAKING)
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-        _progressive_speak(speak_text)
+        _LAST_VOICE = "daniel" if re.search(r"\bzeev\b", transcript, re.IGNORECASE) else "sarina"
+        _progressive_speak(speak_text, voice=_LAST_VOICE)
         print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 
         _go_ready() if _busy.is_set() else _go_idle()

@@ -263,6 +263,27 @@ def test_speak_terminal_language_override(zeev):
         zeev_mod.FORCED_LANG = original_forced
 
 
+def test_apply_language_suffix(zeev):
+    """
+    Test that _apply_language_suffix appends the appropriate dynamic instruction suffix
+    based on the language instruction found in the system prompt.
+    """
+    import zeev as zeev_mod
+    msgs = [
+        {"role": "system", "content": "Reply in Russian (Русский) only. ..."},
+        {"role": "user", "content": "Hello"}
+    ]
+    res = zeev_mod._apply_language_suffix(msgs)
+    assert res[-1]["content"] == "Hello (ответь только на русском языке)"
+
+    msgs_en = [
+        {"role": "system", "content": "Reply in English only. ..."},
+        {"role": "user", "content": "Hello"}
+    ]
+    res_en = zeev_mod._apply_language_suffix(msgs_en)
+    assert res_en[-1]["content"] == "Hello (reply in English only)"
+
+
 # ============================================================================
 # B6 — Tetragrammaton sanitisation in _clean_for_tts
 # ============================================================================

@@ -4011,8 +4011,31 @@ def _iter_llm_tokens(resp, provider):
                 pass
 
 
+def _apply_language_suffix(msgs):
+    if not msgs or not isinstance(msgs, list):
+        return msgs
+    sys_content = msgs[0]["content"] if msgs[0].get("role") == "system" and isinstance(msgs[0].get("content"), str) else ""
+    suffix = ""
+    if "Reply in Russian (Русский) only" in sys_content:
+        suffix = " (ответь только на русском языке)"
+    elif "Reply in Hebrew (עברית) only" in sys_content:
+        suffix = " (ענה בעברית בלבד)"
+    elif "Reply in Spanish (Español) only" in sys_content:
+        suffix = " (responde solo en español)"
+    elif "Reply in English only" in sys_content:
+        suffix = " (reply in English only)"
+
+    if suffix and msgs[-1].get("role") == "user" and isinstance(msgs[-1].get("content"), str):
+        msgs = list(msgs)
+        last_msg = dict(msgs[-1])
+        last_msg["content"] = last_msg["content"] + suffix
+        msgs[-1] = last_msg
+    return msgs
+
+
 def _llm_post(msgs, model, stream=True, max_tokens=400):
     """Route to the active LLM provider. Returns (resp_or_iter, error, provider)."""
+    msgs = _apply_language_suffix(msgs)
     provider = LLM_SERVER
 
     if provider == "litellm":
@@ -4099,6 +4122,7 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
 
 def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
     """Non-streaming LLM call. Returns (text, error). Used for memory extraction etc."""
+    msgs = _apply_language_suffix(msgs)
     provider = LLM_SERVER
 
     if provider == "litellm":

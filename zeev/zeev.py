@@ -7697,7 +7697,8 @@ def run_device_mode():
 
         board.set_rgb(*_LED_SPEAKING)
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-        _LAST_VOICE = "daniel" if re.search(r"\bzeev\b", transcript, re.IGNORECASE) else "sarina"
+        _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
+        print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
         _progressive_speak(speak_text, voice=_LAST_VOICE)
         print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 

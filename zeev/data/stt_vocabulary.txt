@@ -1,0 +1,4 @@
+# Add custom names, vocabulary, or phrases you speak frequently (separated by spaces or punctuation).
+# The STT engine (Whisper) will use these words as a prompt to bias its transcription.
+# Example:
+# Zeev Daniel Hannah Pearl Sasha Alex Liana Port Chester Siddur

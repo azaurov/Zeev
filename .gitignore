@@ -10,6 +10,7 @@ zeev/models/
 # Runtime data — all personal/session files are private
 zeev/data/
 !zeev/data/adult_jokes*.json
+!zeev/data/stt_vocabulary.txt
 
 # Python
 __pycache__/

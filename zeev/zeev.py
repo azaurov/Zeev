@@ -1399,13 +1399,26 @@ _HE_PRAYER_PROMPT = (
     "ה' מלך ה' מלך ה' ימלוך לעולם ועד. קדוש קדוש קדוש ה' צבאות."
 )
 
+_DEFAULT_EN_PROMPT = "Zeev. Daniel. Hannah. Pearl. Sasha. Alex. Liana. Port Chester. Siddur. Baruch Hu. Adonai. Hamvorach."
+
+def load_stt_vocabulary():
+    vocab_file = BASE_DIR / "data" / "stt_vocabulary.txt"
+    custom = ""
+    if vocab_file.exists():
+        try:
+            custom = vocab_file.read_text().strip()
+        except Exception:
+            pass
+    return f"{_DEFAULT_EN_PROMPT} {custom}".strip()
+
+
 def groq_stt(wav_bytes):
     """Send WAV bytes to Groq Whisper. Returns transcript string or ''.
     Always transcribes in the current FORCED_LANG (default: English)."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
     lang = FORCED_LANG or "en"
-    prompt = _HE_PRAYER_PROMPT if lang == "he" else None
+    prompt = _HE_PRAYER_PROMPT if lang == "he" else load_stt_vocabulary()
     return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
                               "whisper-large-v3-turbo", prompt=prompt, language=lang)
 

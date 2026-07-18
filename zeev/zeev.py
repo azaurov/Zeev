@@ -6973,25 +6973,31 @@ def run_device_mode():
             _tts_p1 = None
             return
 
-        # 2. Piper — daemon (Go process, warm model) or Python fallback
-        model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
-        try:
-            if _audio and _audio.available:
-                # Delegate to the Go daemon: handles persistent process, BT one-shot,
-                # ffmpeg resampling, and aplay — all in Go.
-                _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice)
-                return
-            elif model and _piper_direct(model, clean, adev):
-                return
-        except Exception as e:
-            print(f"Piper TTS fallback error: {e}")
+        # 1b. Try cloud Groq Orpheus first if explicitly requesting 'daniel'
+        wav = None
+        if voice == "daniel" and (TTS_SERVER in ("auto", "orpheus") and lang == "en"):
+            wav = groq_tts(clean, voice="daniel")
 
-        # 3. Orpheus / OpenAI — WAV output via aplay
-        orpheus_voice = voice
-        if voice == "sarina":
-            orpheus_voice = "autumn"
-        wav = groq_tts(clean, voice=orpheus_voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
-              _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
+        if not wav:
+            # 2. Piper — daemon (Go process, warm model) or Python fallback
+            model = (PIPER_MODELS.get(lang) or PIPER_MODELS.get("en")) if PIPER_BIN else None
+            try:
+                if _audio and _audio.available:
+                    # Delegate to the Go daemon: handles persistent process, BT one-shot,
+                    # ffmpeg resampling, and aplay — all in Go.
+                    _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice)
+                    return
+                elif model and _piper_direct(model, clean, adev):
+                    return
+            except Exception as e:
+                print(f"Piper TTS fallback error: {e}")
+
+            # 3. Orpheus / OpenAI — WAV output via aplay
+            orpheus_voice = voice
+            if voice == "sarina":
+                orpheus_voice = "autumn"
+            wav = groq_tts(clean, voice=orpheus_voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
+                  _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)
         if not wav:
             print(f"[tts] Orpheus failed — falling back to espeak-ng", flush=True)
         if wav:

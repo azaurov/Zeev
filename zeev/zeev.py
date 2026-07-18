@@ -74,13 +74,22 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 
-LITELLM_AVAILABLE = False
-try:
-    import litellm
-    from litellm import Router
-    LITELLM_AVAILABLE = True
-except ImportError:
-    pass
+LITELLM_AVAILABLE_CACHE = None
+
+def check_litellm_available():
+    global LITELLM_AVAILABLE_CACHE
+    if LITELLM_AVAILABLE_CACHE is None:
+        try:
+            import litellm
+            LITELLM_AVAILABLE_CACHE = True
+        except ImportError:
+            LITELLM_AVAILABLE_CACHE = False
+    return LITELLM_AVAILABLE_CACHE
+
+def __getattr__(name):
+    if name == "LITELLM_AVAILABLE":
+        return check_litellm_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ElevenLabs TTS — best quality, supports Southern accent voices
 # Browse https://elevenlabs.io/voice-library?accent=american&accent=southern
@@ -4003,7 +4012,7 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
     provider = LLM_SERVER
 
     if provider == "litellm":
-        if not LITELLM_AVAILABLE:
+        if not check_litellm_available():
             return None, "litellm package not installed", "litellm"
         router = _get_litellm_router()
         if "gpt-oss" in str(model) or "reasoning" in str(model):
@@ -4089,7 +4098,7 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
     provider = LLM_SERVER
 
     if provider == "litellm":
-        if not LITELLM_AVAILABLE:
+        if not check_litellm_available():
             return None, "litellm package not installed"
         router = _get_litellm_router()
         if "gpt-oss" in str(model) or "reasoning" in str(model):

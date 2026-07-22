@@ -27,3 +27,6 @@ zeev/quantum_convo.py
 
 # Generated LCD preview images
 zeev/previews/
+
+# Added by ggshield
+.cache_ggshield

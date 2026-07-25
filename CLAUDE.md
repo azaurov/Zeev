@@ -176,7 +176,7 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 |---|---|---|---|
 | English | default (always) | Piper `en_US-lessac-medium` | Groq Orpheus `daniel` |
 | Hebrew | `/lang he` (terminal/web) or voice (device) | gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `he-IL` |
-| Spanish | `/lang es` (terminal/web) or voice (device) | **device**: bosgame remote Piper `es_MX-ald-medium` first, local Piper/gTTS fallback; **terminal**: gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
+| Spanish | `/lang es` (terminal/web) or voice (device) | **device**: bosgame remote Piper `es_AR-daniela-high` (female, Argentina) first, local Piper/gTTS fallback; **terminal**: gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `es-MX` |
 | Russian | `/lang ru` (terminal/web) or voice (device) | **device**: bosgame remote Piper `ru_RU-irina-medium` (female) first, local Piper/gTTS fallback; **terminal**: gTTS + mpg123 | gTTS MP3 → `speechSynthesis` `ru-RU` |
 
 `detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Terminal/web change language via `/lang` command only — device mode (`run_device_mode()`) has no `/lang` handler, so it instead uses `lang_switch_intent()` (`zeev.py:720`): a voice trigger requiring a speak/talk/switch/say verb within 20 chars of the language name (guards against incidental mentions like "I have a Russian friend", mirroring `_bt_call_match`'s proximity check). Wired into `_handle_transcript()` right after the voice-coach intent block; sets `FORCED_LANG` and speaks a confirmation in the target language. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
@@ -270,7 +270,7 @@ bosgame (LAN `10.0.0.141`) runs Ollama as free local inference backend.
 
 Primary English TTS: **Kokoro** on bosgame. Pi daemon calls `https://ollama.sogdiana-gematria.net/piper/tts`.
 
-- **Server**: `~/piper/tts_server.py` (port 5600, localhost-only). Service: `piper-tts.service`. `PIPER_MODELS` dict maps `"lang"` → Piper model path (`ru`→`ru_RU-irina-medium.onnx`, `es`→`es_MX-ald-medium.onnx`); any other/no lang uses Kokoro with English Piper as its own fallback on error.
+- **Server**: `~/piper/tts_server.py` (port 5600, localhost-only). Service: `piper-tts.service`. `PIPER_MODELS` dict maps `"lang"` → Piper model path (`ru`→`ru_RU-irina-medium.onnx`, `es`→`es_AR-daniela-high.onnx`); any other/no lang uses Kokoro with English Piper as its own fallback on error.
 - **Kokoro**: `~/kokoro/kokoro-v1.0.onnx` + `voices-v1.0.bin`. Default voice: `af_heart` (Sarina, 24kHz, speed=1.0). Set via `KOKORO_VOICE` env var or per-request `"voice"` field. **RTF ~0.82 on bosgame's CPU** (AMD Ryzen 5 3550H, no GPU) — synthesis time scales ~linearly with text length, close to real-time; confirmed int8/fp16 quantization does NOT help this CPU (no AVX512-VNNI/native fp16 — measured int8 3x *slower*, fp16 no better). fp32 is already the fastest option on this hardware.
 - **Piper fallback**: `~/piper/en_US-lessac-medium.onnx` (22050Hz). Latency: ~0.7s.
 - **Go daemon** (`REMOTE_PIPER_URL` env var): parses WAV header bytes 24-27 for sample rate. `REMOTE_PIPER_VOICE` sets default voice; falls back to `BOSGAME_KEY` if `REMOTE_PIPER_KEY` is unset. Per-request `"voice"` field overrides the default for that call. Shared `RemotePiperClient` (10min idle timeout) + background warmup call in `Init()` keep the connection warm across the multi-minute gaps typical between conversational turns.

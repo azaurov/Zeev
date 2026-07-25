@@ -72,8 +72,13 @@ func (s *Server) handle(req proto.Request) proto.Response {
 			dev = bt.AudioDev()
 		}
 		var err error
-		if (s.state.RemotePiperURL != "" || s.state.PiperProc != nil) && (req.Lang == "" || req.Lang == "en") {
-			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync", req.Voice)
+		// Remote backend (bosgame) also handles Russian via a dedicated Piper
+		// model — see speakPiper. Local PiperProc and the second backend
+		// (feiergente01) are English-only.
+		canRemote := s.state.RemotePiperURL != "" && (req.Lang == "" || req.Lang == "en" || req.Lang == "ru")
+		canLocal := s.state.PiperProc != nil && (req.Lang == "" || req.Lang == "en")
+		if canRemote || canLocal {
+			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync", req.Voice, req.Lang)
 		} else {
 			err = fmt.Errorf("piper not available; use espeak-ng fallback")
 		}
@@ -272,20 +277,25 @@ func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []b
 	if len(voiceOverride) > 0 && voiceOverride[0] != "" {
 		voice = voiceOverride[0]
 	}
-	return s.remotePiperSynthAt(s.state.RemotePiperURL, s.state.RemotePiperKey, text, voice)
+	return s.remotePiperSynthAt(s.state.RemotePiperURL, s.state.RemotePiperKey, text, voice, "")
 }
 
 // remotePiperSynthAt calls a TTS HTTP API at the given endpoint and returns
 // raw PCM plus the sample rate read from the WAV header (supports both
-// 22050Hz Piper and 24000Hz Kokoro without any hardcoded assumption).
-func (s *Server) remotePiperSynthAt(url, key, text, voice string) (pcm []byte, rate int, err error) {
+// 22050Hz Piper and 24000Hz Kokoro without any hardcoded assumption). lang
+// "ru" routes bosgame's tts_server.py to its dedicated Russian Piper model
+// instead of Kokoro (which doesn't support Russian) — see server-side
+// tts_server.py for the dispatch logic.
+func (s *Server) remotePiperSynthAt(url, key, text, voice, lang string) (pcm []byte, rate int, err error) {
 	escaped := strings.ReplaceAll(text, `"`, `\"`)
-	var body []byte
+	fields := []string{`"text":"` + escaped + `"`}
 	if voice != "" {
-		body = []byte(`{"text":"` + escaped + `","voice":"` + voice + `"}`)
-	} else {
-		body = []byte(`{"text":"` + escaped + `"}`)
+		fields = append(fields, `"voice":"`+voice+`"`)
 	}
+	if lang != "" {
+		fields = append(fields, `"lang":"`+lang+`"`)
+	}
+	body := []byte("{" + strings.Join(fields, ",") + "}")
 	req, err2 := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err2 != nil {
 		return nil, 0, err2
@@ -372,7 +382,7 @@ func splitFirstClause(sentences []string) []string {
 	return sentences
 }
 
-func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
+func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) error {
 	btStatus := bt.GetStatus()
 
 	if s.state.RemotePiperURL != "" {
@@ -402,13 +412,16 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			results[i] = make(chan synthResult, 1)
 		}
 
-		hasSecondBackend := s.state.RemotePiperURL2 != ""
+		// feiergente01 (the second backend) doesn't have the Russian Piper
+		// model set up — only bosgame handles lang="ru", so skip the split
+		// for Russian and keep every chunk on the primary backend.
+		hasSecondBackend := s.state.RemotePiperURL2 != "" && lang != "ru"
 		synthOne := func(i int) {
 			url, key := s.state.RemotePiperURL, s.state.RemotePiperKey
 			if hasSecondBackend && i%2 == 1 {
 				url, key = s.state.RemotePiperURL2, s.state.RemotePiperKey2
 			}
-			pcm, rate, err := s.remotePiperSynthAt(url, key, sentences[i], voice)
+			pcm, rate, err := s.remotePiperSynthAt(url, key, sentences[i], voice, lang)
 			results[i] <- synthResult{pcm, rate, err}
 		}
 		runSequence := func(startIdx, step int) {

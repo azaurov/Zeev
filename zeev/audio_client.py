@@ -132,12 +132,15 @@ class AudioClient:
         """Fire-and-forget TTS — returns immediately (daemon synthesises async)."""
         self._call_safe({}, cmd="speak", text=text, lang=lang, dev=dev, voice=voice)
 
-    def speak_sync(self, text: str, lang: str = "en", dev: str = "", voice: str = "") -> None:
-        """Blocking TTS — waits for audio to finish before returning."""
+    def speak_sync(self, text: str, lang: str = "en", dev: str = "", voice: str = "") -> bool:
+        """Blocking TTS — waits for audio to finish before returning. Returns
+        True on success so callers can fall back to a different TTS path on
+        failure (e.g. Russian: remote Piper on bosgame -> local Piper -> gTTS)."""
         # Long passages (e.g. Torah/parsha readings) can take well over a
         # minute to synthesize + play; give this far more headroom than the
         # default so it isn't mistaken for a wedged connection mid-speech.
-        self._call_safe({}, _timeout=180.0, cmd="speak_sync", text=text, lang=lang, dev=dev, voice=voice)
+        r = self._call_safe({}, _timeout=180.0, cmd="speak_sync", text=text, lang=lang, dev=dev, voice=voice)
+        return bool(r.get("ok"))
 
     def get_volume(self) -> int:
         """Return current system volume 0–100."""

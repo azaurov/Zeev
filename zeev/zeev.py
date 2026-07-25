@@ -6982,16 +6982,25 @@ def run_device_mode():
         else:
             daemon_voice = voice
 
-        # 0. Russian: prefer the local Piper voice (Irina) over gTTS/ElevenLabs.
-        # Synthesized+played sentence-by-sentence (not one big blob) so the
-        # first sentence starts playing after only its own inference time,
-        # not the whole reply's — Piper's real-time factor on a Pi Zero 2W is
-        # ~2.6x, so a multi-sentence reply synthesized in one shot can leave
-        # 30-60s of dead air before any sound plays. Chunking doesn't reduce
-        # total synthesis time, just how much of it happens before playback
-        # starts — long replies still cost more overall, so replies over
-        # _PIPER_RU_MAX_WORDS skip Piper entirely and go straight to gTTS,
-        # which is cloud-synthesized and faster end-to-end for long text.
+        # 0. Russian: prefer bosgame's remote Piper (Irina) over local Piper
+        # or gTTS/ElevenLabs. bosgame's CPU synthesizes Russian at RTF ~0.14
+        # vs ~2.6 measured on the Pi Zero 2W's ARM core — the model isn't the
+        # bottleneck, the Pi's own CPU is, so route it off-device entirely
+        # when the daemon can reach bosgame. The daemon handles chunking and
+        # sentence-boundary pipelining server-side (see speakPiper in the Go
+        # daemon), so no local _gtts_chunks splitting is needed here.
+        if lang == "ru" and _audio and _audio.available:
+            if _audio.speak_sync(clean, lang="ru", dev=adev, voice=daemon_voice):
+                return
+            print("[tts] Remote Russian Piper failed — falling back to local/gTTS", flush=True)
+
+        # 0b. Local Piper Russian fallback (daemon unavailable, or it failed).
+        # Synthesized+played sentence-by-sentence so the first sentence starts
+        # playing after only its own inference time, not the whole reply's —
+        # RTF ~2.6x locally means a one-shot synthesis can leave 30-60s of
+        # dead air before any sound plays. Chunking doesn't reduce total
+        # synthesis time, just how much happens before playback starts, so
+        # replies over _PIPER_RU_MAX_WORDS skip Piper and go straight to gTTS.
         _PIPER_RU_MAX_WORDS = 35
         if (lang == "ru" and PIPER_BIN and PIPER_MODELS.get("ru")
                 and len(clean.split()) <= _PIPER_RU_MAX_WORDS):

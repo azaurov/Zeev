@@ -76,7 +76,7 @@ func (s *Server) Init() {
 		}()
 		if s.state.RemotePiperURL2 != "" {
 			go func() {
-				if _, _, err := s.remotePiperSynthAt(s.state.RemotePiperURL2, s.state.RemotePiperKey2, "Hi", s.state.RemotePiperVoice); err != nil {
+				if _, _, err := s.remotePiperSynthAt(s.state.RemotePiperURL2, s.state.RemotePiperKey2, "Hi", s.state.RemotePiperVoice, ""); err != nil {
 					log.Printf("piper: second-backend warmup failed (will retry on first real speak): %v", err)
 				}
 			}()

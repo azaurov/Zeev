@@ -771,6 +771,8 @@ def init_tts():
             share_dir / "en_US-amy-medium.onnx",
         ])
         PIPER_MODELS["es"] = _find([
+            piper_dir / "es_AR-daniela-high.onnx",
+            share_dir / "es_AR-daniela-high.onnx",
             piper_dir / "es_MX-ald-medium.onnx",
             share_dir / "es_MX-ald-medium.onnx",
         ])

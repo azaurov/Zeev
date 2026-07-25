@@ -56,7 +56,16 @@ func (s *Server) Init() {
 	s.state.RemotePiperVoice = os.Getenv("REMOTE_PIPER_VOICE")
 
 	if s.state.RemotePiperURL != "" {
+		s.state.RemotePiperClient = newRemotePiperClient()
 		log.Printf("piper: using remote TTS at %s (voice=%q)", s.state.RemotePiperURL, s.state.RemotePiperVoice)
+		// Open the TCP+TLS connection to bosgame now, off the critical path,
+		// so it's already warm (and pooled by keep-alive) before the first
+		// real reply needs it.
+		go func() {
+			if _, _, err := s.remotePiperSynth("Hi"); err != nil {
+				log.Printf("piper: remote warmup failed (will retry on first real speak): %v", err)
+			}
+		}()
 	} else {
 		// Try to find and start local Piper.
 		bin, model, ok := piper.FindPiper()

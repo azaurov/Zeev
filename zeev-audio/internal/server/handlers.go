@@ -28,6 +28,24 @@ type State struct {
 	RemotePiperURL   string // e.g. https://ollama.sogdiana-gematria.net/piper/tts
 	RemotePiperKey   string // X-Zeev-Key value
 	RemotePiperVoice string // Kokoro voice name, e.g. "af_heart"; empty = server default
+	RemotePiperClient *http.Client // shared, keep-alive-tuned client — see remotePiperSynth
+}
+
+// newRemotePiperClient builds an http.Client whose Transport keeps the
+// connection to bosgame alive across the multi-minute gaps typical between
+// conversational turns. A fresh http.Client per request (the old behavior)
+// still shares Go's default connection pool, but its default IdleConnTimeout
+// (90s) is shorter than a normal think-then-speak gap, so most replies paid a
+// full TCP+TLS handshake before Kokoro could even start inferring.
+func newRemotePiperClient() *http.Client {
+	return &http.Client{
+		Timeout: 45 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        4,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     10 * time.Minute,
+		},
+	}
 }
 
 // handle dispatches a single request and returns the response.
@@ -262,8 +280,7 @@ func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []b
 	if s.state.RemotePiperKey != "" {
 		req.Header.Set("X-Zeev-Key", s.state.RemotePiperKey)
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
-	resp, err2 := client.Do(req)
+	resp, err2 := s.state.RemotePiperClient.Do(req)
 	if err2 != nil {
 		return nil, 0, fmt.Errorf("remote tts: %w", err2)
 	}
@@ -286,18 +303,25 @@ func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []b
 	return wav[44:], sr, nil
 }
 
-// splitSentences splits text at ". "/"! "/"? " boundaries for streaming TTS.
-// Sentences shorter than 10 chars are merged with the next chunk to avoid
-// false splits on abbreviations like "Mr." or "e.g."
+// splitSentences splits text at ". "/"! "/"? " boundaries, and additionally
+// at ", " once a clause has run past clauseMinChars — most short voice
+// replies are one long comma-heavy sentence (e.g. "X happened, Y is also
+// going on, want to hear more?"), so without the comma break the entire
+// reply is a single Kokoro request and nothing plays until all of it has
+// synthesized. Splitting on commas shrinks the first chunk so audio starts
+// after only the lead clause, while the rest streams in behind it via the
+// pipelining in speakPiper. Sentences/clauses shorter than 10 chars are
+// merged with the next chunk to avoid false splits on abbreviations like
+// "Mr." or "e.g."
 func splitSentences(text string) []string {
-	if len(text) < 100 {
-		return []string{text}
-	}
+	const clauseMinChars = 40
 	var out []string
 	start := 0
 	for i := 1; i < len(text); i++ {
 		c := text[i-1]
-		if (c == '.' || c == '!' || c == '?') && text[i] == ' ' {
+		atSentenceEnd := (c == '.' || c == '!' || c == '?') && text[i] == ' '
+		atClauseBreak := c == ',' && text[i] == ' ' && (i-start) >= clauseMinChars
+		if atSentenceEnd || atClauseBreak {
 			s := strings.TrimSpace(text[start:i])
 			if len(s) >= 10 {
 				out = append(out, s)

@@ -7811,17 +7811,19 @@ def run_device_mode():
                 detail_msgs = ([{"role": "system", "content": detail_sys_prompt}]
                                 + session
                                 + [{"role": "user", "content": "Yes, please continue with more detail on that."}])
-                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
                 content = ""
-                if r and r.status_code == 200:
-                    content = r.json()["choices"][0]["message"]["content"].strip()
-                if content:
-                    _pending_detail[0] = content
-                    print("[detail] pre-generated and ready", flush=True)
-                else:
-                    status = r.status_code if r else "no resp"
-                    print(f"[detail] pre-generation failed or empty [{status}]", flush=True)
-                _pending_detail_ready.set()
+                try:
+                    r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
+                    if r and r.status_code == 200:
+                        content = (r.json()["choices"][0]["message"]["content"] or "").strip()
+                    if content:
+                        _pending_detail[0] = content
+                        print("[detail] pre-generated and ready", flush=True)
+                    else:
+                        status = r.status_code if r else "no resp"
+                        print(f"[detail] pre-generation failed or empty [{status}]", flush=True)
+                finally:
+                    _pending_detail_ready.set()
             threading.Thread(target=_prefetch_detail, daemon=True).start()
 
         board.set_rgb(*_LED_SPEAKING)

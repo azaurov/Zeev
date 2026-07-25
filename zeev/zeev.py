@@ -792,10 +792,81 @@ def init_tts():
 
 _YHWH_RE = re.compile(r"י[ְ-ׇ]*ה[ְ-ׇ]*ו[ְ-ׇ]*ה[ְ-ׇ]*|ה[ְ-ׇ]*ו[ְ-ׇ]*י[ְ-ׇ]*|הוהיְ")
 
+# ---------------------------------------------------------------------------
+# Number-to-words expansion for TTS — Kokoro/Piper read bare digit runs
+# (e.g. "15000") as disjointed digit-by-digit speech ("fifteen zero zero
+# zero") instead of a proper number name. Spelling numbers out as words
+# before they reach the TTS engine sidesteps that entirely.
+# ---------------------------------------------------------------------------
+
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+         "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+         "seventeen", "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+_SCALES = [(1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand"), (100, "hundred")]
+
+
+def _int_to_words(n):
+    if n < 0:
+        return "negative " + _int_to_words(-n)
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        tens, rem = divmod(n, 10)
+        return _TENS[tens] + ("-" + _ONES[rem] if rem else "")
+    for value, name in _SCALES:
+        if n >= value:
+            hi, rem = divmod(n, value)
+            hi_words = _int_to_words(hi)
+            if not rem:
+                return f"{hi_words} {name}"
+            connector = " and " if value == 100 else " "
+            return f"{hi_words} {name}{connector}{_int_to_words(rem)}"
+    return str(n)  # unreachable given the scales above, kept as a safety net
+
+
+# Digit runs not touching a letter/underscore, so identifiers and version
+# strings ("gpt-oss-120b", "v1.0", "24000Hz") are left untouched — only
+# standalone numeric quantities get expanded.
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z0-9_])"
+                         r"|(?<![A-Za-z0-9_])-?\d+(?:\.\d+)?(?![A-Za-z0-9_])")
+_CURRENCY_RE = re.compile(r"\$\s*(-?\d[\d,]*(?:\.\d+)?)")
+_PERCENT_RE = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*%")
+
+
+def _number_words(match_text):
+    s = match_text.replace(",", "")
+    neg = s.startswith("-")
+    if neg:
+        s = s[1:]
+    try:
+        if "." in s:
+            int_part, frac_part = s.split(".", 1)
+            words = (_int_to_words(int(int_part)) if int_part else "zero")
+            words += " point " + " ".join(_ONES[int(d)] for d in frac_part)
+        else:
+            words = _int_to_words(int(s))
+    except (ValueError, OverflowError):
+        return match_text
+    return ("negative " + words) if neg else words
+
+
+def _expand_numbers_for_tts(text):
+    # Currency/percent first, while the digits are still attached to their
+    # symbol, so "$1,500" becomes "one thousand five hundred dollars"
+    # instead of "$one thousand five hundred".
+    text = _CURRENCY_RE.sub(lambda m: _number_words(m.group(1)) + " dollars", text)
+    text = _PERCENT_RE.sub(lambda m: _number_words(m.group(1)) + " percent", text)
+    text = _NUMBER_RE.sub(lambda m: _number_words(m.group(0)), text)
+    return text
+
+
 def _clean_for_tts(text, lang=None):
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"[*_`#~]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
+    if lang in (None, "en"):
+        text = _expand_numbers_for_tts(text)
     # Replace the Tetragrammaton (with or without vowel points) reverently
     replacement = "אֲדֹנָי" if lang == "he" else "Adonai"
     text = _YHWH_RE.sub(replacement, text)

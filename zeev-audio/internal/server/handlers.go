@@ -323,14 +323,38 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			return nil
 		}
 
-		// Synthesize first sentence to discover ttsRate, then open ONE aplay
-		// process for the whole response. Keeping the device open between
-		// sentences avoids the WM8960 glitch (broken pipe) caused by rapid
-		// open/close cycles.
-		firstPCM, ttsRate, err := s.remotePiperSynth(sentences[0], voice)
-		if err != nil {
-			return err
+		// Pipeline synthesis ahead of playback: fire off the HTTP calls to
+		// bosgame for all sentences concurrently (bounded so we don't hammer
+		// the Kokoro server), each landing on its own ordered channel. Without
+		// this, each sentence's ~1-2s network round-trip only starts after the
+		// previous sentence's PCM has been handed to aplay, so the pipe drains
+		// and goes silent while we wait — that's the inter-sentence pause.
+		// Reading results[i] in order still guarantees playback order.
+		type synthResult struct {
+			pcm  []byte
+			rate int
+			err  error
 		}
+		results := make([]chan synthResult, len(sentences))
+		for i := range sentences {
+			results[i] = make(chan synthResult, 1)
+		}
+		sem := make(chan struct{}, 3)
+		for i, sent := range sentences {
+			i, sent := i, sent
+			go func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				pcm, rate, err := s.remotePiperSynth(sent, voice)
+				results[i] <- synthResult{pcm, rate, err}
+			}()
+		}
+
+		first := <-results[0]
+		if first.err != nil {
+			return first.err
+		}
+		ttsRate := first.rate
 
 		// Determine output device/rate.
 		outDev, outRate, outCh := dev, ttsRate, 1
@@ -350,15 +374,15 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 				_, err := w.Write(pcm)
 				return err
 			}
-			if err := writePCM(firstPCM); err != nil {
+			if err := writePCM(first.pcm); err != nil {
 				return err
 			}
-			for _, sent := range sentences[1:] {
-				pcm, _, err := s.remotePiperSynth(sent, voice)
-				if err != nil {
-					return err
+			for i := 1; i < len(sentences); i++ {
+				res := <-results[i]
+				if res.err != nil {
+					return res.err
 				}
-				if err := writePCM(pcm); err != nil {
+				if err := writePCM(res.pcm); err != nil {
 					return err
 				}
 			}

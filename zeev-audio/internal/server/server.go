@@ -55,17 +55,32 @@ func (s *Server) Init() {
 	}
 	s.state.RemotePiperVoice = os.Getenv("REMOTE_PIPER_VOICE")
 
+	// Optional second Kokoro backend (e.g. feiergente01 over LAN) — see
+	// RemotePiperURL2 doc comment on State for why this helps.
+	s.state.RemotePiperURL2 = os.Getenv("REMOTE_PIPER_URL2")
+	s.state.RemotePiperKey2 = os.Getenv("REMOTE_PIPER_KEY2")
+
 	if s.state.RemotePiperURL != "" {
 		s.state.RemotePiperClient = newRemotePiperClient()
 		log.Printf("piper: using remote TTS at %s (voice=%q)", s.state.RemotePiperURL, s.state.RemotePiperVoice)
-		// Open the TCP+TLS connection to bosgame now, off the critical path,
-		// so it's already warm (and pooled by keep-alive) before the first
-		// real reply needs it.
+		if s.state.RemotePiperURL2 != "" {
+			log.Printf("piper: second backend at %s", s.state.RemotePiperURL2)
+		}
+		// Open the TCP+TLS connection(s) now, off the critical path, so
+		// they're already warm (and pooled by keep-alive) before the first
+		// real reply needs them.
 		go func() {
 			if _, _, err := s.remotePiperSynth("Hi"); err != nil {
 				log.Printf("piper: remote warmup failed (will retry on first real speak): %v", err)
 			}
 		}()
+		if s.state.RemotePiperURL2 != "" {
+			go func() {
+				if _, _, err := s.remotePiperSynthAt(s.state.RemotePiperURL2, s.state.RemotePiperKey2, "Hi", s.state.RemotePiperVoice); err != nil {
+					log.Printf("piper: second-backend warmup failed (will retry on first real speak): %v", err)
+				}
+			}()
+		}
 	} else {
 		// Try to find and start local Piper.
 		bin, model, ok := piper.FindPiper()

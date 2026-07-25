@@ -25,10 +25,17 @@ type State struct {
 	PiperProc      *piper.Proc
 	PiperBin       string
 	PiperModel     string
-	RemotePiperURL   string // e.g. https://ollama.sogdiana-gematria.net/piper/tts
-	RemotePiperKey   string // X-Zeev-Key value
+	RemotePiperURL   string // e.g. https://ollama.sogdiana-gematria.net/piper/tts (bosgame)
+	RemotePiperKey   string // X-Zeev-Key value for RemotePiperURL
 	RemotePiperVoice string // Kokoro voice name, e.g. "af_heart"; empty = server default
 	RemotePiperClient *http.Client // shared, keep-alive-tuned client — see remotePiperSynth
+
+	// Second, independent Kokoro backend (e.g. feiergente01 over LAN). When
+	// set, speakPiper alternates chunks between the two machines so they
+	// synthesize concurrently without the same-CPU contention that made
+	// multiple concurrent requests to a single backend slower (measured).
+	RemotePiperURL2 string
+	RemotePiperKey2 string
 }
 
 // newRemotePiperClient builds an http.Client whose Transport keeps the
@@ -257,28 +264,35 @@ func (s *Server) handle(req proto.Request) proto.Response {
 	return base
 }
 
-// remotePiperSynth calls the bosgame TTS HTTP API and returns raw PCM plus
-// the sample rate read from the WAV header (supports both 22050Hz Piper and
-// 24000Hz Kokoro without any hardcoded assumption).
+// remotePiperSynth calls bosgame's TTS HTTP API (the primary/default
+// backend). See remotePiperSynthAt for the multi-backend version used by
+// speakPiper to split work across bosgame and a second machine.
 func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []byte, rate int, err error) {
-	escaped := strings.ReplaceAll(text, `"`, `\"`)
 	voice := s.state.RemotePiperVoice
 	if len(voiceOverride) > 0 && voiceOverride[0] != "" {
 		voice = voiceOverride[0]
 	}
+	return s.remotePiperSynthAt(s.state.RemotePiperURL, s.state.RemotePiperKey, text, voice)
+}
+
+// remotePiperSynthAt calls a TTS HTTP API at the given endpoint and returns
+// raw PCM plus the sample rate read from the WAV header (supports both
+// 22050Hz Piper and 24000Hz Kokoro without any hardcoded assumption).
+func (s *Server) remotePiperSynthAt(url, key, text, voice string) (pcm []byte, rate int, err error) {
+	escaped := strings.ReplaceAll(text, `"`, `\"`)
 	var body []byte
 	if voice != "" {
 		body = []byte(`{"text":"` + escaped + `","voice":"` + voice + `"}`)
 	} else {
 		body = []byte(`{"text":"` + escaped + `"}`)
 	}
-	req, err2 := http.NewRequest("POST", s.state.RemotePiperURL, bytes.NewReader(body))
+	req, err2 := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err2 != nil {
 		return nil, 0, err2
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.state.RemotePiperKey != "" {
-		req.Header.Set("X-Zeev-Key", s.state.RemotePiperKey)
+	if key != "" {
+		req.Header.Set("X-Zeev-Key", key)
 	}
 	resp, err2 := s.state.RemotePiperClient.Do(req)
 	if err2 != nil {
@@ -367,35 +381,49 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			return nil
 		}
 
-		// Synthesize sequentially, one HTTP request in flight at a time.
+		// Synthesize with at most one request in flight PER BACKEND.
 		// bosgame's Kokoro server is single-threaded and runs close to
-		// real-time on CPU (no GPU on that box), so concurrent requests
-		// contend with each other server-side rather than actually running
-		// in parallel — measured: 3 concurrent ~2s requests each took ~5s
-		// individually, no faster overall than sequential. A one-ahead
-		// lookahead (buffered channel of 1) still lets the next chunk start
-		// synthesizing while the current one plays, without adding contention.
+		// real-time on CPU, so multiple concurrent requests to the SAME
+		// backend contend with each other and each gets slower rather than
+		// actually running in parallel (measured: 3 concurrent ~2s requests
+		// each took ~5s individually). But two independent machines have no
+		// such contention, so when a second backend (RemotePiperURL2) is
+		// configured, chunks alternate between them — each machine
+		// synthesizes its half sequentially, and the two halves proceed
+		// concurrently. With only one backend configured, this degrades to
+		// the same fully-sequential-with-lookahead behavior as before.
 		type synthResult struct {
 			pcm  []byte
 			rate int
 			err  error
 		}
-		results := make(chan synthResult, 1)
-		go func() {
-			defer close(results)
-			for _, sent := range sentences {
-				pcm, rate, err := s.remotePiperSynth(sent, voice)
-				results <- synthResult{pcm, rate, err}
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		first, ok := <-results
-		if !ok {
-			return fmt.Errorf("remote tts: no output")
+		results := make([]chan synthResult, len(sentences))
+		for i := range sentences {
+			results[i] = make(chan synthResult, 1)
 		}
+
+		hasSecondBackend := s.state.RemotePiperURL2 != ""
+		synthOne := func(i int) {
+			url, key := s.state.RemotePiperURL, s.state.RemotePiperKey
+			if hasSecondBackend && i%2 == 1 {
+				url, key = s.state.RemotePiperURL2, s.state.RemotePiperKey2
+			}
+			pcm, rate, err := s.remotePiperSynthAt(url, key, sentences[i], voice)
+			results[i] <- synthResult{pcm, rate, err}
+		}
+		runSequence := func(startIdx, step int) {
+			for i := startIdx; i < len(sentences); i += step {
+				synthOne(i)
+			}
+		}
+		if hasSecondBackend && len(sentences) > 1 {
+			go runSequence(0, 2) // bosgame: chunks 0, 2, 4, ...
+			go runSequence(1, 2) // feiergente01: chunks 1, 3, 5, ...
+		} else {
+			go runSequence(0, 1)
+		}
+
+		first := <-results[0]
 		if first.err != nil {
 			return first.err
 		}
@@ -422,7 +450,8 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			if err := writePCM(first.pcm); err != nil {
 				return err
 			}
-			for res := range results {
+			for i := 1; i < len(sentences); i++ {
+				res := <-results[i]
 				if res.err != nil {
 					return res.err
 				}

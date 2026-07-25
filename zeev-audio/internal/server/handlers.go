@@ -303,25 +303,24 @@ func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []b
 	return wav[44:], sr, nil
 }
 
-// splitSentences splits text at ". "/"! "/"? " boundaries, and additionally
-// at ", " once a clause has run past clauseMinChars — most short voice
-// replies are one long comma-heavy sentence (e.g. "X happened, Y is also
-// going on, want to hear more?"), so without the comma break the entire
-// reply is a single Kokoro request and nothing plays until all of it has
-// synthesized. Splitting on commas shrinks the first chunk so audio starts
-// after only the lead clause, while the rest streams in behind it via the
-// pipelining in speakPiper. Sentences/clauses shorter than 10 chars are
-// merged with the next chunk to avoid false splits on abbreviations like
-// "Mr." or "e.g."
+// splitSentences splits text at ". "/"! "/"? " boundaries. Sentences shorter
+// than 10 chars are merged with the next chunk to avoid false splits on
+// abbreviations like "Mr." or "e.g."
+//
+// bosgame's Kokoro backend runs close to real-time on CPU (no GPU on that
+// box) and its HTTP server is single-threaded, so unlike a fast/parallel TTS
+// backend there's little slack to hide synthesis behind playback, and firing
+// multiple requests concurrently just makes each one individually slower
+// (measured: 3 concurrent ~2s requests each took ~5s). So we deliberately do
+// NOT fragment every sentence into many small chunks — more chunks just
+// means more total fixed per-request overhead with no offsetting gain. The
+// one exception is the first sentence: see splitFirstClause below.
 func splitSentences(text string) []string {
-	const clauseMinChars = 40
 	var out []string
 	start := 0
 	for i := 1; i < len(text); i++ {
 		c := text[i-1]
-		atSentenceEnd := (c == '.' || c == '!' || c == '?') && text[i] == ' '
-		atClauseBreak := c == ',' && text[i] == ' ' && (i-start) >= clauseMinChars
-		if atSentenceEnd || atClauseBreak {
+		if (c == '.' || c == '!' || c == '?') && text[i] == ' ' {
 			s := strings.TrimSpace(text[start:i])
 			if len(s) >= 10 {
 				out = append(out, s)
@@ -335,7 +334,28 @@ func splitSentences(text string) []string {
 	if len(out) == 0 {
 		return []string{text}
 	}
-	return out
+	return splitFirstClause(out)
+}
+
+// splitFirstClause breaks the first sentence at its first comma past
+// clauseMinChars, if any, so the very first Kokoro request — the one that
+// determines how long the listener waits in silence — is a short lead
+// clause instead of the whole (often long) first sentence. Only the first
+// sentence is touched; see splitSentences for why the rest stay whole.
+func splitFirstClause(sentences []string) []string {
+	const clauseMinChars = 40
+	first := sentences[0]
+	for i := 1; i < len(first); i++ {
+		if first[i-1] == ',' && first[i] == ' ' && i >= clauseMinChars {
+			lead := strings.TrimSpace(first[:i])
+			rest := strings.TrimSpace(first[i+1:])
+			if len(lead) >= 10 && len(rest) >= 10 {
+				return append([]string{lead, rest}, sentences[1:]...)
+			}
+			break
+		}
+	}
+	return sentences
 }
 
 func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
@@ -347,34 +367,35 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			return nil
 		}
 
-		// Pipeline synthesis ahead of playback: fire off the HTTP calls to
-		// bosgame for all sentences concurrently (bounded so we don't hammer
-		// the Kokoro server), each landing on its own ordered channel. Without
-		// this, each sentence's ~1-2s network round-trip only starts after the
-		// previous sentence's PCM has been handed to aplay, so the pipe drains
-		// and goes silent while we wait — that's the inter-sentence pause.
-		// Reading results[i] in order still guarantees playback order.
+		// Synthesize sequentially, one HTTP request in flight at a time.
+		// bosgame's Kokoro server is single-threaded and runs close to
+		// real-time on CPU (no GPU on that box), so concurrent requests
+		// contend with each other server-side rather than actually running
+		// in parallel — measured: 3 concurrent ~2s requests each took ~5s
+		// individually, no faster overall than sequential. A one-ahead
+		// lookahead (buffered channel of 1) still lets the next chunk start
+		// synthesizing while the current one plays, without adding contention.
 		type synthResult struct {
 			pcm  []byte
 			rate int
 			err  error
 		}
-		results := make([]chan synthResult, len(sentences))
-		for i := range sentences {
-			results[i] = make(chan synthResult, 1)
-		}
-		sem := make(chan struct{}, 3)
-		for i, sent := range sentences {
-			i, sent := i, sent
-			go func() {
-				sem <- struct{}{}
-				defer func() { <-sem }()
+		results := make(chan synthResult, 1)
+		go func() {
+			defer close(results)
+			for _, sent := range sentences {
 				pcm, rate, err := s.remotePiperSynth(sent, voice)
-				results[i] <- synthResult{pcm, rate, err}
-			}()
-		}
+				results <- synthResult{pcm, rate, err}
+				if err != nil {
+					return
+				}
+			}
+		}()
 
-		first := <-results[0]
+		first, ok := <-results
+		if !ok {
+			return fmt.Errorf("remote tts: no output")
+		}
 		if first.err != nil {
 			return first.err
 		}
@@ -401,8 +422,7 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice string) error {
 			if err := writePCM(first.pcm); err != nil {
 				return err
 			}
-			for i := 1; i < len(sentences); i++ {
-				res := <-results[i]
+			for res := range results {
 				if res.err != nil {
 					return res.err
 				}

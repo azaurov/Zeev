@@ -5932,8 +5932,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             user_msg   = data.get("message", "").strip()
             model_pref = data.get("model", "auto")
             model      = route_model(user_msg) if model_pref == "auto" else model_pref
-            if model_pref == "auto" and (needs_parsha_reading(user_msg) or needs_torah(user_msg)):
-                model = MODELS["2"][0]  # Torah/parsha payload exceeds 8B 6k TPM limit
+            if model_pref == "auto" and (needs_parsha_reading(user_msg) or needs_torah(user_msg)
+                                          or (needs_search(user_msg) and TAVILY_API_KEY)):
+                model = MODELS["2"][0]  # Torah/parsha/search payload exceeds 8B 6k TPM limit
 
             if not user_msg:
                 self.send_response(400)
@@ -7608,8 +7609,8 @@ def run_device_mode():
         # ─────────────────────────────────────────────────────────────────────
 
         model_id = route_model(transcript)
-        if needs_torah(transcript) or needs_parsha_reading(transcript):
-            # Torah/parsha payload injects large passages; 8B's 6k TPM limit is too small
+        if needs_torah(transcript) or needs_parsha_reading(transcript) or (needs_search(transcript) and TAVILY_API_KEY):
+            # Torah/parsha/search payloads inject large text blocks; 8B's 6k TPM limit is too small
             model_id = MODELS["2"][0]
         short    = _MODEL_SHORT.get(model_id, "?")
 

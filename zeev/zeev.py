@@ -7732,10 +7732,15 @@ def run_device_mode():
                 # add an explicit user turn — a message list ending on 'assistant'
                 # with no follow-up 'user' turn is a malformed continuation request
                 # and Groq/OpenRouter often answer it with thin or empty content.
-                detail_msgs = ([{"role": "system", "content": _build_system_prompt(transcript, session=session)}]
+                detail_sys_prompt = _build_system_prompt(transcript, session=session) + (
+                    "\n\nVOICE INTERFACE: You are speaking aloud. Give the requested detail in "
+                    "4-5 sentences at most — this is still a spoken answer, not an essay. "
+                    "No lists, bullet points, or headers."
+                )
+                detail_msgs = ([{"role": "system", "content": detail_sys_prompt}]
                                 + session
                                 + [{"role": "user", "content": "Yes, please continue with more detail on that."}])
-                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=600)
+                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
                 content = ""
                 if r and r.status_code == 200:
                     content = r.json()["choices"][0]["message"]["content"].strip()

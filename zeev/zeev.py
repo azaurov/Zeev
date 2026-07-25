@@ -3726,8 +3726,8 @@ def _groq_post(msgs, model, stream=True, max_tokens=400):
 
 _OPENROUTER_FALLBACK_MODEL = {
     "llama-3.1-8b-instant":   "openrouter/free",
-    "llama-3.3-70b-versatile": "meta-llama/llama-3.3-70b-instruct:free",
-    "openai/gpt-oss-120b":     "openai/gpt-oss-120b:free",
+    "llama-3.3-70b-versatile": "openrouter/free",
+    "openai/gpt-oss-120b":     "openrouter/free",
 }
 
 
@@ -3738,7 +3738,7 @@ def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
     rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
     if rate_limited and OPENROUTER_API_KEY:
-        or_model = _OPENROUTER_FALLBACK_MODEL.get(model, "meta-llama/llama-3.3-70b-instruct:free")
+        or_model = _OPENROUTER_FALLBACK_MODEL.get(model, "openrouter/free")
         print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
         or_resp, or_err = _openai_compat_post(
             "https://openrouter.ai/api/v1/chat/completions",

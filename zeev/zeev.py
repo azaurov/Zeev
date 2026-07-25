@@ -7208,6 +7208,7 @@ def run_device_mode():
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
         nonlocal session
+        global _LAST_VOICE
         t0 = time.perf_counter()
 
         print(f"You: {transcript}")

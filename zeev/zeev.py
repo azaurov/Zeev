@@ -6982,33 +6982,36 @@ def run_device_mode():
         else:
             daemon_voice = voice
 
-        # 0. Russian: prefer bosgame's remote Piper (Irina) over local Piper
-        # or gTTS/ElevenLabs. bosgame's CPU synthesizes Russian at RTF ~0.14
-        # vs ~2.6 measured on the Pi Zero 2W's ARM core — the model isn't the
-        # bottleneck, the Pi's own CPU is, so route it off-device entirely
-        # when the daemon can reach bosgame. The daemon handles chunking and
-        # sentence-boundary pipelining server-side (see speakPiper in the Go
-        # daemon), so no local _gtts_chunks splitting is needed here.
-        if lang == "ru" and _audio and _audio.available:
-            if _audio.speak_sync(clean, lang="ru", dev=adev, voice=daemon_voice):
+        # 0. Russian/Spanish: prefer bosgame's remote Piper over local Piper
+        # or gTTS/ElevenLabs. bosgame's CPU synthesizes these at RTF ~0.14
+        # vs ~1.4-2.6 measured locally on the Pi Zero 2W's ARM core — the
+        # model isn't the bottleneck, the Pi's own CPU is, so route it
+        # off-device entirely when the daemon can reach bosgame. The daemon
+        # handles chunking and sentence-boundary pipelining server-side (see
+        # speakPiper in the Go daemon), so no local _gtts_chunks splitting
+        # is needed here.
+        _REMOTE_PIPER_LANGS = ("ru", "es")
+        if lang in _REMOTE_PIPER_LANGS and _audio and _audio.available:
+            if _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice):
                 return
-            print("[tts] Remote Russian Piper failed — falling back to local/gTTS", flush=True)
+            print(f"[tts] Remote Piper ({lang}) failed — falling back to local/gTTS", flush=True)
 
-        # 0b. Local Piper Russian fallback (daemon unavailable, or it failed).
+        # 0b. Local Piper fallback (daemon unavailable, or it failed).
         # Synthesized+played sentence-by-sentence so the first sentence starts
         # playing after only its own inference time, not the whole reply's —
-        # RTF ~2.6x locally means a one-shot synthesis can leave 30-60s of
-        # dead air before any sound plays. Chunking doesn't reduce total
-        # synthesis time, just how much happens before playback starts, so
-        # replies over _PIPER_RU_MAX_WORDS skip Piper and go straight to gTTS.
-        _PIPER_RU_MAX_WORDS = 35
-        if (lang == "ru" and PIPER_BIN and PIPER_MODELS.get("ru")
-                and len(clean.split()) <= _PIPER_RU_MAX_WORDS):
+        # the local RTF (~2.6x Russian, ~1.4x Spanish) means a one-shot
+        # synthesis can leave many seconds of dead air before any sound
+        # plays. Chunking doesn't reduce total synthesis time, just how much
+        # happens before playback starts, so replies over
+        # _PIPER_LOCAL_MAX_WORDS skip Piper and go straight to gTTS.
+        _PIPER_LOCAL_MAX_WORDS = 35
+        if (lang in _REMOTE_PIPER_LANGS and PIPER_BIN and PIPER_MODELS.get(lang)
+                and len(clean.split()) <= _PIPER_LOCAL_MAX_WORDS):
             chunks = list(_gtts_chunks(clean, limit=150))
             all_ok = True
             any_played = False
             for chunk in chunks:
-                if _piper_direct(PIPER_MODELS["ru"], chunk, adev):
+                if _piper_direct(PIPER_MODELS[lang], chunk, adev):
                     any_played = True
                 else:
                     all_ok = False
@@ -7018,9 +7021,9 @@ def run_device_mode():
             if any_played:
                 # Partial audio already played — don't re-speak the full
                 # text via gTTS below, that would duplicate what was heard.
-                print("[tts] Piper Russian failed mid-reply — not re-falling-back to avoid duplicate audio", flush=True)
+                print(f"[tts] Local Piper ({lang}) failed mid-reply — not re-falling-back to avoid duplicate audio", flush=True)
                 return
-            print("[tts] Piper Russian failed — falling back to gTTS", flush=True)
+            print(f"[tts] Local Piper ({lang}) failed — falling back to gTTS", flush=True)
 
         # 1. Non-English: try ElevenLabs (multilingual, higher quality) then gTTS
         _GTTS_LANGS = {"he": "he", "es": "es", "ru": "ru"}

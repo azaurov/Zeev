@@ -72,10 +72,11 @@ func (s *Server) handle(req proto.Request) proto.Response {
 			dev = bt.AudioDev()
 		}
 		var err error
-		// Remote backend (bosgame) also handles Russian via a dedicated Piper
-		// model — see speakPiper. Local PiperProc and the second backend
-		// (feiergente01) are English-only.
-		canRemote := s.state.RemotePiperURL != "" && (req.Lang == "" || req.Lang == "en" || req.Lang == "ru")
+		// Remote backend (bosgame) also handles Russian/Spanish via dedicated
+		// Piper models — see speakPiper. Local PiperProc and the second
+		// backend (feiergente01) are English-only.
+		remoteExtraLangs := req.Lang == "ru" || req.Lang == "es"
+		canRemote := s.state.RemotePiperURL != "" && (req.Lang == "" || req.Lang == "en" || remoteExtraLangs)
 		canLocal := s.state.PiperProc != nil && (req.Lang == "" || req.Lang == "en")
 		if canRemote || canLocal {
 			err = s.speakPiper(req.Text, dev, req.Cmd == "speak_sync", req.Voice, req.Lang)
@@ -412,10 +413,10 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			results[i] = make(chan synthResult, 1)
 		}
 
-		// feiergente01 (the second backend) doesn't have the Russian Piper
-		// model set up — only bosgame handles lang="ru", so skip the split
-		// for Russian and keep every chunk on the primary backend.
-		hasSecondBackend := s.state.RemotePiperURL2 != "" && lang != "ru"
+		// feiergente01 (the second backend) doesn't have the Russian/Spanish
+		// Piper models set up — only bosgame handles those, so skip the
+		// split for them and keep every chunk on the primary backend.
+		hasSecondBackend := s.state.RemotePiperURL2 != "" && lang != "ru" && lang != "es"
 		synthOne := func(i int) {
 			url, key := s.state.RemotePiperURL, s.state.RemotePiperKey
 			if hasSecondBackend && i%2 == 1 {

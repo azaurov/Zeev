@@ -7197,6 +7197,8 @@ def run_device_mode():
     _turn_count = [0]           # counts completed turns for auto-memorize trigger
     _voice_coach_pending = [False]  # True → next transcript is analyzed as voice practice
     _pending_detail = [None]        # full reply text waiting behind a "Want to hear more?"
+    _pending_detail_source = [None]  # original transcript the pending offer was about
+    _pending_detail_ready = threading.Event()
 
     _MORE_YES_RE = re.compile(
         r'\b(yes|yeah|yep|sure|go ahead|please|tell me|more|continue|expand|elaborate|details?)\b',
@@ -7282,22 +7284,36 @@ def run_device_mode():
             return
 
         # ── Pending detail expansion ──────────────────────────────────────────
-        if _pending_detail[0] and _MORE_YES_RE.search(transcript):
+        if _pending_detail_source[0] and _MORE_YES_RE.search(transcript):
+            if not _pending_detail_ready.is_set():
+                print(f"[+{time.perf_counter()-t0:.1f}s] waiting on pre-generated detail…", flush=True)
+                _pending_detail_ready.wait(timeout=8)
             detail = _pending_detail[0]
+            source = _pending_detail_source[0]
             _pending_detail[0] = None
-            session.append({"role": "user", "content": transcript})
-            append_message("user", transcript)
-            session.append({"role": "assistant", "content": detail})
-            append_message("assistant", detail)
-            print(f"Zeev [detail]: {detail}")
-            board.set_rgb(*_LED_SPEAKING)
-            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
-            _progressive_speak(detail, voice=_LAST_VOICE)
-            print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
-            _go_ready() if _busy.is_set() else _go_idle()
-            return
+            _pending_detail_source[0] = None
+            _pending_detail_ready.clear()
+            if detail:
+                session.append({"role": "user", "content": transcript})
+                append_message("user", transcript)
+                session.append({"role": "assistant", "content": detail})
+                append_message("assistant", detail)
+                print(f"Zeev [detail]: {detail}")
+                board.set_rgb(*_LED_SPEAKING)
+                print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
+                _progressive_speak(detail, voice=_LAST_VOICE)
+                print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+            # prefetch failed, timed out, or came back empty — re-run the
+            # original topic (not the bare "yes") so search/model routing
+            # keywords still apply instead of silently losing context
+            print(f"[detail] pending detail unavailable — re-asking original topic", flush=True)
+            transcript = f"{source} Give me more detail on that."
         else:
             _pending_detail[0] = None  # any other input clears pending
+            _pending_detail_source[0] = None
+            _pending_detail_ready.clear()
 
         session.append({"role": "user", "content": transcript})
         append_message("user", transcript)
@@ -7707,12 +7723,28 @@ def run_device_mode():
         # If LLM ended with "Want to hear more?", pre-generate the detail in background
         _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
         if _WANT_MORE_RE.search(speak_text):
+            _pending_detail_source[0] = transcript
+            _pending_detail_ready.clear()
+
             def _prefetch_detail():
-                detail_msgs = [{"role": "system", "content": _build_system_prompt(transcript, session=session)}] + session
+                # session's last entry is our own "...want to hear more?" reply, so
+                # add an explicit user turn — a message list ending on 'assistant'
+                # with no follow-up 'user' turn is a malformed continuation request
+                # and Groq/OpenRouter often answer it with thin or empty content.
+                detail_msgs = ([{"role": "system", "content": _build_system_prompt(transcript, session=session)}]
+                                + session
+                                + [{"role": "user", "content": "Yes, please continue with more detail on that."}])
                 r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=600)
+                content = ""
                 if r and r.status_code == 200:
-                    _pending_detail[0] = r.json()["choices"][0]["message"]["content"].strip()
+                    content = r.json()["choices"][0]["message"]["content"].strip()
+                if content:
+                    _pending_detail[0] = content
                     print("[detail] pre-generated and ready", flush=True)
+                else:
+                    status = r.status_code if r else "no resp"
+                    print(f"[detail] pre-generation failed or empty [{status}]", flush=True)
+                _pending_detail_ready.set()
             threading.Thread(target=_prefetch_detail, daemon=True).start()
 
         board.set_rgb(*_LED_SPEAKING)

@@ -406,24 +406,24 @@ _VOICE_COACH_RE = re.compile(
     r"\b(speak|speaking)\s+(training|practice|coach))\b",
     re.IGNORECASE,
 )
+# "dial" (not "call") is the trigger word: "call" is too common in casual
+# speech ("I'll call you back", "call it a day") and collided with a
+# char-position heuristic that rejected natural vocative lead-ins like
+# "Hi Serena, can you call my wife Maria at ..." (found live 2026-07-26,
+# device-mode log — the whole utterance silently fell through to plain
+# chat instead of dialing). "dial" is unambiguous enough that no
+# proximity gate is needed.
 _BT_CALL_RE = re.compile(
-    r"\b(call|phone|dial|ring)\b.{0,30}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b)\b",
+    r"\b(dial|phone|ring)\b.{0,30}(\+?[\d\s\-\(\)]{7,20}|\bme\b|\bmom\b|\bdad\b)\b",
     re.IGNORECASE,
 )
-# Max chars into the transcript the trigger word may start at — keeps
-# incidental uses ("...my nieces call me Uncle Sasha...") mid-sentence
-# from being misread as a dial command; real requests lead with it.
-# 15 was too tight for a natural vocative + politeness lead-in ("Hi Serena,
-# can you call my wife Maria at ...") which pushes the trigger word past
-# char 15 and silently falls through to plain chat instead of dialing
-# (found live 2026-07-26) — 35 covers that lead-in with margin.
-_BT_CALL_MAX_START = 35
+_BT_CALL_MAX_START = 60
 
 
 def _bt_call_match(transcript: str):
-    """Return the _BT_CALL_RE match only if it's near the start of the
-    utterance, so long rambling turns that merely mention "call" don't
-    get misclassified as a phone-call intent."""
+    """Return the _BT_CALL_RE match only if it's reasonably near the start
+    of the utterance, so long rambling turns that merely mention "dial"
+    don't get misclassified as a phone-call intent."""
     m = _BT_CALL_RE.search(transcript)
     if m and m.start() <= _BT_CALL_MAX_START:
         return m

@@ -1849,9 +1849,13 @@ def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
     # Python fallback
     found: dict[str, str] = {}
     try:
-        # Use OS-level timeout to avoid readline() blocking on partial ANSI lines
+        # bluetoothctl's own --timeout (bluez 5.82+), not an external `timeout`
+        # wrapper: `bluetoothctl scan on` as a one-shot subcommand enables
+        # discovery and exits almost instantly rather than blocking for the
+        # scan window, so the outer `timeout N` never had anything to kill —
+        # it returned immediately with no discovered devices.
         result = subprocess.run(
-            ["timeout", str(timeout), "bluetoothctl", "scan", "on"],
+            ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
             capture_output=True, text=True, timeout=timeout + 5,
         )
         for line in result.stdout.splitlines():
@@ -2354,7 +2358,7 @@ def bt_ensure_hfp_connected(timeout: int = 15) -> str:
     print(f"[bt] No paired devices connected. Scanning for {timeout}s...", flush=True)
     try:
         subprocess.run(
-            ["timeout", str(timeout), "bluetoothctl", "scan", "on"],
+            ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
             capture_output=True, text=True, timeout=timeout + 2,
         )
         result = subprocess.run(

@@ -6,6 +6,7 @@ package piper
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -211,10 +212,21 @@ func (p *Proc) synth(text string) ([]byte, error) {
 	}
 }
 
+// oneShotTimeout bounds a fresh Piper subprocess end-to-end (cold ONNX
+// load ~20s plus synthesis of the whole text block). Unlike the
+// persistent process's synth(), there's no idle-chunk heuristic here —
+// one call, one read to EOF — so a hung process (bad model state,
+// pathological input) would otherwise block the calling goroutine and
+// leak the process indefinitely.
+const oneShotTimeout = 60 * time.Second
+
 // SynthesizeOneShot runs a fresh Piper subprocess for one text block and
 // returns all PCM bytes. Used for BT output where we need the full block.
 func SynthesizeOneShot(bin, model, text string) ([]byte, error) {
-	cmd := exec.Command(bin, "--model", model, "--output-raw")
+	ctx, cancel := context.WithTimeout(context.Background(), oneShotTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, "--model", model, "--output-raw")
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -232,6 +244,9 @@ func SynthesizeOneShot(bin, model, text string) ([]byte, error) {
 	pcm, err := io.ReadAll(stdout)
 	if werr := cmd.Wait(); werr != nil && err == nil {
 		err = werr
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("piper one-shot: timed out after %s", oneShotTimeout)
 	}
 	return pcm, err
 }

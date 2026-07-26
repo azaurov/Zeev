@@ -3,8 +3,6 @@
 package bt
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"log"
 	"os/exec"
@@ -57,7 +55,7 @@ func AudioDev() string {
 }
 
 var pcmLineRe = regexp.MustCompile(`bluealsa:DEV=([0-9A-F:]+),PROFILE=a2dp`)
-var rateRe = regexp.MustCompile(`(\d+)Hz`)
+var rateRe = regexp.MustCompile(`(\d+)\s*Hz`)
 var chRe = regexp.MustCompile(`(\d+)\s*ch(?:annel)?`)
 
 // Detect queries bluealsa-aplay --list-pcms and refreshes the BT globals.
@@ -116,10 +114,18 @@ func Verify() Status {
 	return status
 }
 
+// parsePCMs reads `bluealsa-aplay --list-pcms` output, where each PCM spans
+// three lines, e.g.:
+//
+//	bluealsa:DEV=EC:81:93:AF:4B:98,PROFILE=a2dp,SRV=org.bluealsa
+//	    Jaybird Vista, trusted audio-headphones, playback
+//	    A2DP (SBC): S16_LE 2 channels 48000 Hz
+//
+// The rate/channel count are on the codec description line, not the
+// device header line — they must be read from the lines that follow.
 func parsePCMs(data []byte) (Status, bool) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		line := scanner.Text()
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
 		m := pcmLineRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
@@ -127,17 +133,18 @@ func parsePCMs(data []byte) (Status, bool) {
 		dev := fmt.Sprintf("bluealsa:DEV=%s,PROFILE=a2dp", m[1])
 		rate := 44100
 		ch := 2
-		// The rate/channel appear on subsequent description lines.
-		// Parse them from the same line or the next.
-		if rm := rateRe.FindStringSubmatch(line); rm != nil {
-			rate, _ = strconv.Atoi(rm[1])
-		}
-		if cm := chRe.FindStringSubmatch(line); cm != nil {
-			ch, _ = strconv.Atoi(cm[1])
+		for j := i + 1; j < len(lines) && j < i+4; j++ {
+			if pcmLineRe.MatchString(lines[j]) {
+				break // next device's header — no codec line found for this one
+			}
+			if rm := rateRe.FindStringSubmatch(lines[j]); rm != nil {
+				rate, _ = strconv.Atoi(rm[1])
+			}
+			if cm := chRe.FindStringSubmatch(lines[j]); cm != nil {
+				ch, _ = strconv.Atoi(cm[1])
+			}
 		}
 		return Status{Connected: true, Dev: dev, Rate: rate, Channels: ch}, true
 	}
-	// Try querying rate from bluealsa-aplay --list-pcms verbose output
-	_ = strings.TrimSpace(string(data))
 	return Status{}, false
 }

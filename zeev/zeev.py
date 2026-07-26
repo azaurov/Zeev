@@ -1530,15 +1530,21 @@ _CALL_WHISPER_PROMPT = (
     "Hello? Hi, who's this? You've reached. I'm not available right now. "
     "Please leave a message after the beep. Press 1 for. Thank you for calling."
 )
+_CALL_WHISPER_PROMPT_RU = (
+    "Алло? Кто это? Вы дозвонились. Меня сейчас нет. "
+    "Пожалуйста, оставьте сообщение после сигнала. Нажмите 1 для. Спасибо за звонок."
+)
 
 
-def groq_stt_call(wav_bytes):
-    """Groq Whisper with phone-context prompt to reduce hallucinations on SCO audio."""
+def groq_stt_call(wav_bytes, lang: str | None = None):
+    """Groq Whisper with phone-context prompt to reduce hallucinations on SCO audio.
+    lang: ISO code (e.g. "ru") to bias transcription toward a non-English call."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
+    prompt = _CALL_WHISPER_PROMPT_RU if lang == "ru" else _CALL_WHISPER_PROMPT
     return _whisper_multipart(
         GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
-        "whisper-large-v3-turbo", prompt=_CALL_WHISPER_PROMPT,
+        "whisper-large-v3-turbo", prompt=prompt, language=lang,
     )
 
 
@@ -2144,11 +2150,14 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
 
 
 def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assistant",
-                  record_path: str | None = None) -> None:
+                  record_path: str | None = None, lang: str = "en") -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
-    TTS chain: Orpheus WAV → Cartesia WAV → Piper raw PCM → gTTS MP3.
-    persona: key from _CALL_VOICES — selects voice across Orpheus and Cartesia.
+    TTS chain (English): Orpheus WAV → Cartesia WAV → Piper raw PCM → gTTS MP3.
+    TTS chain (non-English, lang != "en"): ElevenLabs (multilingual) → gTTS.
+    Orpheus is English-only and Cartesia's voices here are English-configured, so
+    both are skipped for non-English to avoid silently mispronouncing the text.
+    persona: key from _CALL_VOICES — selects voice across Orpheus and Cartesia (English only).
     record_path: if set, also save the final SCO-rate PCM actually sent to aplay
     (post-resample) as a WAV file, so Zeev's side of a call can be reviewed like
     the caller's side.
@@ -2159,6 +2168,54 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
     raw_pcm = None
     raw_rate = samplerate
     src_fmt = None  # "wav", "raw", or "mp3"
+
+    if lang != "en":
+        try:
+            wav = elevenlabs_tts(text, lang=lang)
+            if wav:
+                src_fmt = "mp3"
+                print(f"[call] SCO TTS via ElevenLabs ({lang})", flush=True)
+        except Exception as e:
+            print(f"[call] ElevenLabs error: {e}", flush=True)
+        if not wav:
+            try:
+                mp3_chunks = [_gtts_fetch_chunk(c, lang) for c in _gtts_chunks(text)]
+                mp3_data = b"".join(c for c in mp3_chunks if c)
+                if mp3_data:
+                    wav = mp3_data
+                    src_fmt = "mp3"
+                    print(f"[call] SCO TTS via gTTS ({lang})", flush=True)
+            except Exception as e:
+                print(f"[call] gTTS error: {e}", flush=True)
+        if not wav:
+            print(f"[call] SCO TTS ({lang}): all engines failed, no audio", flush=True)
+            return
+        try:
+            ff = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0",
+                 "-f", "s16le", "-ar", str(samplerate), "-ac", "1", "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            pcm_out, _ = ff.communicate(wav)
+            if not pcm_out:
+                print("[call] SCO TTS: ffmpeg produced no PCM", flush=True)
+                return
+            if record_path:
+                try:
+                    bt_call_record_wav(pcm_out, record_path, samplerate)
+                except Exception as e:
+                    print(f"[call] Failed to save Zeev-side audio: {e}", flush=True)
+            ap = subprocess.Popen(
+                ["aplay", "-D", sco_dev, "-f", "S16_LE",
+                 "-r", str(samplerate), "-c", "1", "-q", "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            ap.stdin.write(pcm_out)
+            ap.stdin.close()
+            ap.wait()
+        except Exception as e:
+            print(f"[call] SCO speak error: {e}", flush=True)
+        return
 
     voice_cfg = _CALL_VOICES.get(persona, _CALL_VOICES["assistant"])
     orpheus_voice = voice_cfg.get("orpheus", "daniel")
@@ -8215,16 +8272,22 @@ def run_device_mode():
         time.sleep(1)
 
 
-def run_call_mode(number: str, intent: str = "") -> None:
+def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
     """
     CLI entry point: dial `number` via HFP and run a single bt_call_loop
     session, then hang up. Mirrors the device-mode "call NNN and ..." path
     but is invokable from a shell, e.g.:
 
         python3 zeev/zeev.py --call 8577017252 --intent "have a fun chat"
+        python3 zeev/zeev.py --call 6174106801 --intent "..." --lang ru
 
     Uses bt_speak_sco (not _speak_device) so it works without the Whisplay
     HAT wake-word listener. SIGINT hangs up cleanly.
+    lang: non-English calls route TTS through ElevenLabs/gTTS (see
+    bt_speak_sco), STT through Whisper with a matching phone-context prompt,
+    and force the 70B model — the 8B model reliably romanizes Russian/Hebrew
+    instead of using native script (see CLAUDE.md), which would come out as
+    mispronounced nonsense through TTS.
     """
     global _SETTINGS_TTS_ON
     zeev_cleanup()    # clear any crash leftovers from a previous run
@@ -8276,11 +8339,13 @@ def run_call_mode(number: str, intent: str = "") -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    _LANG_NAMES = {"ru": "Russian (Русский)", "es": "Spanish (Español)", "he": "Hebrew (עברית)"}
+
     # SCO speak callback: Zeev's voice to the caller
     def _speak(text: str) -> None:
         sco_dev = bt_hfp_dev(phone_mac)
         samplerate = bt_sco_rate(phone_mac)
-        bt_speak_sco(text, sco_dev, samplerate, persona=persona)
+        bt_speak_sco(text, sco_dev, samplerate, persona=persona, lang=lang)
 
     # STT callback: raw 16k mono PCM → transcript
     def _stt(pcm: bytes) -> str:
@@ -8291,6 +8356,8 @@ def run_call_mode(number: str, intent: str = "") -> None:
             wf.setsampwidth(2)
             wf.setframerate(16000)
             wf.writeframes(pcm)
+        if lang != "en":
+            return groq_stt_call(buf.getvalue(), lang=lang)
         return groq_stt(buf.getvalue())
 
     # LLM callback: focused call prompt + recent session context
@@ -8305,10 +8372,30 @@ def run_call_mode(number: str, intent: str = "") -> None:
             "real person — you are clearly an AI assistant calling on Alex's "
             "behalf."
         )
+        if lang in _LANG_NAMES:
+            lang_name = _LANG_NAMES[lang]
+            sys_prompt += (
+                f"\n\nReply in {lang_name} only, using its native script. Never "
+                f"transliterate into Latin letters and never add an English "
+                f"translation in parentheses — your reply is spoken aloud via "
+                f"TTS in {lang_name.split(' (')[0]}, and Latin-letter or English "
+                f"text will be mispronounced or misread aloud."
+            )
+            if lang == "ru":
+                sys_prompt += (
+                    " For this call, your name is Irina and you are presenting "
+                    "yourself as Alex's secretary — warm and personable in tone. "
+                    "If asked directly whether you are a real person or an AI, "
+                    "answer honestly (you are Alex's AI assistant/secretary) — "
+                    "but don't volunteer it unprompted."
+                )
         msgs = [{"role": "system", "content": sys_prompt}]
         msgs += session[-10:]
         msgs.append({"role": "user", "content": text})
-        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+        # 8B unreliably romanizes non-English scripts (see CLAUDE.md) — force 70B
+        # for non-English calls instead of the usual auto-routed model.
+        model = "llama-3.3-70b-versatile" if lang in _LANG_NAMES else route_model(text)
+        resp, err, _ = _llm_post(msgs, model, stream=False, max_tokens=200)
         if err or resp is None or resp.status_code != 200:
             print(f"[call] LLM error: {err}", flush=True)
             return ""
@@ -9175,10 +9262,10 @@ if __name__ == "__main__":
     elif "--device" in sys.argv or "-device" in sys.argv:
         run_device_mode()
     elif "--call" in sys.argv:
-        # --call <NUMBER> [--intent "TEXT"]
+        # --call <NUMBER> [--intent "TEXT"] [--lang xx]
         argv = sys.argv[1:]
         if "--call" not in argv or len(argv) < 2:
-            print("Usage: zeev.py --call <NUMBER> [--intent \"TEXT\"]", flush=True)
+            print("Usage: zeev.py --call <NUMBER> [--intent \"TEXT\"] [--lang xx]", flush=True)
             sys.exit(2)
         number = argv[argv.index("--call") + 1]
         intent = ""
@@ -9186,6 +9273,11 @@ if __name__ == "__main__":
             idx = argv.index("--intent")
             if idx + 1 < len(argv):
                 intent = argv[idx + 1]
-        run_call_mode(number, intent)
+        lang = "en"
+        if "--lang" in argv:
+            idx = argv.index("--lang")
+            if idx + 1 < len(argv):
+                lang = argv[idx + 1]
+        run_call_mode(number, intent, lang)
     else:
         main()

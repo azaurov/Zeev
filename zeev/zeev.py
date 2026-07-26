@@ -2143,11 +2143,15 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
     return 16000  # safe default — webrtcvad also accepts 16000
 
 
-def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assistant") -> None:
+def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assistant",
+                  record_path: str | None = None) -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
     TTS chain: Orpheus WAV → Cartesia WAV → Piper raw PCM → gTTS MP3.
     persona: key from _CALL_VOICES — selects voice across Orpheus and Cartesia.
+    record_path: if set, also save the final SCO-rate PCM actually sent to aplay
+    (post-resample) as a WAV file, so Zeev's side of a call can be reviewed like
+    the caller's side.
     """
     if not text:
         return
@@ -2180,7 +2184,8 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
     # 3. Piper (Ryan, male) — local synthesis, works offline
     if not wav:
         if _audio and _audio.available:
-            # Daemon handles Piper → resample → aplay in one round-trip.
+            # Daemon handles Piper → resample → aplay in one round-trip, so this
+            # path bypasses record_path (no PCM comes back to this process).
             if _audio.sco_speak(text, sco_dev, samplerate):
                 print("[call] SCO TTS via Piper (daemon)", flush=True)
                 return
@@ -2242,6 +2247,12 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
         if not pcm_out:
             print("[call] SCO TTS: ffmpeg produced no PCM", flush=True)
             return
+
+        if record_path:
+            try:
+                bt_call_record_wav(pcm_out, record_path, samplerate)
+            except Exception as e:
+                print(f"[call] Failed to save Zeev-side audio: {e}", flush=True)
 
         ap = subprocess.Popen(
             ["aplay", "-D", sco_dev, "-f", "S16_LE",
@@ -2667,8 +2678,16 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     call_log: list[dict] = []
 
     # Route outgoing speech through SCO so the caller can hear Zeev
+    _zeev_speak_idx = [0]  # mutable counter for naming Zeev-side recordings
+
     def _sco_speak(text: str) -> None:
-        bt_speak_sco(text, sco_dev, samplerate, persona=persona)
+        record_path = None
+        if record_dir:
+            import os as _os
+            record_path = _os.path.join(
+                record_dir, f"call_turn{_zeev_speak_idx[0]:03d}_zeev.wav")
+            _zeev_speak_idx[0] += 1
+        bt_speak_sco(text, sco_dev, samplerate, persona=persona, record_path=record_path)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
 

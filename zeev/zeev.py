@@ -719,6 +719,16 @@ _LANG_WORD_TO_CODE = {
     "spanish": "es", "español": "es", "espanol": "es",
     "english": "en",
 }
+# Matches requests to hear/spell specific Hebrew content ("say the Hebrew
+# alphabet", "pronounce a Hebrew word") without switching the conversation
+# language — used to instruct the LLM to output real Hebrew script for just
+# those items instead of English transliteration.
+_HE_CONTENT_RE = re.compile(
+    r"\bhebrew\b[^.?!]{0,25}\b(alphabet|letters?|words?|phrases?|pronunciation|vocabulary)\b"
+    r"|\b(pronounce|spell)\b[^.?!]{0,20}\bhebrew\b",
+    re.IGNORECASE,
+)
+
 _LANG_SWITCH_CONFIRM = {
     "en": "Switching to English.",
     "he": "עובר לעברית.",
@@ -4519,6 +4529,16 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     }
     if lang in _LANG_INSTRUCTIONS:
         parts.append(f"\n\n{_LANG_INSTRUCTIONS[lang]}")
+    elif lang == "en" and _HE_CONTENT_RE.search(user_text):
+        parts.append(
+            "\n\n## Hebrew pronunciation instruction: The user is asking you to say, "
+            "spell, or recite specific Hebrew words, letters, or phrases (e.g. the "
+            "Hebrew alphabet). Write those Hebrew items using actual Hebrew script "
+            "(עברית) — e.g. א, ב, ג for the alphabet — never Latin transliteration "
+            "(not \"Aleph, Bet, Gimel\") and never a parenthetical English gloss, "
+            "since the reply is spoken aloud via TTS and Latin-letter text would be "
+            "mispronounced as English. The rest of your reply may stay in English."
+        )
 
     return "".join(parts)
 

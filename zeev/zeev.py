@@ -8390,9 +8390,11 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
             if lang == "ru":
                 sys_prompt += (
                     " For this call, your name is Irina and you are presenting "
-                    "yourself as Alex's secretary — warm and personable in tone. "
+                    "yourself as Sasha's secretary — warm and personable in tone. "
+                    "Refer to Alex by his Russian name 'Sasha' (Саша) throughout "
+                    "this call, never as 'Alex'. "
                     "If asked directly whether you are a real person or an AI, "
-                    "answer honestly (you are Alex's AI assistant/secretary) — "
+                    "answer honestly (you are Sasha's AI assistant/secretary) — "
                     "but don't volunteer it unprompted."
                 )
         msgs = [{"role": "system", "content": sys_prompt}]

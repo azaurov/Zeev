@@ -258,13 +258,13 @@ Address `0x33` on `/dev/i2c-3`. Hardware I2C `/dev/i2c-1` is used by WM8960 at `
 
 bosgame (LAN `10.0.0.141`) runs Ollama as free local inference backend.
 
-- **Endpoint**: `https://ollama.sogdiana-gematria.net/ollama/` (grey-cloud DNS → direct LAN, bypasses Cloudflare)
+- **Endpoint**: `https://ollama.sogdiana-gematria.net/ollama/` — Cloudflare-proxied (orange cloud); bosgame itself is the public origin for `sogdiana-gematria.net` (nginx `location /ollama/` and `/piper/` both `proxy_pass` to localhost services), so this endpoint works over the public internet, not just on the home LAN.
 - **Auth**: `X-Zeev-Key` header (`BOSGAME_KEY` in `.env`)
 - **`.env` keys**: `BOSGAME_URL`, `BOSGAME_MODEL=llama3.2:1b`, `BOSGAME_KEY`
 - **Models**: `llama3.1:8b` (chat fallback), `llama3.2:1b` (memory extraction)
-- **Pi `/etc/hosts`**: `10.0.0.141 ollama.sogdiana-gematria.net` — **required** to avoid NAT hairpin. Persisted via `/etc/cloud/templates/hosts.debian.tmpl` (cloud-init resets `/etc/hosts` on reboot without this).
+- **Pi `/etc/hosts`**: dynamically managed by `/usr/local/bin/zeev-lan-hosts.sh` (systemd `zeev-lan-hosts.timer`, every 60s) — pins `ollama.sogdiana-gematria.net → 10.0.0.141` **only when bosgame answers on the LAN** (avoids NAT hairpin at home), and removes the pin otherwise so the hostname falls through to public DNS → Cloudflare → bosgame's public origin while traveling. Previously a static entry in `/etc/cloud/templates/hosts.debian.tmpl`, which broke connectivity off-LAN (Pi kept dialing the private IP directly) — replaced 2026-07-26.
 - **bosgame nginx**: edit `sites-enabled/default` (NOT `sites-available/default` — they are separate files on bosgame). `/ollama/` location: `proxy_buffering off`, `proxy_read_timeout 300s`.
-- Fallback only works on home LAN.
+- feiergente01 (second Kokoro backend, see below) has no public exposure — LAN-only, unreachable while traveling.
 
 ## bosgame Kokoro TTS server
 
@@ -275,7 +275,7 @@ Primary English TTS: **Kokoro** on bosgame. Pi daemon calls `https://ollama.sogd
 - **Piper fallback**: `~/piper/en_US-lessac-medium.onnx` (22050Hz). Latency: ~0.7s.
 - **Go daemon** (`REMOTE_PIPER_URL` env var): parses WAV header bytes 24-27 for sample rate. `REMOTE_PIPER_VOICE` sets default voice; falls back to `BOSGAME_KEY` if `REMOTE_PIPER_KEY` is unset. Per-request `"voice"` field overrides the default for that call. Shared `RemotePiperClient` (10min idle timeout) + background warmup call in `Init()` keep the connection warm across the multi-minute gaps typical between conversational turns.
 - **Second backend (feiergente01)**: `REMOTE_PIPER_URL2`/`REMOTE_PIPER_KEY2` point at a second Kokoro instance on `feiergente01` (Windows 11 laptop, i7-1360P, no GPU, LAN `10.0.0.208:5601`, RTF ~0.68). `speakPiper` alternates sentence chunks between backends (bosgame: 0,2,4…; feiergente01: 1,3,5…), each synthesizing its half sequentially — separate CPUs have no shared-resource contention, unlike concurrent requests to the *same* backend (measured: same-backend concurrency makes each request individually slower, since `tts_server.py` is single-threaded and inference already saturates its cores per request). Cut a 99-word/5-sentence reply's overhead from ~10s+ to ~3-4s.
-  - **feiergente01 setup**: `C:\kokoro\tts_server.py` (Kokoro-only, `X-Zeev-Key` checked in-process, no reverse proxy there) + model files copied from bosgame. Runs as a real Windows service (`ZeevTTS`, via NSSM at `C:\kokoro\nssm.exe`) — `AUTO_START`, `LocalSystem`, survives reboots with nobody logged in, NSSM auto-restarts the process on crash (3s delay). Logs: `C:\kokoro\service_out.log`/`service_err.log`. Firewall: `netsh advfirewall firewall add rule name=zeev-tts dir=in action=allow protocol=TCP localport=5601`. **Gotcha**: some pip packages (e.g. `typing_extensions`, pulled in transitively by `phonemizer`) had stale copies in the `azaur` user's per-user site-packages from earlier tool installs, which pip treated as "already satisfied" and skipped reinstalling globally — invisible to the SYSTEM-context service even though the main package (`kokoro-onnx`) was global. Fixed with `pip install --target=C:\Python314\Lib\site-packages --upgrade <pkg>` to force the global copy. If the service won't start, check `service_err.log` for `ModuleNotFoundError` first.
+  - **feiergente01 setup**: `C:\kokoro\tts_server.py` (Kokoro-only, in-process `X-Zeev-Key` auth) + models copied from bosgame. Real Windows service `ZeevTTS` via NSSM (`AUTO_START`, `LocalSystem`, auto-restart on crash). Logs: `C:\kokoro\service_*.log`. Firewall: TCP 5601 inbound. **Gotcha**: stale per-user `typing_extensions` shadowed the global copy for the SYSTEM-context service — fix with `pip install --target=C:\Python314\Lib\site-packages --upgrade <pkg>`. Check `service_err.log` for `ModuleNotFoundError` first if the service won't start.
 - **Voice personas**: Zeev's brain voice = Groq Orpheus `daniel`. Device mode speaker = Kokoro `af_heart` ("Sarina", Zeev's secretary).
 
 ## User

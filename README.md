@@ -27,7 +27,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 
 ## zeev-audio daemon
 
-A Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations. It keeps Piper's ONNX model warm (loaded once at startup, not per call), manages Bluetooth detection and reconnect, runs the WM8960 keepalive, handles music playback, and provides SCO call-audio synthesis for phone calls. `zeev.py` delegates to it via a thin Python adapter (`zeev/audio_client.py`) over a Unix socket; falls back to its own subprocess implementations if the daemon is unavailable.
+A Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations. It keeps Piper's ONNX model warm (loaded once at startup, not per call), manages Bluetooth detection and reconnect, runs the WM8960 keepalive, handles music playback, and provides SCO call-audio synthesis for phone calls. `zeev.py` delegates to it via a thin Python adapter (`zeev/audio_client.py`) over a Unix socket; falls back to its own subprocess implementations if the daemon is unavailable. Bluetooth control calls (`pair`/`connect`/`disconnect`) are bounded by a 10s timeout so a wedged adapter can't hang the daemon or leak processes.
 
 **Start the daemon** (already set up as a systemd service on the Pi):
 ```bash

@@ -413,7 +413,11 @@ _BT_CALL_RE = re.compile(
 # Max chars into the transcript the trigger word may start at — keeps
 # incidental uses ("...my nieces call me Uncle Sasha...") mid-sentence
 # from being misread as a dial command; real requests lead with it.
-_BT_CALL_MAX_START = 15
+# 15 was too tight for a natural vocative + politeness lead-in ("Hi Serena,
+# can you call my wife Maria at ...") which pushes the trigger word past
+# char 15 and silently falls through to plain chat instead of dialing
+# (found live 2026-07-26) — 35 covers that lead-in with margin.
+_BT_CALL_MAX_START = 35
 
 
 def _bt_call_match(transcript: str):

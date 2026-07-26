@@ -2717,16 +2717,19 @@ def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
                  call_intent: str = "",
-                 persona: str = "assistant") -> None:
+                 persona: str = "assistant",
+                 lang: str = "en") -> None:
     """
     Run the Zeev conversation loop over an active HFP call.
-    speak_fn(text) — plays TTS through SCO device
+    speak_fn — unused (kept for backward-compat call signature); outgoing speech
+    is actually routed through the internal _sco_speak() below, not this callback.
     stt_fn(pcm_bytes) — returns transcript string
     llm_fn(text) — returns Zeev's reply string
     record_dir — if set, saves each turn as WAV files
     mac — phone MAC for SCO device address
     call_intent — why Alex is making this call (injected into IVR/voicemail context)
     persona — voice persona from _CALL_VOICES ('assistant', 'friendly', 'professional', 'calm')
+    lang — non-English calls route TTS through bt_speak_sco's ElevenLabs/gTTS path
     """
     global _IN_CALL
     _IN_CALL = True
@@ -2744,7 +2747,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             record_path = _os.path.join(
                 record_dir, f"call_turn{_zeev_speak_idx[0]:03d}_zeev.wav")
             _zeev_speak_idx[0] += 1
-        bt_speak_sco(text, sco_dev, samplerate, persona=persona, record_path=record_path)
+        bt_speak_sco(text, sco_dev, samplerate, persona=persona, record_path=record_path, lang=lang)
 
     print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
 
@@ -8413,7 +8416,8 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
         bt_call_loop(_speak, _stt, _llm, phone_mac,
                      record_dir=record_dir,
                      call_intent=intent,
-                     persona=persona)
+                     persona=persona,
+                     lang=lang)
     except SystemExit:
         raise
     except Exception as e:

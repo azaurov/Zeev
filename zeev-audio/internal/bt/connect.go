@@ -1,12 +1,18 @@
 package bt
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// bluetoothctlTimeout bounds each bluetoothctl invocation so a wedged
+// adapter (device out of range, mid-reconnect) can't hang the call or
+// leak a zombie process indefinitely.
+const bluetoothctlTimeout = 10 * time.Second
 
 // Connect pairs (if needed), trusts, and connects to mac.
 // After connecting, refreshes the BT audio globals via Detect.
@@ -17,9 +23,14 @@ func Connect(mac string) error {
 	}
 	// Trust + connect in one bluetoothctl invocation.
 	script := fmt.Sprintf("trust %s\nconnect %s\nquit\n", mac, mac)
-	cmd := exec.Command("bluetoothctl")
+	ctx, cancel := context.WithTimeout(context.Background(), bluetoothctlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bluetoothctl")
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("bluetoothctl connect: timed out after %s", bluetoothctlTimeout)
+	}
 	if err != nil {
 		log.Printf("bt: connect %s output: %s", mac, out)
 		return fmt.Errorf("bluetoothctl connect: %w", err)
@@ -38,9 +49,14 @@ func Connect(mac string) error {
 func Disconnect(mac string) error {
 	mac = strings.ToUpper(strings.TrimSpace(mac))
 	script := fmt.Sprintf("disconnect %s\nquit\n", mac)
-	cmd := exec.Command("bluetoothctl")
+	ctx, cancel := context.WithTimeout(context.Background(), bluetoothctlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bluetoothctl")
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("bluetoothctl disconnect: timed out after %s", bluetoothctlTimeout)
+	}
 	if err != nil {
 		log.Printf("bt: disconnect %s output: %s", mac, out)
 		return fmt.Errorf("bluetoothctl disconnect: %w", err)
@@ -58,9 +74,14 @@ func Disconnect(mac string) error {
 func Pair(mac string) error {
 	mac = strings.ToUpper(strings.TrimSpace(mac))
 	script := fmt.Sprintf("pair %s\ntrust %s\nquit\n", mac, mac)
-	cmd := exec.Command("bluetoothctl")
+	ctx, cancel := context.WithTimeout(context.Background(), bluetoothctlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bluetoothctl")
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("bluetoothctl pair: timed out after %s", bluetoothctlTimeout)
+	}
 	if err != nil {
 		log.Printf("bt: pair %s output: %s", mac, out)
 		return fmt.Errorf("bluetoothctl pair: %w", err)

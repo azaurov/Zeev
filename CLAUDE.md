@@ -28,9 +28,11 @@ Raspberry Pi Zero 2W (512 MB RAM, 4× Cortex-A53). Hardware HATs: Whisplay displ
 
 **Daemon startup**: pre-warms Piper ONNX on `Init()`. Pi Zero 2W: ~5s warm / ~20s cold. Also starts WM8960 keepalive goroutine (1s silence every 20s) and `bt.Detect(2)`.
 
-**systemd**: `zeev-audio.service`, `User=ragnar`, `Restart=on-failure` (no watchdog/`sd_notify` heartbeat — a livelocked daemon that doesn't exit won't auto-restart).
+**systemd**: `zeev-audio.service`, `User=ragnar`, `Type=notify` + `WatchdogSec=30`, `Restart=on-failure`. `internal/sdnotify` sends `READY=1` on startup; a goroutine self-dials the daemon's own socket every ~15s with a `health` request and only pings `WATCHDOG=1` if that round trip succeeds — validates the full accept→dispatch→respond path, so a livelocked (not crashed) daemon still gets restarted.
 
-**Reliability**: `internal/bt/connect.go` `Connect`/`Disconnect`/`Pair` use `exec.CommandContext` with a 10s `bluetoothctl` timeout (previously unbounded — a wedged adapter leaked a goroutine + zombie process per attempt). In `zeev.py`, ~44 previously-silent `except Exception: pass` blocks on TTS/STT/BT/DB/GPS/device-startup paths now log via the `[tag] ... error: {e}` convention — this pattern was the root cause of several past regressions (null-content crash, UnboundLocalError, contextless detail-prefetch fallback). ~34 sites left silent (per-frame cosmetic paths, expected-to-fail hardware probes, already-logged fallbacks).
+**Reliability**: `internal/bt/connect.go` `Connect`/`Disconnect`/`Pair` use `exec.CommandContext` with a 10s `bluetoothctl` timeout (previously unbounded — a wedged adapter leaked a goroutine + zombie process). `piper.go`'s `SynthesizeOneShot` similarly bounded to 60s (was unbounded `io.ReadAll`/`cmd.Wait()`). In `zeev.py`, ~44 previously-silent `except Exception: pass` blocks on TTS/STT/BT/DB/GPS/device-startup paths now log via `[tag] ... error: {e}` — root cause of several past regressions (null-content crash, UnboundLocalError, contextless detail-prefetch fallback); ~34 sites left silent (cosmetic/expected-fail/already-logged).
+
+**BT scan/detect bugs (found live, 2026-07-26)**: `bt.Scan()` used `timeout N bluetoothctl scan on`, but bluez 5.82's one-shot `scan on` exits in ~50ms instead of blocking, so scans always returned zero devices — fixed to bluez's own `bluetoothctl --timeout N scan on` (also fixed in both Python call sites). Separately, `parsePCMs()` checked rate/channel regexes against the device-header line instead of the codec line that follows, and `rateRe` required no space before `Hz` though real output has one — `_BT_RATE` silently defaulted to 44100 regardless of actual rate. Python's `bt_detect_connected()` already parsed this correctly; only Go had the bug.
 
 **Building and deploying**:
 ```bash
@@ -60,7 +62,7 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 - `_BT_RATE` / `_BT_CHANNELS` — negotiated A2DP format, queried from `bluealsa-aplay --list-pcms`.
 - `bt_detect_connected()` — device mode startup; sets globals; retries 2× with 1s sleep.
 - `bt_verify_connected()` — called at top of every `_speak_device()` call; clears `_BT_AUDIO_DEV` if device no longer listed (handles physical disconnects).
-- `bt_scan()` — 10s scan via `subprocess.run(['timeout', N, 'bluetoothctl', 'scan', 'on'])`, parses output after completion (avoids readline hang on partial ANSI escapes from bluetoothctl).
+- `bt_scan()` — 10s scan via `subprocess.run(['bluetoothctl', '--timeout', N, 'scan', 'on'])`, parses output after completion. **Must use bluez's own `--timeout` flag, not an external `timeout N` wrapper** — on bluez 5.82, one-shot `scan on` exits in ~50ms rather than blocking, so the outer wrapper had nothing to kill (found live 2026-07-26).
 - Startup BT volume: raw 50/127 (~39%) via `amixer -D bluealsa cset numid=2 50`.
 - `/bt` slash command: `scan`, `pair <N>`, `<N>` to connect, `off` to disconnect.
 
@@ -68,23 +70,17 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 
 - **SCO audio device**: `bluealsa:DEV=<mac>,PROFILE=sco,SRV=org.bluealsa` (BlueALSA v4.3.1+).
 - **`bt_speak_sco` TTS chain**: Groq Orpheus → Cartesia (`sonic-2`, `CARTESIA_API_KEY`/`CARTESIA_VOICE_ID` in `.env`) → Piper (via daemon `speak_sco` or Python subprocess) → gTTS. All resampled via ffmpeg to SCO rate.
-- **`bt_call_loop`**: turn 0 uses `bt_fast_detect` (records ≤6s, early-exits at ~3s on speech onset). Live-person check runs before voicemail regex: early onset + short transcript → `live` immediately — prevents Whisper hallucinations on 8kHz SCO audio from misclassifying a real pickup as voicemail. `_speech_onset_ms` = ms offset of first speech-energy frame (RMS > 400); onset at 0ms = pickup click, not speech.
-- **Speculative pre-generation**: background thread starts immediately after dialing to pre-generate voicemail message via LLM while ringing (`_pregen_msg`). Cuts post-beep latency from ~14s to ~5s.
+- **`bt_call_loop`**: turn 0 uses `bt_fast_detect` (records ≤6s, early-exits at ~3s on speech onset). Live-person check runs before voicemail regex: early onset + short transcript → `live` immediately — prevents Whisper hallucinations on 8kHz SCO audio from misclassifying a pickup as voicemail. `_speech_onset_ms` = ms offset of first speech-energy frame (RMS > 400); onset at 0ms = pickup click, not speech.
+- **Speculative pre-generation**: background thread pre-generates the voicemail message via LLM while ringing (`_pregen_msg`), cutting post-beep latency from ~14s to ~5s.
 - **Call type detection**: voicemail (regex) → leave message + hangup; IVR (menu prompt regex) → DTMF digits; live/unknown → conversation. IVR hangup detection skipped ("Goodbye" is part of menu).
 - **HFP guard**: `bt_hfp_detect()` after post-dial sleep; empty → hang up instead of entering `bt_call_loop` with an invalid SCO device (previously a hard hang).
 - **Whisper hallucination filter**: known ring-tone hallucinations ("Thank you.", "thanks", etc.) filtered before incrementing `turn`. `groq_stt_call` biases Whisper toward call vocabulary via `_CALL_WHISPER_PROMPT` on 8kHz audio.
 - **`zeev/quantum_convo.py`** — quantum-weighted conversation topics for calls: `python3 zeev/quantum_convo.py --name NAME [--about TOPIC] [--call NUMBER]`.
 - **Call-intent detection**: `_bt_call_match()` gates both call sites — requires the call/dial/phone/ring trigger within the first 15 chars of the transcript, so mid-sentence mentions aren't misread as a dial command.
 
-## Version Control
+## Version Control / Deployment
 
-Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked. Add generated/data files to `.gitignore` by default.
-
-## Shell Scripts / Deployment
-
-Watch for CRLF line endings from copy-paste in shell scripts/sudoers; prefer inline commands or strip CRLF explicitly.
-
-- **Deployment workflow**: Before running `./deploy.sh`, ALWAYS commit any local changes. The deploy script relies on `git push origin main`, so uncommitted changes will not be deployed.
+Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked; add generated/data files to `.gitignore` by default. Watch for CRLF line endings from copy-paste in shell scripts/sudoers. Before running `./deploy.sh`, ALWAYS commit local changes first — it relies on `git push origin main`.
 
 ## Running
 
@@ -103,13 +99,13 @@ Requires `GROQ_API_KEY` and `TAVILY_API_KEY` in `.env` (loaded via plain-text pa
 Single-file app: `zeev/zeev.py`.
 
 **Key non-obvious behaviors**:
-- **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B rate limit doesn't block 8B calls. Torah queries and 70B/R1 use 1200 max_tokens; 8B uses 600.
+- **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B limit doesn't block 8B calls. Torah/70B/R1 use 1200 max_tokens; 8B uses 600.
 - **`_groq_post_with_fallback`** — wraps `_groq_post`; on 429/cooldown, retries once via OpenRouter free tier (`_OPENROUTER_FALLBACK_MODEL` maps each Groq model id → its equivalent, default `meta-llama/llama-3.3-70b-instruct:free`). Used by device-mode chat, web `/chat` SSE, thermal SSE, detail prefetch — not vision (no free equivalent) or the 413 trim-retry loop. `_llm_post`'s streaming path has its own longer OpenRouter→Gemini→bosgame chain.
 - **`_bosgame_stream`** — uses `http.client.HTTPSConnection` directly (not `requests`) to avoid urllib3 pool conflicts. Connect timeout 10s; socket timeout extends to 300s after connect for slow CPU inference.
 - **`_llm_post`** — on connection errors, prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
 - **`extract_memory`** — prefers `_bosgame_complete` (llama3.2:1b, ~5–10s) over Groq; falls back on error.
 - **`route_model`** — `_REASONING_RE` → DeepSeek R1; `_SMART_RE` → 70B; default → 8B. No extra API call.
-- **`zeev_cleanup()`** — kills `_MUSIC_PROC` and `_piper_term_proc`; `pkill -f` for `zeev_music`, `zeev_rec.wav`, `piper --model`, `mpg123`; removes `/tmp/zeev_*`. Registered via `atexit` in `main()` and `run_device_mode()` so it also fires on unhandled exceptions (not just SIGINT/SIGTERM).
+- **`zeev_cleanup()`** — kills `_MUSIC_PROC`/`_piper_term_proc`, `pkill -f` for `zeev_music`/`zeev_rec.wav`/`piper --model`/`mpg123`, removes `/tmp/zeev_*`. Registered via `atexit` so it fires on unhandled exceptions too, not just SIGINT/SIGTERM.
 - **`run_web_server`** — `ThreadingHTTPServer`. Endpoints: `/chat` (SSE stream), `/clear`, `/memory`, `/memorize`, `/tts` (POST text → WAV), `/transcribe` (raw audio → transcript), `/thermal` (SSE), `/thermal-status`, `/volume` (GET/POST), `/snap`, `/gps`.
 - **`_build_system_prompt`** — assembles base persona + memory facts + RAG hits + optional calendar + optional Tavily results. `needs_weather(text)` (subset of `needs_search`) appends a units instruction to spell out `°F`→"degrees Fahrenheit" / `mph`→"miles per hour" in full words, since replies are spoken via TTS.
 - **SQLite** (`data/zeev.db`, WAL mode): tables `messages`, `facts`, `notes`, `settings`, `quantum_insights`. `_db_lock` guards all writes (thread-safety for ThreadingHTTPServer).
@@ -133,15 +129,15 @@ Single-file app: `zeev/zeev.py`.
 
 ### Google Calendar
 
-`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2, from `gcal_auth.py`), auto-refreshes token, cached 5 min. `needs_calendar(text)` triggers on "calendar"/"schedule"/"meeting" — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30. Injects as `## Today's calendar:` or `## Calendar (next N days):`.
+`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2), auto-refreshes token, cached 5 min. `needs_calendar(text)` triggers on "calendar"/"schedule"/"meeting" — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30.
 
 ### GPS / geolocation
 
-Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) → IP fallback (`ip-api.com`). `gps_locate()` cached 30 min. `_reverse_geocode` via Nominatim/OSM. `GOOGLE_GEOLOC_KEY` in `.env`. `/gps` terminal command; `GET /gps` web endpoint.
+Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) → IP fallback (`ip-api.com`). `gps_locate()` cached 30 min. `_reverse_geocode` via Nominatim/OSM. `/gps` terminal command; `GET /gps` web endpoint.
 
 ### User memory
 
-`facts` table in `zeev.db`, injected under `## What I know about Alex:`. `extract_memory()` runs on `quit`/`/memorize`. 429 returns `None` — caller shows a warning instead of fake success. `/forget-fact N` to remove.
+`facts` table in `zeev.db`, injected under `## What I know about Alex:`. `extract_memory()` runs on `quit`/`/memorize`. 429 returns `None` — shows a warning instead of fake success. `/forget-fact N` to remove.
 
 ### History RAG
 
@@ -151,9 +147,8 @@ Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) →
 
 FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Haggadah, Zohar, Dead Sea Scrolls, Sumerian. Populated by `zeev/import_sefaria.py` (resume-safe, ~75 min full corpus).
 
-- `needs_torah(text)` / `_TORAH_RE` — matches Torah, Talmud, Gemara, halacha, Apocrypha, liturgy, Zohar, DSS/Qumran, Sumerian, parsha/portion.
-- `torah_search(query, k=3)` — FTS5 search; noise verbs ("recite", "tell", "say") and time words excluded to avoid polluting passage matching.
-- DB schema: `passages` FTS5 table (`source`, `ref`, `en`, `he`). `done` table tracks imported refs. Torah/Sefaria replies force `lang='he'` for TTS regardless of reply script.
+- `needs_torah(text)` / `_TORAH_RE` — matches Torah, Talmud, Gemara, halacha, Apocrypha, liturgy, Zohar, DSS/Qumran, Sumerian, parsha/portion. `torah_search(query, k=3)` — FTS5 search; noise verbs/time words excluded to avoid polluting matching.
+- DB schema: `passages` FTS5 table (`source`, `ref`, `en`, `he`); `done` tracks imported refs. Torah/Sefaria replies force `lang='he'` for TTS regardless of reply script.
 
 ### Weekly reflection
 
@@ -161,11 +156,11 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 
 ### Quantum reasoning
 
-`quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py`: idea → circuit spec → simulate → interpret. `past_insights` (k=3 most recent from `quantum_insights`) compound learning over time. `zeev/quantum_daily.py` — 8 human-dilemma scenarios, one per day (`day-of-year % 8`). Cron: `0 6 * * *`.
+`quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py`: idea → circuit spec → simulate → interpret. `past_insights` (k=3 most recent) compound learning over time. `quantum_daily.py` — 8 human-dilemma scenarios, one per day. Cron: `0 6 * * *`.
 
 ### Music playback
 
-`youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123. `play <query>` / `stop the music` detected before LLM routing. `/stop` kills playback.
+`youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123. `play <query>`/`stop the music` detected before LLM routing.
 
 ### Multilingual TTS
 
@@ -178,9 +173,9 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 
 `detect_lang` no longer auto-detects from character sets — always returns `FORCED_LANG or "en"`. Terminal/web change language via `/lang` only — device mode has no `/lang` handler, so it uses `lang_switch_intent()` (`zeev.py:720`): requires a speak/talk/switch/say verb within 20 chars of the language name (guards against "I have a Russian friend", mirroring `_bt_call_match`'s proximity check). Wired into `_handle_transcript()` after the voice-coach intent block; sets `FORCED_LANG`, speaks a confirmation. Groq Orpheus is English-only. `/tts` endpoint tries gTTS before returning `503 {"lang": ...}` for browser `speechSynthesis` fallback.
 
-**Russian/Spanish TTS route to bosgame, not local Piper**: measured RTF on the Pi Zero 2W ARM core (~2.6x Russian / ~1.4x Spanish, 11-20s for a short reply) vs bosgame's x86 CPU with identical models (~0.135x, ~1s) — the Pi's CPU is the bottleneck, not the model. `_speak_device()` step 0 loops over `_REMOTE_PIPER_LANGS = ("ru", "es")`, tries `_audio.speak_sync(lang=...)` first (daemon → bosgame's `tts_server.py`, dedicated Piper model — Kokoro doesn't support either language), falling to local `_piper_direct()` (step 0b) only if the daemon is unavailable/fails (`speak_sync()` returns the daemon's `ok` bool so failure is detectable). feiergente01 has neither model, so `speakPiper` disables the two-backend chunk split for `lang in ("ru","es")`, keeping those chunks on bosgame. `PIPER_MODELS["ru"]` (local fallback only) prefers `ru_RU-irina-medium.onnx` (female) over `-dmitri` if both present.
+**Russian/Spanish TTS route to bosgame, not local Piper**: measured RTF on the Pi Zero 2W ARM core (~2.6x Russian / ~1.4x Spanish, 11-20s for a short reply) vs bosgame's x86 CPU with identical models (~0.135x, ~1s) — the Pi's CPU is the bottleneck, not the model. `_speak_device()` step 0 loops over `_REMOTE_PIPER_LANGS = ("ru", "es")`, tries `_audio.speak_sync(lang=...)` first (daemon → bosgame's dedicated Piper model — Kokoro doesn't support either), falling to local `_piper_direct()` (step 0b) only if the daemon is unavailable/fails. feiergente01 has neither model, so `speakPiper` keeps `lang in ("ru","es")` chunks on bosgame only. `PIPER_MODELS["ru"]` (local fallback) prefers `ru_RU-irina-medium.onnx` (female) over `-dmitri` if both present.
 
-**Local Russian Piper fallback** (only if daemon/bosgame unreachable): chunks via `_gtts_chunks()` + per-sentence `_piper_direct()` so playback starts after sentence one — one-shot synthesis at RTF ~2.6x would leave 30-60s of dead air. `_PIPER_RU_MAX_WORDS` (35) skips Piper for longer replies (chunking doesn't reduce total synthesis time, only time-to-first-audio). Only a first-chunk failure triggers gTTS fallback, not a mid-reply one (avoids re-speaking already-played sentences).
+**Local Russian Piper fallback** (only if daemon/bosgame unreachable): chunks via `_gtts_chunks()` + per-sentence `_piper_direct()` so playback starts after sentence one — one-shot synthesis at RTF ~2.6x would leave 30-60s of dead air. `_PIPER_RU_MAX_WORDS` (35) skips Piper for longer replies. Only a first-chunk failure triggers gTTS fallback, not mid-reply (avoids re-speaking already-played sentences).
 
 **LLM must output actual Cyrillic, not transliteration**: the 8B model reliably romanizes Russian and adds English glosses even when told "Reply in Russian only" — a prompt-compliance issue, not a synthesis bug (Piper's Cyrillic phonemizer mispronounces Latin-letter input). `_LANG_INSTRUCTIONS["ru"]`/`["he"]` (`zeev.py:4364`) forbid transliteration/English parentheticals. If garbled/wrong-language audio recurs, check the raw LLM reply text (`journalctl -u zeev-device | grep 'Zeev \[8B\]'`) before assuming a TTS bug.
 
@@ -198,19 +193,15 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 ### File layout
 
 ```
-zeev/
-  zeev.py                   # entire application
-  audio_client.py           # Python adapter for zeev-audio daemon
-  mlx90640.py               # thermal camera (I2C bus 3)
-  import_sefaria.py         # populate data/torah.db
-  migrate_to_sqlite.py      # idempotent flat-file → zeev.db import
-  quantum_daily.py / quantum_convo.py  # daily teaching / call topics
-  data/                     # runtime files (git-ignored): zeev.db, torah.db
-zeev-audio/                 # Go audio daemon (cross-compiled arm64)
-  cmd/zeev-audio/main.go
-  internal/piper/piper.go   # persistent Piper + SynthesizeOneShot
-  internal/audio/ internal/bt/ internal/music/ internal/record/
-  internal/server/          # server.go (Unix socket), handlers.go
+zeev/zeev.py                # entire application
+zeev/audio_client.py         # Python adapter for zeev-audio daemon
+zeev/mlx90640.py             # thermal camera (I2C bus 3)
+zeev/import_sefaria.py       # populate data/torah.db
+zeev/migrate_to_sqlite.py    # idempotent flat-file → zeev.db import
+zeev/quantum_daily.py, quantum_convo.py  # daily teaching / call topics
+zeev/data/                   # runtime (git-ignored): zeev.db, torah.db
+zeev-audio/                  # Go audio daemon (cross-compiled arm64)
+  cmd/zeev-audio/main.go, internal/{piper,audio,bt,music,record,server,sdnotify}/
   Makefile                  # make pi → cross-compile arm64
 ~/zeev-audio/zeev-audio     # binary on Pi (outside repo)
 ~/piper/                    # Piper TTS (outside repo); en_US-lessac-medium.onnx
@@ -231,8 +222,8 @@ Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL): `dtoverlay=i2c-gpio,bus=3,i2c_g
 - **429 fallback**: `_handle_transcript` retries 70B/R1 429s with 8B before surfacing an error.
 - **LLM error display**: Whisplay screen shows "Rate limited", "No network", or "LLM err <code>"; full detail in `data/zeev_errors.log`.
 - **`_CAMERA_RE`**: natural-language camera intents → `capture_image()` + Llama 4 Scout vision call (when `CAMERA_AVAILABLE`).
-- **`_VISUAL_TRIGGER_RE`**: visual-effect intents → runs the matching `shapes_test.py` effect (`fire`/`matrix`/`psychedelic`/`liquid`/`tunnel`/`plasma`/`cartoon`) on `board` for 12s. Sets `_visual_effect_active[0] = True` first so `_face_loop` skips its own SPI writes (avoids two threads racing on `board.draw_image`).
-- Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`
+- **`_VISUAL_TRIGGER_RE`**: visual-effect intents → runs the matching `shapes_test.py` effect (`fire`/`matrix`/`psychedelic`/`liquid`/`tunnel`/`plasma`/`cartoon`) on `board` for 12s; sets `_visual_effect_active[0] = True` first so `_face_loop` skips its own SPI writes (avoids two threads racing on `board.draw_image`).
+- Driver install: `cd ~/Whisplay && sudo bash install_driver.sh && sudo reboot`.
 
 ## Startup / Shutdown
 
@@ -258,9 +249,9 @@ Primary English TTS: **Kokoro** on bosgame. Pi daemon calls `https://ollama.sogd
 - **Kokoro**: `~/kokoro/kokoro-v1.0.onnx` + `voices-v1.0.bin`. Default voice: `af_heart` (Sarina, 24kHz, speed=1.0). Set via `KOKORO_VOICE` env var or per-request `"voice"` field. **RTF ~0.82 on bosgame's CPU** (AMD Ryzen 5 3550H, no GPU), close to real-time; int8/fp16 quantization confirmed NOT to help this CPU (no AVX512-VNNI/native fp16 — int8 measured 3x *slower*) — fp32 is already fastest here.
 - **Piper fallback**: `~/piper/en_US-lessac-medium.onnx` (22050Hz), ~0.7s latency.
 - **Go daemon** (`REMOTE_PIPER_URL`): parses WAV header bytes 24-27 for sample rate. `REMOTE_PIPER_VOICE` sets default voice; falls back to `BOSGAME_KEY` if `REMOTE_PIPER_KEY` unset. Per-request `"voice"` overrides. Shared `RemotePiperClient` (10min idle timeout) + background warmup in `Init()` keep the connection warm across multi-minute gaps between turns.
-- **Second backend (feiergente01)**: `REMOTE_PIPER_URL2`/`REMOTE_PIPER_KEY2` → second Kokoro instance on `feiergente01` (Windows 11, i7-1360P, no GPU, LAN `10.0.0.208:5601`, RTF ~0.68). `speakPiper` alternates sentence chunks between backends (bosgame even, feiergente01 odd) — separate CPUs avoid the same-backend contention seen with concurrent requests to one (single-threaded `tts_server.py`). Cuts a 99-word/5-sentence reply's overhead from ~10s+ to ~3-4s.
-  - **Public exposure via bosgame proxy**: `REMOTE_PIPER_URL2=https://ollama.sogdiana-gematria.net/piper2/tts`, key = `BOSGAME_KEY` (nginx rewrites to feiergente01's real key). Location is in `/etc/nginx/sites-available/ollama.sogdiana-gematria.net`, **not** `sites-available/default` (that vhost's `server_name` excludes the `ollama.` subdomain and returns 444 — cost real debugging time once). `proxy_pass` → `http://10.0.0.208:5601/`.
-  - **feiergente01 setup**: `C:\kokoro\tts_server.py`, Windows service `ZeevTTS` via NSSM (auto-restart). Logs: `C:\kokoro\service_*.log`. Firewall: TCP 5601 inbound. **Gotcha**: stale per-user `typing_extensions` can shadow the global copy for the SYSTEM service — fix with `pip install --target=C:\Python314\Lib\site-packages --upgrade <pkg>`; check `service_err.log` for `ModuleNotFoundError` first.
+- **Second backend (feiergente01)**: `REMOTE_PIPER_URL2`/`REMOTE_PIPER_KEY2` → second Kokoro instance on `feiergente01` (Windows 11, i7-1360P, no GPU, LAN `10.0.0.208:5601`, RTF ~0.68). `speakPiper` alternates sentence chunks between backends (bosgame even, feiergente01 odd) — separate CPUs avoid same-backend contention (single-threaded `tts_server.py`). Cuts a 99-word/5-sentence reply's overhead from ~10s+ to ~3-4s.
+  - **Public exposure**: `REMOTE_PIPER_URL2=https://ollama.sogdiana-gematria.net/piper2/tts`, key = `BOSGAME_KEY` (nginx rewrites to feiergente01's real key). Location is in `/etc/nginx/sites-available/ollama.sogdiana-gematria.net`, **not** `sites-available/default` (that vhost excludes the `ollama.` subdomain and returns 444 — cost real debugging time once).
+  - **feiergente01 setup**: `C:\kokoro\tts_server.py`, Windows service `ZeevTTS` via NSSM (auto-restart), logs `C:\kokoro\service_*.log`, firewall TCP 5601 inbound. **Gotcha**: stale per-user `typing_extensions` can shadow the global copy for the SYSTEM service — fix with `pip install --target=C:\Python314\Lib\site-packages --upgrade <pkg>`.
 - **Voice personas**: Zeev's brain voice = Groq Orpheus `daniel`; device mode speaker = Kokoro `af_heart` ("Sarina", Zeev's secretary).
 
 ## User

@@ -681,8 +681,8 @@ def start_health_monitor(notify_fn, interval=60):
                     _last[key] = now
                     try:
                         notify_fn(warning)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[health] notify_fn failed: {e}", flush=True)
             time.sleep(interval)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -947,7 +947,8 @@ def _piper_speak(clean, model, adev=None):
                 except BrokenPipeError:
                     pass
                 aplay.wait()
-            except Exception:
+            except Exception as e:
+                print(f"[tts] Piper terminal playback error: {e}", flush=True)
                 _piper_term_proc = None
                 try:
                     aplay.stdin.close()
@@ -1006,7 +1007,8 @@ def _gtts_fetch_chunk(chunk, lang):
         )
         with _ur.urlopen(req, timeout=10) as r:
             return r.read() if r.status == 200 else None
-    except Exception:
+    except Exception as e:
+        print(f"[tts] gTTS chunk fetch failed: {e}", flush=True)
         return None
 
 
@@ -1035,8 +1037,8 @@ def _gtts_speak(text, lang, adev=None):
                         proc.stdin.write(mp3)
                         proc.stdin.close()
                         proc.wait()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[tts] gTTS playback error: {e}", flush=True)
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -1255,8 +1257,8 @@ def speak_terminal(text, lang=None):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[tts] espeak-ng launch failed: {e}", flush=True)
 
 
 def groq_tts(text, voice="daniel"):
@@ -1326,7 +1328,8 @@ def cartesia_tts(text, voice_id=None, persona=None):
             timeout=15,
         )
         return resp.content if resp.status_code == 200 else None
-    except Exception:
+    except Exception as e:
+        print(f"[tts] Cartesia error: {e}", flush=True)
         return None
 
 
@@ -1351,7 +1354,8 @@ def elevenlabs_tts(text, voice_id=None, lang="en"):
             timeout=30,
         )
         return resp.content if resp.status_code == 200 else None
-    except Exception:
+    except Exception as e:
+        print(f"[tts] ElevenLabs error: {e}", flush=True)
         return None
 
 
@@ -1372,7 +1376,8 @@ def _openai_tts(text, lang="en"):
             timeout=30,
         )
         return resp.content if resp.status_code == 200 else None
-    except Exception:
+    except Exception as e:
+        print(f"[tts] OpenAI TTS error: {e}", flush=True)
         return None
 
 
@@ -1423,8 +1428,8 @@ def tts_web(text, lang=None):
                     wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(22050)
                     wf.writeframes(p.stdout)
                 return buf.getvalue(), "audio/wav"
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[tts] Piper (web /tts) error: {e}", flush=True)
 
     return None, None
 
@@ -1467,8 +1472,8 @@ def _whisper_multipart(url, api_key, wav_bytes, model, prompt=None, language=Non
         if r.status_code == 429:
             _groq_stt_rate_limited_until = time.time() + 300  # back off for 5 minutes
             print(f"[stt] Whisper 429 — skipping for 5 min", flush=True)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[stt] Whisper request failed: {e}", flush=True)
     return ""
 
 
@@ -1551,7 +1556,8 @@ def _stt_vosk(wav_bytes):
                 results.append(_json.loads(rec.Result()).get("text", ""))
         results.append(_json.loads(rec.FinalResult()).get("text", ""))
         return " ".join(r for r in results if r).strip()
-    except Exception:
+    except Exception as e:
+        print(f"[stt] vosk error: {e}", flush=True)
         return ""
 
 
@@ -1569,7 +1575,8 @@ def _stt_faster_whisper(wav_bytes):
         text = " ".join(s.text for s in segments).strip()
         _os.unlink(tmp)
         return text
-    except Exception:
+    except Exception as e:
+        print(f"[stt] faster-whisper error: {e}", flush=True)
         return ""
 
 
@@ -1711,8 +1718,8 @@ def _voice_coach_record_and_transcribe(adev: str, max_seconds: int = 60,
             t = fut.result(timeout=30)
             if t and t.strip():
                 parts.append(t.strip())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[stt] chunk transcription failed: {e}", flush=True)
     executor.shutdown(wait=False)
     return ' '.join(parts).strip() or None
 
@@ -1761,8 +1768,8 @@ def bt_verify_connected():
             _BT_AUDIO_DEV = ""
             _BT_RATE = 44100
             _BT_CHANNELS = 1
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[bt] verify_connected check failed: {e}", flush=True)
 
 
 def bt_detect_connected():
@@ -1799,8 +1806,8 @@ def bt_detect_connected():
                             _BT_RATE = int(mr.group(1))
                     print(f"[bt] auto-detected connected headphones: {_BT_AUDIO_DEV} ({_BT_RATE}Hz {_BT_CHANNELS}ch)")
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[bt] detect_connected query failed: {e}", flush=True)
         if attempt < 1:
             _t.sleep(1)
 
@@ -1827,7 +1834,8 @@ def bt_list():
                 connected = False
             devices.append((mac, name, connected))
         return devices
-    except Exception:
+    except Exception as e:
+        print(f"[bt] bt_list failed: {e}", flush=True)
         return []
 
 
@@ -1861,8 +1869,8 @@ def bt_scan(timeout: int = 10) -> list[tuple[str, str]]:
                             found[mac] = name
                 except ValueError:
                     pass
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[bt] paired device listing failed: {e}", flush=True)
     return [(mac, name) for mac, name in found.items() if name and not _MAC_RE.match(name)]
 
 
@@ -1906,7 +1914,8 @@ def bt_pair(mac: str) -> bool:
         proc.stdin.write(f"pair {mac}\ntrust {mac}\nexit\n"); proc.stdin.flush()
         proc.wait(timeout=20)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[bt] pair fallback failed: {e}", flush=True)
         return False
 
 
@@ -1932,7 +1941,8 @@ def bt_connect(mac: str) -> bool:
             bt_detect_connected()
             return True
         return False
-    except Exception:
+    except Exception as e:
+        print(f"[bt] connect fallback failed: {e}", flush=True)
         return False
 
 
@@ -1948,8 +1958,8 @@ def bt_disconnect(mac: str) -> None:
             ["bluetoothctl", "disconnect", mac],
             capture_output=True, timeout=10,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[bt] disconnect fallback failed: {e}", flush=True)
     _BT_AUDIO_DEV = ""
 
 
@@ -2088,7 +2098,8 @@ def bt_hfp_detect() -> str:
         )
         m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=sco', result.stdout)
         return m.group(1) if m else ""
-    except Exception:
+    except Exception as e:
+        print(f"[call] bt_hfp_detect failed: {e}", flush=True)
         return ""
 
 
@@ -2145,8 +2156,8 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
         wav = groq_tts(text, voice=orpheus_voice)
         if wav:
             src_fmt = "wav"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[call] Orpheus TTS error: {e}", flush=True)
 
     # 2. Cartesia (~100ms cloud TTS) — voice selected by persona
     if not wav:
@@ -2336,8 +2347,8 @@ def bt_ensure_hfp_connected(timeout: int = 15) -> str:
             if mac:
                 print(f"[bt] Connected via HFP: {device_mac}", flush=True)
                 return mac
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[bt] connect attempt for {device_mac} failed: {e}", flush=True)
 
     # 4. No paired device worked — scan for a new one
     print(f"[bt] No paired devices connected. Scanning for {timeout}s...", flush=True)
@@ -2693,8 +2704,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             _pw.stdout.read()
             _pw.wait()
             print("[call] Piper pre-warmed", flush=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[call] Piper pre-warm failed: {e}", flush=True)
 
     call_type = "unknown"
     ivr_context = ""
@@ -3328,8 +3339,8 @@ def get_weekly_parsha():
                 _weekly_parsha_cache["parsha"] = result
                 _weekly_parsha_cache["fetched_date"] = today
                 return result
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[gcal] weekly parsha fetch failed: {e}", flush=True)
     return None
 
 
@@ -3365,7 +3376,8 @@ def get_parsha_text(parsha_info, max_chars=7000):
                 total += len(chunk)
         con.close()
         return "\n\n".join(texts)
-    except Exception:
+    except Exception as e:
+        print(f"[db] get_parsha_text failed: {e}", flush=True)
         return ""
 
 
@@ -3391,7 +3403,8 @@ def torah_search(query, k=3):
         ).fetchall()
         con.close()
         return rows
-    except Exception:
+    except Exception as e:
+        print(f"[db] torah_search failed: {e}", flush=True)
         return []
 
 
@@ -3428,7 +3441,8 @@ def load_latest_reflection():
                 "SELECT content FROM reflections ORDER BY id DESC LIMIT 1"
             ).fetchone()
         _WEEKLY_REFLECTION = row["content"] if row else ""
-    except Exception:
+    except Exception as e:
+        print(f"[db] load_latest_reflection failed: {e}", flush=True)
         _WEEKLY_REFLECTION = ""
 
 
@@ -3502,7 +3516,8 @@ def _wifi_scan_aps() -> list[dict]:
                 signal = int(m.group(2))
                 aps.append({"macAddress": bssid, "signalStrength": signal})
         return aps
-    except Exception:
+    except Exception as e:
+        print(f"[gps] wifi scan failed: {e}", flush=True)
         return []
 
 
@@ -3530,8 +3545,8 @@ def _wifi_geolocate(aps: list[dict]) -> dict | None:
                 acc = data.get("accuracy", 9999)
                 if loc and acc < 10000:
                     return {"lat": loc["lat"], "lon": loc["lng"], "accuracy": acc, "method": "wifi+google"}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[gps] Google geolocation request failed: {e}", flush=True)
 
     # 2) beacondb (MLS successor, community-sourced, no key required)
     try:
@@ -3543,8 +3558,8 @@ def _wifi_geolocate(aps: list[dict]) -> dict | None:
             # Only trust it when accuracy < 1000m (not an IP fallback)
             if loc and acc < 1000:
                 return {"lat": loc["lat"], "lon": loc["lng"], "accuracy": acc, "method": "wifi+beacondb"}
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[gps] beacondb geolocation request failed: {e}", flush=True)
 
     return None
 
@@ -3629,8 +3644,8 @@ def _reverse_geocode(lat: float, lon: float) -> dict:
                 "zip": addr.get("postcode", ""),
                 "display_name": data.get("display_name", ""),
             }
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[gps] reverse geocode failed: {e}", flush=True)
     return {}
 
 
@@ -4584,8 +4599,8 @@ def init_mic():
             ["amixer", "-c", "wm8960soundcard", "sset", "ADC PCM", "220"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[audio] init_mic gain set failed: {e}", flush=True)
 
 
 def capture_image(width=1280, height=720):
@@ -4613,7 +4628,8 @@ def capture_image(width=1280, height=720):
             except Exception:
                 pass
         return base64.b64encode(jpeg).decode()
-    except Exception:
+    except Exception as e:
+        print(f"[camera] capture_image failed: {e}", flush=True)
         return None
 
 
@@ -6230,7 +6246,8 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         return r.stdout if r.stdout else None
-    except Exception:
+    except Exception as e:
+        print(f"[stt] _record_chunk failed: {e}", flush=True)
         return None
 
 
@@ -6355,8 +6372,8 @@ def _start_openwakeword_listener(voice_queue, stop_event, device="plughw:wm8960s
                 proc.terminate()
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[stt] openwakeword listener crashed: {e}", flush=True)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -6478,8 +6495,8 @@ def run_device_mode():
             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", "113"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[audio] startup speaker volume set failed: {e}", flush=True)
 
     # Set BT headphone volume if connected (raw 50/127 ≈ 39%)
     if _BT_AUDIO_DEV:
@@ -6488,8 +6505,8 @@ def run_device_mode():
                 ["amixer", "-D", "bluealsa", "cset", "numid=2", "50"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[audio] startup BT volume set failed: {e}", flush=True)
     init_mic()
 
     board  = WhisplayBoard()
@@ -6718,8 +6735,8 @@ def run_device_mode():
                     p.stdin.write(_KEEPALIVE_SILENCE)
                     p.stdin.close()
                     p.wait(timeout=5)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[audio] WM8960 keepalive failed: {e}", flush=True)
 
         threading.Thread(target=_keepalive_loop, daemon=True).start()
 
@@ -7650,8 +7667,8 @@ def run_device_mode():
                     import datetime as _dt
                     with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
                         _ef.write(f"{_dt.datetime.now().isoformat()} Vision [{status_code}]: {detail[:300]}\n")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[llm] failed to write zeev_errors.log: {e}", flush=True)
                 display_msg = "Rate limited" if status_code == 429 else f"LLM err {status_code}"
                 _set_face("error", display_msg)
                 board.set_rgb(*_LED_ERROR)
@@ -7794,8 +7811,8 @@ def run_device_mode():
             try:
                 with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
                     _ef.write(f"{_dt.datetime.now().isoformat()} LLM [{status_code}]: {detail[:300]}\n")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[llm] failed to write zeev_errors.log: {e}", flush=True)
             if status_code == 429:
                 display_msg = "Rate limited"
             elif err and ("resolve" in err.lower() or "connection" in err.lower() or "timeout" in err.lower()):
@@ -7898,7 +7915,8 @@ def run_device_mode():
             t0 = time.perf_counter()
             try:
                 wav = _rec_file.read_bytes() if _rec_file.exists() else b""
-            except Exception:
+            except Exception as e:
+                print(f"[stt] recording read failed: {e}", flush=True)
                 wav = b""
 
             if len(wav) < 1000:
@@ -7969,7 +7987,8 @@ def run_device_mode():
                 _wake_rec_proc[0] = proc
                 wav, _ = proc.communicate()
                 _wake_rec_proc[0] = None
-            except Exception:
+            except Exception as e:
+                print(f"[stt] wake listener arecord failed: {e}", flush=True)
                 _wake_rec_proc[0] = None
                 time.sleep(0.5)
                 continue
@@ -8214,7 +8233,8 @@ def run_call_mode(number: str, intent: str = "") -> None:
     # Load prior conversation context for the LLM
     try:
         session = load_prior()
-    except Exception:
+    except Exception as e:
+        print(f"[db] load_prior failed: {e}", flush=True)
         session = []
 
     record_dir = str(BASE_DIR / "data" / "call_recordings")
@@ -8267,7 +8287,8 @@ def run_call_mode(number: str, intent: str = "") -> None:
             return ""
         try:
             return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        except Exception:
+        except Exception as e:
+            print(f"[call] LLM response parse failed: {e}", flush=True)
             return ""
 
     print("[call] Starting bt_call_loop...", flush=True)
@@ -8313,8 +8334,8 @@ def main():
         zeev_cleanup()
         try:
             readline.write_history_file(str(RL_HISTORY))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[shutdown] history save failed: {e}", flush=True)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)

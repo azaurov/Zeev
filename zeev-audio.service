@@ -4,7 +4,9 @@ After=sound.target bluetooth.target network.target
 Wants=bluetooth.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
 User=ragnar
 ExecStart=/home/ragnar/zeev-audio/zeev-audio --socket /tmp/zeev-audio.sock
 Restart=on-failure

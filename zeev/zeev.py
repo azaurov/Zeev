@@ -733,6 +733,15 @@ def lang_switch_intent(text):
     m = _LANG_SWITCH_RE.search(text)
     if not m:
         return None
+    # Requests like "say the Hebrew alphabet" or "spell a Russian word" name
+    # the language as a content topic, not a command to switch — a preceding
+    # article ("the"/"a"/"an") or a following content noun ("alphabet",
+    # "word", "letter", ...) means it isn't an actual switch request.
+    if re.search(r"\b(the|a|an)\s+$", text[:m.start(3)], re.IGNORECASE):
+        return None
+    if re.match(r"\s*(alphabet|word|letter|phrase|sentence|language|character)s?\b",
+                text[m.end(3):], re.IGNORECASE):
+        return None
     word = re.sub(r"[\s\-]+", "-", m.group(3).lower())
     return _LANG_WORD_TO_CODE.get(word)
 

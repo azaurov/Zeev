@@ -157,12 +157,6 @@ for _p, _cfg in _CALL_VOICES.items():
     if _env_val:
         _cfg["cartesia"] = _env_val
 
-# Wake-word (openwakeword)
-WAKE_WORD_ENABLED   = os.environ.get("WAKE_WORD_ENABLED",   "").lower() == "true"
-WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep names/paths
-WAKE_WORD_THRESHOLD = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
-WAKE_WORD_COOLDOWN  = float(os.environ.get("WAKE_WORD_COOLDOWN",  "1.5"))
-
 # Wake-word (Porcupine) — the local detector used by device mode. Unlike the
 # cloud-STT fallback it costs nothing per utterance, so the mic can stay armed
 # continuously. PORCUPINE_KEYWORD_PATH is a custom "Miss Minutes" .ppn built on
@@ -6313,14 +6307,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 # ---------------------------------------------------------------------------
 # Wake word listener
 # ---------------------------------------------------------------------------
-# openwakeword (preferred) with RMS fallback.
-# Set WAKE_WORD_ENABLED=true in .env to activate openwakeword.
-# Install: pip install openwakeword  (also needs numpy and sox)
-# Models: set WAKE_WORD_MODELS=hey_jarvis or a comma-sep list of model paths/names.
-# Without WAKE_WORD_ENABLED the legacy RMS keyword listener is used.
+# Shared audio primitives for device mode's wake listener. The listener itself
+# lives in run_device_mode (Porcupine front-end, cloud-STT fallback).
 # ---------------------------------------------------------------------------
-
-_WAKE_WORDS = {"listen", "hey listen"}   # legacy fallback
 
 
 def _rms(wav_bytes):
@@ -6441,140 +6430,6 @@ def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
         wf.setframerate(16000)
         wf.writeframes(raw)
     return buf.getvalue()
-
-
-def _play_beep(device="plughw:wm8960soundcard,0"):
-    """Play a short 880 Hz acknowledgment beep."""
-    try:
-        import struct, math, wave as _wave, io as _io
-        sr, dur, freq = 16000, 0.12, 880
-        samples = [int(28000 * math.sin(2 * math.pi * freq * i / sr))
-                   for i in range(int(sr * dur))]
-        raw = struct.pack(f"<{len(samples)}h", *samples)
-        buf = _io.BytesIO()
-        with _wave.open(buf, "wb") as wf:
-            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
-            wf.writeframes(raw)
-        subprocess.run(
-            ["aplay", "-D", device, "-q", "-"],
-            input=buf.getvalue(),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
-def _openwakeword_available():
-    try:
-        import openwakeword  # noqa: F401
-        import numpy          # noqa: F401
-        return shutil.which("sox") is not None
-    except ImportError:
-        return False
-
-
-def _start_openwakeword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
-    """Launch openwakeword as a subprocess (via sox), emit voice events on detection."""
-    import importlib.util, os as _os
-
-    wakeword_script = Path(__file__).parent / "wakeword.py"
-
-    env = dict(_os.environ)
-    if WAKE_WORD_MODELS:
-        env["WAKE_WORDS"] = WAKE_WORD_MODELS
-    env["WAKE_WORD_THRESHOLD"] = str(WAKE_WORD_THRESHOLD)
-    env["WAKE_WORD_COOLDOWN_SEC"] = str(WAKE_WORD_COOLDOWN)
-
-    def _run():
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, str(wakeword_script)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=env,
-            )
-            buf = ""
-            while not stop_event.is_set():
-                line_bytes = proc.stdout.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode().strip()
-                if line.startswith("WAKE"):
-                    _play_beep(device)
-                    follow_wav = _record_utterance(device)
-                    if follow_wav:
-                        transcript = stt(follow_wav)
-                        if transcript and transcript.strip():
-                            voice_queue.put(("voice", transcript.strip()))
-                elif line == "[WakeWord] READY":
-                    pass  # model loaded OK
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[stt] openwakeword listener crashed: {e}", flush=True)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def _start_rms_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
-    """Legacy RMS-threshold keyword listener (fallback when openwakeword unavailable)."""
-
-    def _run():
-        _noise_floor = []
-        for _ in range(3):
-            w = _record_chunk(1.0, device)
-            if w:
-                _noise_floor.append(_rms(w))
-        rms_gate = int(max(_noise_floor) * 1.5) if _noise_floor else 3000
-
-        while not stop_event.is_set():
-            wav = _record_chunk(2.0, device)
-            if not wav or stop_event.is_set():
-                continue
-            if _rms(wav) < rms_gate:
-                continue
-
-            text = stt(wav)
-            if not text:
-                continue
-
-            low = text.lower().strip()
-            triggered = any(w in low for w in _WAKE_WORDS)
-            if not triggered:
-                continue
-
-            utterance_after_wake = low
-            for w in sorted(_WAKE_WORDS, key=len, reverse=True):
-                if utterance_after_wake.startswith(w):
-                    utterance_after_wake = utterance_after_wake[len(w):].lstrip(" ,.")
-                    break
-
-            _play_beep(device)
-
-            if len(utterance_after_wake) > 2:
-                voice_queue.put(("voice", utterance_after_wake))
-                continue
-
-            follow_wav = _record_utterance(device)
-            if follow_wav:
-                follow_text = stt(follow_wav)
-                if follow_text and follow_text.strip():
-                    voice_queue.put(("voice", follow_text.strip()))
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def start_keyword_listener(voice_queue, stop_event, device="plughw:wm8960soundcard,0"):
-    """Start the best available wake-word listener.
-    Uses openwakeword subprocess if WAKE_WORD_ENABLED=true and deps are present;
-    otherwise falls back to the legacy RMS keyword listener."""
-    wakeword_script = Path(__file__).parent / "wakeword.py"
-    if WAKE_WORD_ENABLED and wakeword_script.exists() and _openwakeword_available():
-        _start_openwakeword_listener(voice_queue, stop_event, device)
-    else:
-        _start_rms_listener(voice_queue, stop_event, device)
 
 
 # ---------------------------------------------------------------------------

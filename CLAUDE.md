@@ -242,6 +242,15 @@ zeev-audio/                  # Go audio daemon (cross-compiled arm64)
 
 Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL): `dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=5,i2c_gpio_scl=6,i2c_gpio_delay_us=10` in `/boot/firmware/config.txt`. Address `0x33` on `/dev/i2c-3`. Hardware I2C `/dev/i2c-1` is used by WM8960 at `0x19`. `zeev/mlx90640.py` uses a `smbus2`-backed busio shim (Adafruit blinka can't route to bus 3 automatically).
 
+### Device-mode turn handling
+
+`handle_transcript(ctx, transcript)` and `finish_turn(ctx, ...)` are **module-level**, not closures. They were 654 lines buried inside `run_device_mode` (which needs the HAT to import), so the intent router — ~19 branches, the largest piece of device-mode logic — could not be imported or tested at all. `run_device_mode` went 2225 → 1597 lines.
+
+- They stay in `zeev.py` rather than a separate module on purpose: they call ~50 module-level functions here (`route_model`, `needs_torah`, `_build_system_prompt`, `extract_bt_intent`, `run_tool_calls`, `youtube_play` …), so a new module means a circular import or prefixing every call — a large diff whose only benefit is file location.
+- **`ctx.session` is the single source of truth.** The handler rebinds it (`ctx.session = ctx.session[-60:]`) while `finish_turn` appends. Two separate references would leave `finish_turn` appending to the pre-truncation list and history would silently stop growing.
+- `_DeviceCtx` uses `__slots__`. Tests subclass it (a subclass without its own `__slots__` gains a `__dict__`) rather than widening the production class.
+- **Voice is resolved once, at the top of the turn**, from `_WAKE_VOICE` if a wake word set it, else inferred from the transcript regex. It used to be resolved only in the LLM fallthrough, so a wake word picked the voice for chat but *not* for music/jokes/language-switch, and the unconsumed value leaked into the next turn. `finish_turn` defaults to `_LAST_VOICE` so every branch honours it. Caught by `tests/test_handle_transcript.py`, not by hand.
+
 ### Whisplay HAT device mode
 
 `python3 zeev/zeev.py --device`

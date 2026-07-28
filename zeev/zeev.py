@@ -3144,6 +3144,14 @@ def _db() -> sqlite3.Connection:
                 content      TEXT    NOT NULL,
                 ts           TEXT    NOT NULL
             );
+            -- Semantic index over `messages`. Vectors are computed remotely on
+            -- bosgame (the Pi has neither the RAM nor the core to embed) and
+            -- cached here, so retrieval itself is a local dot product.
+            CREATE TABLE IF NOT EXISTS message_vecs (
+                message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+                dim        INTEGER NOT NULL,
+                vec        BLOB    NOT NULL
+            );
         """)
         _db_con.commit()
     return _db_con
@@ -3182,12 +3190,23 @@ def load_memory():
 
 
 def save_memory(facts):
+    """Replace the fact table atomically.
+
+    This used to DELETE then re-INSERT outside a transaction, so an exception
+    or a power cut between the two lost every fact the user had ever taught
+    Zeev. The explicit BEGIN makes the swap all-or-nothing.
+    """
     with _db_lock:
         con = _db()
-        con.execute("DELETE FROM facts")
-        for f in facts:
-            con.execute("INSERT INTO facts (fact) VALUES (?)", (f,))
-        con.commit()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("DELETE FROM facts")
+            con.executemany("INSERT OR IGNORE INTO facts (fact) VALUES (?)",
+                            [(f,) for f in facts])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
 
 
 def extract_memory(session_msgs):
@@ -3318,6 +3337,146 @@ def build_rag_index():
             index.setdefault(word, []).append(i)
     _HISTORY_ENTRIES = entries
     _HISTORY_INDEX   = index
+
+
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+_EMBED_DISABLED = [False]   # set after a hard failure so we stop retrying every turn
+
+
+def embed_text(text, timeout=20):
+    """Return a list[float] embedding from bosgame, or None if unavailable.
+
+    Embedding runs remotely for the same reason Russian TTS does: the Pi Zero 2W
+    has one usable core and ~200MB headroom. Returning None is a normal outcome
+    (offline, bosgame down) -- every caller falls back to the keyword index.
+    """
+    if _EMBED_DISABLED[0] or not BOSGAME_URL or not text or not text.strip():
+        return None
+    try:
+        r = requests.post(
+            f"{BOSGAME_URL.rstrip('/')}/api/embeddings",
+            headers={"X-Zeev-Key": BOSGAME_KEY, "Content-Type": "application/json"},
+            json={"model": EMBED_MODEL, "prompt": text[:8000]},
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            print(f"[embed] HTTP {r.status_code}", flush=True)
+            return None
+        vec = r.json().get("embedding")
+        return vec if vec else None
+    except Exception as e:
+        print(f"[embed] failed: {e}", flush=True)
+        return None
+
+
+def _vec_pack(vec):
+    import struct
+    return struct.pack(f"<{len(vec)}f", *vec)
+
+
+def _vec_unpack(blob, dim):
+    import struct
+    return struct.unpack_from(f"<{dim}f", blob)
+
+
+def _cosine(a, b):
+    import math
+    dot = na = nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def index_message_vec(message_id, content):
+    """Embed one message and cache the vector. Safe to call in a background thread."""
+    vec = embed_text(content)
+    if not vec:
+        return False
+    try:
+        with _db_lock:
+            con = _db()
+            con.execute(
+                "INSERT OR REPLACE INTO message_vecs (message_id, dim, vec) VALUES (?, ?, ?)",
+                (message_id, len(vec), _vec_pack(vec)),
+            )
+            con.commit()
+        return True
+    except Exception as e:
+        print(f"[embed] store failed: {e}", flush=True)
+        return False
+
+
+def backfill_message_vecs(limit=200, verbose=False):
+    """Embed messages that have no vector yet. Returns how many were added.
+
+    Deliberately bounded: on a Pi this runs in a background thread against a
+    remote service, and the whole corpus at once would hammer both.
+    """
+    with _db_lock:
+        rows = _db().execute(
+            "SELECT m.id, m.content FROM messages m "
+            "LEFT JOIN message_vecs v ON v.message_id = m.id "
+            "WHERE v.message_id IS NULL AND length(m.content) > 15 "
+            "ORDER BY m.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    done = 0
+    for r in rows:
+        if index_message_vec(r["id"], r["content"]):
+            done += 1
+        elif _EMBED_DISABLED[0]:
+            break
+    if verbose or done:
+        print(f"[embed] backfilled {done}/{len(rows)} message vectors", flush=True)
+    return done
+
+
+def retrieve_semantic(query, k=2, min_sim=0.55):
+    """Semantic counterpart to retrieve_relevant, over the cached vectors.
+
+    Unlike the keyword index this is not limited to the last 500 messages and
+    is not ASCII-only, so Hebrew/Russian/Spanish history is reachable for the
+    first time -- _tokenize's \\b[a-z]{3,} pattern never matched any of it.
+    """
+    qv = embed_text(query)
+    if not qv:
+        return []
+    try:
+        with _db_lock:
+            rows = _db().execute(
+                "SELECT v.message_id, v.dim, v.vec, m.role, m.content "
+                "FROM message_vecs v JOIN messages m ON m.id = v.message_id "
+                "WHERE m.role = 'user'"
+            ).fetchall()
+    except Exception as e:
+        print(f"[embed] query failed: {e}", flush=True)
+        return []
+
+    scored = []
+    for r in rows:
+        if r["dim"] != len(qv):
+            continue          # model changed; stale vectors are simply skipped
+        scored.append((_cosine(qv, _vec_unpack(r["vec"], r["dim"])), r["message_id"], r["content"]))
+    if not scored:
+        return []
+    scored.sort(reverse=True)
+
+    pairs = []
+    for sim, mid, content in scored[:k * 3]:
+        if sim < min_sim or len(pairs) >= k:
+            break
+        with _db_lock:
+            nxt = _db().execute(
+                "SELECT content FROM messages WHERE id > ? AND role = 'assistant' "
+                "ORDER BY id LIMIT 1", (mid,),
+            ).fetchone()
+        if nxt:
+            pairs.append((content, nxt["content"]))
+    return pairs
 
 
 def retrieve_relevant(query, k=2, min_score=2):
@@ -3539,7 +3698,12 @@ def load_quantum_insights(k=3):
 
 
 def load_latest_reflection():
-    """Load the most recent weekly reflection into _WEEKLY_REFLECTION."""
+    """Load the most recent weekly reflection into _WEEKLY_REFLECTION.
+
+    Called at startup *and* periodically: weekly_reflection.py runs from cron
+    and writes a new row, but a device that stays up for weeks would otherwise
+    keep injecting the reflection it read on boot.
+    """
     global _WEEKLY_REFLECTION
     try:
         with _db_lock:
@@ -3562,6 +3726,32 @@ def init_learning():
     build_rag_index()
     load_jokes()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
+    threading.Thread(target=_memory_maintenance_loop, daemon=True).start()
+
+
+_MEMORY_MAINT_INTERVAL = 1800   # 30 min
+
+
+def _memory_maintenance_loop():
+    """Keep the semantic index and the weekly reflection current.
+
+    Both are startup-only otherwise: a device that stays up for weeks never
+    sees a new reflection, and messages written after boot never get embedded.
+    Runs in the background because embedding is a remote call and this must
+    never sit in a turn's critical path.
+    """
+    # Give startup (TTS warmup, wake model load) the core first.
+    time.sleep(60)
+    while True:
+        try:
+            backfill_message_vecs(limit=50)
+        except Exception as e:
+            print(f"[embed] backfill loop error: {e}", flush=True)
+        try:
+            load_latest_reflection()
+        except Exception as e:
+            print(f"[db] reflection refresh error: {e}", flush=True)
+        time.sleep(_MEMORY_MAINT_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -4576,7 +4766,10 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
         parts.append(f"\n\n## Alex's notes:\n{notes_str}")
 
-    hits = retrieve_relevant(user_text)
+    # Semantic first (reaches the whole corpus and any language), keyword index
+    # as the offline fallback -- embed_text returns None when bosgame is
+    # unreachable, and a travelling Pi must still get *some* recall.
+    hits = retrieve_semantic(user_text) or retrieve_relevant(user_text)
     if hits:
         rag_lines = []
         for u, a in hits:

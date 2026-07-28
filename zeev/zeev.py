@@ -4775,6 +4775,18 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         for u, a in hits:
             rag_lines.append(f"User: {u[:300]}\nZeev: {a[:300]}")
         parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
+        # The keyword index was ASCII-only, so Hebrew/Russian/Spanish history
+        # could never surface here. Semantic retrieval reaches it, which is the
+        # point -- but the 8B model already needs pushing to keep its reply
+        # language straight, and a Cyrillic or Hebrew block in the prompt is
+        # exactly the nudge that makes it answer in the wrong script.
+        rag_blob = " ".join(u + " " + a for u, a in hits)
+        if (_HE_RE.search(rag_blob) or _RU_RE.search(rag_blob)) and not FORCED_LANG:
+            parts.append(
+                "\n\nNote: the past exchanges above may be in another language. "
+                "They are context only — reply in English regardless of the "
+                "script they use."
+            )
 
     if needs_parsha_reading(user_text):
         parsha = get_weekly_parsha()

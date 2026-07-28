@@ -3431,7 +3431,9 @@ def due_reminders(now=None):
 _TOOL_INTENT_RE = re.compile(
     r"\b(remind me|reminder|reminders|set a timer|timer for|wake me|alarm|"
     r"don'?t let me forget|make a note|take a note|note that|jot (this |that )?down|"
-    r"cancel (the |my )?(reminder|timer)|what are my reminders)\b",
+    r"cancel (the |my )?(reminder|timer)|what are my reminders|"
+    r"(put|add|schedule|book|create|stick) .{0,40}\b(on|in|to) (my |the )?calendar|"
+    r"(schedule|book) (a|an|the) \w+|calendar event|new event)\b",
     re.IGNORECASE,
 )
 
@@ -3456,6 +3458,19 @@ _TOOLS = [
         "parameters": {"type": "object", "properties": {
             "id": {"type": "integer", "description": "Reminder id to cancel."},
         }, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "create_calendar_event",
+        "description": "Create an event on the user's Google Calendar. Use for "
+                       "appointments and plans with other people; use set_reminder "
+                       "for a nudge to the user themselves.",
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string", "description": "Event title."},
+            "when": {"type": "string",
+                     "description": "ISO-8601 local datetime for the start, "
+                                    "e.g. 2026-07-30T19:00:00."},
+            "duration_minutes": {"type": "integer",
+                                 "description": "Length in minutes; default 60."},
+        }, "required": ["summary", "when"]}}},
     {"type": "function", "function": {
         "name": "add_note",
         "description": "Save a durable note for the user.",
@@ -3489,6 +3504,12 @@ def run_tool(name, args):
         if name == "cancel_reminder":
             return ("Cancelled." if delete_reminder(int(args.get("id", -1)))
                     else "No reminder with that id.")
+        if name == "create_calendar_event":
+            start, err = gcal_create_event(args.get("summary", ""), args.get("when"),
+                                           args.get("duration_minutes", 60))
+            if err:
+                return f"Could not create the event: {err}"
+            return f"Event created: {args.get('summary','').strip()} on {_fmt_due(start.timestamp())}"
         if name == "add_note":
             text = (args.get("text") or "").strip()
             if not text:
@@ -4292,6 +4313,65 @@ def _gcal_refresh(tok: dict) -> dict:
     )
     GCAL_TOKEN_PATH.write_text(json.dumps(tok))
     return tok
+
+
+def _gcal_access_token():
+    """Return a valid access token, refreshing if needed. Raises on failure."""
+    import datetime as _dt
+    tok = json.loads(GCAL_TOKEN_PATH.read_text())
+    expiry_str = tok.get("expiry", "")
+    expired = True
+    if expiry_str:
+        try:
+            exp = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
+            expired = _dt.datetime.utcnow() >= exp - _dt.timedelta(seconds=60)
+        except ValueError:
+            pass
+    if expired:
+        tok = _gcal_refresh(tok)
+    return tok["token"]
+
+
+def gcal_create_event(summary, when, duration_minutes=60):
+    """Create a calendar event. Returns (start_dt, error); error is None on success.
+
+    Uses _parse_when so voice phrasing behaves identically to reminders --
+    including "in 2 hours" and a bare time already past rolling to tomorrow.
+    """
+    import datetime as _dt
+    if not GCAL_TOKEN_PATH.exists():
+        return None, "no calendar token; run zeev/gcal_auth.py"
+    summary = (summary or "").strip()
+    if not summary:
+        return None, "no event title given"
+    start_ts = _parse_when(when)
+    if start_ts is None:
+        return None, "time not understood"
+
+    start = _dt.datetime.fromtimestamp(start_ts).astimezone()
+    end = start + _dt.timedelta(minutes=max(1, int(duration_minutes or 60)))
+    try:
+        resp = requests.post(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {_gcal_access_token()}",
+                     "Content-Type": "application/json"},
+            json={"summary": summary,
+                  "start": {"dateTime": start.isoformat()},
+                  "end": {"dateTime": end.isoformat()}},
+            timeout=15,
+        )
+    except Exception as e:
+        return None, f"calendar request failed: {e}"
+
+    if resp.status_code in (401, 403):
+        # The most likely cause by far, and invisible otherwise: the stored
+        # token predates the calendar.events scope, so writes are rejected
+        # while reads keep working.
+        return None, ("calendar write not authorized — re-run zeev/gcal_auth.py "
+                      "to grant the events scope")
+    if resp.status_code not in (200, 201):
+        return None, f"calendar API {resp.status_code}: {resp.text[:150]}"
+    return start, None
 
 
 def gcal_fetch(days=1) -> str:

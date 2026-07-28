@@ -199,3 +199,72 @@ def test_tool_intent_matches(zeev, text):
 def test_tool_intent_ignores_ordinary_chat(zeev, text):
     """Ordinary turns must not pay for the extra non-streaming round trip."""
     assert zeev._TOOL_INTENT_RE.search(text) is None, text
+
+
+# ---------------------------------------------------------------------------
+# Calendar write
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "put dinner with Maria on my calendar Thursday at 7",
+    "schedule a dentist appointment for Friday",
+    "book a table for tomorrow night",
+    "add lunch to the calendar tomorrow",
+    "create a calendar event",
+])
+def test_calendar_create_reaches_tool_gate(zeev, text):
+    assert zeev._TOOL_INTENT_RE.search(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    "what's my schedule today",
+    "what is on my schedule",
+    "my schedule is packed",
+    "what do I have tomorrow",
+])
+def test_calendar_read_questions_skip_the_tool_path(zeev, text):
+    """Reads are answered from injected context; sending them through tools
+    costs an extra non-streaming round trip for nothing."""
+    assert zeev._TOOL_INTENT_RE.search(text) is None, text
+
+
+def test_create_event_rejects_bad_time(zeev, tmp_path, monkeypatch):
+    monkeypatch.setattr(zeev, "GCAL_TOKEN_PATH", tmp_path / "tok.json")
+    (tmp_path / "tok.json").write_text("{}")
+    start, err = zeev.gcal_create_event("dinner", "whenever")
+    assert start is None and "not understood" in err
+
+
+def test_create_event_rejects_empty_title(zeev, tmp_path, monkeypatch):
+    monkeypatch.setattr(zeev, "GCAL_TOKEN_PATH", tmp_path / "tok.json")
+    (tmp_path / "tok.json").write_text("{}")
+    start, err = zeev.gcal_create_event("  ", "in 2 hours")
+    assert start is None and "title" in err
+
+
+def test_create_event_without_token(zeev, tmp_path, monkeypatch):
+    monkeypatch.setattr(zeev, "GCAL_TOKEN_PATH", tmp_path / "missing.json")
+    start, err = zeev.gcal_create_event("dinner", "in 2 hours")
+    assert start is None and "token" in err
+
+
+def test_create_event_reports_insufficient_scope(zeev, tmp_path, monkeypatch):
+    """The failure that matters: a token predating the events scope keeps
+    reads working while writes 403, which is otherwise invisible."""
+    monkeypatch.setattr(zeev, "GCAL_TOKEN_PATH", tmp_path / "tok.json")
+    (tmp_path / "tok.json").write_text("{}")
+    monkeypatch.setattr(zeev, "_gcal_access_token", lambda: "tok")
+
+    class Resp:
+        status_code = 403
+        text = "insufficient scope"
+
+    monkeypatch.setattr(zeev.requests, "post", lambda *a, **kw: Resp())
+    start, err = zeev.gcal_create_event("dinner", "in 2 hours")
+    assert start is None and "gcal_auth" in err
+
+
+def test_run_tool_create_event_surfaces_errors(zeev, tmp_path, monkeypatch):
+    monkeypatch.setattr(zeev, "GCAL_TOKEN_PATH", tmp_path / "missing.json")
+    out = zeev.run_tool("create_calendar_event", {"summary": "dinner", "when": "in 2 hours"})
+    assert "could not create" in out.lower()

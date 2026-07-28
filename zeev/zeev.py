@@ -572,7 +572,12 @@ CAMERA_FLIP       = False   # set by load_settings()
 FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
 _LAST_VOICE       = "sarina" # Tracks the last speaker voice for detail continuation
 _MUSIC_PROC       = None    # active mpg123 playback process
-_VOLUME           = 89      # 0–100; applied via amixer
+# Startup speaker volume, 0–100. Kept in sync with the raw amixer value applied
+# in run_device_mode (raw = pct/100 * 127). Lowered from 89 because the speaker
+# sits inches from the mic with no echo cancellation, so a loud reply feeds
+# straight back into the wake detector. Override with ZEEV_VOLUME.
+_STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "65"))))
+_VOLUME           = _STARTUP_VOLUME   # 0–100; applied via amixer
 
 
 def route_model(text):
@@ -6490,12 +6495,14 @@ def run_device_mode():
     init_tts()
     bt_detect_connected()
 
-    # Set speaker volume to ~89% (raw 113 of 0–127)
+    # Startup speaker volume (raw 0–127, derived from _STARTUP_VOLUME)
+    _startup_raw = round(_STARTUP_VOLUME / 100 * 127)
     try:
         subprocess.run(
-            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", "113"],
+            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(_startup_raw)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        print(f"[audio] speaker volume {_STARTUP_VOLUME}% (raw {_startup_raw}/127)", flush=True)
     except Exception as e:
         print(f"[audio] startup speaker volume set failed: {e}", flush=True)
 

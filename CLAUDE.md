@@ -216,7 +216,7 @@ Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL): `dtoverlay=i2c-gpio,bus=3,i2c_g
 `python3 zeev/zeev.py --device`
 
 - **TTS priority**: Groq Orpheus → gTTS + mpg123 (he/es/ru) → Piper (en, one-shot for BT, persistent for speaker) → espeak-ng
-- **Speaker volume**: raw 113 (~89%) via amixer at startup. BT headphone volume: raw 50/127 (~39%).
+- **Speaker volume**: `_STARTUP_VOLUME` (default **65%**, raw 83/127) via amixer at startup; override with `ZEEV_VOLUME`. Lowered from 89% because the speaker is inches from the mic with no echo cancellation — a loud reply feeds back into the wake detector. `_VOLUME` is initialized from the same constant so `/volume` doesn't report a stale value. BT headphone volume: raw 50/127 (~39%).
 - **STT**: Groq Whisper `whisper-large-v3-turbo`.
 - **`_greeting_done` event**: gates the wake listener so it can't self-trigger on the greeting audio through the mic.
 - **Wake word ("Miss Minutes")**: `_wake_listener()` picks one of two front-ends, both feeding the shared `_wake_dispatch()` (session claim → beep → dispatch or record follow-up), so the paths can't drift on state handling.

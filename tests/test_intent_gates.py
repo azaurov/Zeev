@@ -183,15 +183,17 @@ def test_weather_narrower_than_search(zeev):
 # Calendar  (_CALENDAR_RE)
 # ---------------------------------------------------------------------------
 
-def test_calendar_regex_still_swallows_remind_me(zeev):
-    """Documents a KNOWN WART, deliberately asserting current behavior.
+def test_remind_me_now_reaches_the_reminder_tool(zeev):
+    """"remind me to call Dave at 4" used to match only the calendar regex,
+    fire a calendar *read*, and silently discard the intent.
 
-    "remind me to call Dave at 4" matches the calendar regex, fires a calendar
-    *read*, and silently discards the reminder intent -- there is no reminder
-    feature. When Phase 4 adds real reminders, this test should start failing;
-    that is the signal to route the phrase to the new tool instead.
+    _CALENDAR_RE still matches it -- that only injects calendar context and is
+    harmless -- but the tool gate must also match, which is what actually
+    schedules the reminder.
     """
-    assert zeev._CALENDAR_RE.search("remind me to call Dave at 4") is not None
+    text = "remind me to call Dave at 4"
+    assert zeev._TOOL_INTENT_RE.search(text) is not None
+    assert zeev._CALENDAR_RE.search(text) is not None
 
 
 @pytest.mark.parametrize("text", [

@@ -3151,6 +3151,18 @@ def _db() -> sqlite3.Connection:
                 content      TEXT    NOT NULL,
                 ts           TEXT    NOT NULL
             );
+            -- Reminders and timers. due_ts is epoch seconds (UTC); fired is 0
+            -- until the reminder has been announced, so a restart mid-window
+            -- still delivers it rather than dropping it.
+            CREATE TABLE IF NOT EXISTS reminders (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                text       TEXT    NOT NULL,
+                due_ts     REAL    NOT NULL,
+                created_ts REAL    NOT NULL,
+                fired      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminders_due
+                ON reminders (fired, due_ts);
             -- Semantic index over `messages`. Vectors are computed remotely on
             -- bosgame (the Pi has neither the RAM nor the core to embed) and
             -- cached here, so retrieval itself is a local dot product.
@@ -3280,6 +3292,237 @@ def add_note(text):
     with _notes_lock:
         USER_NOTES.append(note)
     return USER_NOTES
+
+
+# ---------------------------------------------------------------------------
+# Reminders / timers
+# ---------------------------------------------------------------------------
+# Zeev had no write capability at all: gcal_fetch is read-only, and _CALENDAR_RE
+# matched "remind me", fired a calendar *read*, and silently dropped the intent
+# -- so "remind me to call Dave at 4" did nothing whatsoever.
+
+_REMINDER_POLL_SEC = 20
+# Set by device mode to its speak function so a due reminder is announced.
+# Left None in web/terminal, where reminders are stored but not spoken.
+_reminder_notify = [None]
+
+
+def _parse_when(when, now=None):
+    """Resolve a reminder time to epoch seconds, or None.
+
+    Accepts ISO-8601 (what the model is asked for, since it is given the
+    current local time) and a few relative forms, because models reliably
+    emit "in 10 minutes" no matter what the schema says.
+    """
+    import datetime as _dt
+    if when is None:
+        return None
+    now_dt = now or _dt.datetime.now()
+    if isinstance(when, (int, float)):
+        return float(when)
+    s = str(when).strip()
+    if not s:
+        return None
+
+    m = re.match(r"^in\s+(\d+(?:\.\d+)?)\s*(second|sec|minute|min|hour|hr|day)s?$",
+                 s, re.IGNORECASE)
+    if m:
+        n = float(m.group(1))
+        unit = m.group(2).lower()
+        mult = {"second": 1, "sec": 1, "minute": 60, "min": 60,
+                "hour": 3600, "hr": 3600, "day": 86400}[unit]
+        return (now_dt + _dt.timedelta(seconds=n * mult)).timestamp()
+
+    try:
+        parsed = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    # A bare time ("16:00") parses to today; if that is already past, the user
+    # plainly meant the next one.
+    if parsed <= now_dt and parsed.date() == now_dt.date():
+        parsed += _dt.timedelta(days=1)
+    return parsed.timestamp()
+
+
+def add_reminder(text, when):
+    """Store a reminder. Returns (id, due_ts) or (None, None) if `when` is unusable."""
+    due = _parse_when(when)
+    if due is None:
+        return None, None
+    text = (text or "").strip()
+    if not text:
+        return None, None
+    now = time.time()
+    with _db_lock:
+        con = _db()
+        cur = con.execute(
+            "INSERT INTO reminders (text, due_ts, created_ts, fired) VALUES (?, ?, ?, 0)",
+            (text, due, now),
+        )
+        con.commit()
+        return cur.lastrowid, due
+
+
+def list_reminders(include_fired=False, limit=20):
+    with _db_lock:
+        q = ("SELECT id, text, due_ts, fired FROM reminders "
+             + ("" if include_fired else "WHERE fired = 0 ")
+             + "ORDER BY due_ts LIMIT ?")
+        rows = _db().execute(q, (limit,)).fetchall()
+    return [{"id": r["id"], "text": r["text"], "due_ts": r["due_ts"], "fired": bool(r["fired"])}
+            for r in rows]
+
+
+def delete_reminder(rid):
+    with _db_lock:
+        con = _db()
+        cur = con.execute("DELETE FROM reminders WHERE id = ?", (rid,))
+        con.commit()
+        return cur.rowcount > 0
+
+
+def due_reminders(now=None):
+    """Claim all reminders that are due, marking them fired in one transaction.
+
+    Claiming and returning must be atomic: the poll loop and a manual check
+    can run concurrently, and a reminder announced twice is worse than late.
+    """
+    now = now if now is not None else time.time()
+    with _db_lock:
+        con = _db()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            rows = con.execute(
+                "SELECT id, text, due_ts FROM reminders WHERE fired = 0 AND due_ts <= ? "
+                "ORDER BY due_ts", (now,),
+            ).fetchall()
+            if rows:
+                con.executemany("UPDATE reminders SET fired = 1 WHERE id = ?",
+                                [(r["id"],) for r in rows])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+    return [{"id": r["id"], "text": r["text"], "due_ts": r["due_ts"]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# LLM tools
+# ---------------------------------------------------------------------------
+# The 17 regexes in _handle_transcript stay the fast path -- a tool-call round
+# trip before dialling would be worse UX than a regex. Tools exist only for
+# actuators that had no gate at all, and are reached via a cheap intent
+# pre-gate so ordinary chat never pays the extra request.
+
+_TOOL_INTENT_RE = re.compile(
+    r"\b(remind me|reminder|reminders|set a timer|timer for|wake me|alarm|"
+    r"don'?t let me forget|make a note|take a note|note that|jot (this |that )?down|"
+    r"cancel (the |my )?(reminder|timer)|what are my reminders)\b",
+    re.IGNORECASE,
+)
+
+_TOOLS = [
+    {"type": "function", "function": {
+        "name": "set_reminder",
+        "description": "Schedule a reminder or timer to be spoken aloud at a given time.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string",
+                     "description": "What to remind the user about, phrased for speech."},
+            "when": {"type": "string",
+                     "description": "ISO-8601 local datetime (e.g. 2026-07-28T16:00:00), "
+                                    "or a relative form like 'in 10 minutes'."},
+        }, "required": ["text", "when"]}}},
+    {"type": "function", "function": {
+        "name": "list_reminders",
+        "description": "List the user's pending reminders.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "cancel_reminder",
+        "description": "Cancel a pending reminder by its id (from list_reminders).",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "integer", "description": "Reminder id to cancel."},
+        }, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "add_note",
+        "description": "Save a durable note for the user.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "The note text."},
+        }, "required": ["text"]}}},
+]
+
+
+def _fmt_due(ts):
+    import datetime as _dt
+    d = _dt.datetime.fromtimestamp(ts)
+    same_day = d.date() == _dt.datetime.now().date()
+    return d.strftime("%-I:%M %p") if same_day else d.strftime("%A at %-I:%M %p")
+
+
+def run_tool(name, args):
+    """Execute one tool call. Returns a short string for the model."""
+    try:
+        if name == "set_reminder":
+            rid, due = add_reminder(args.get("text", ""), args.get("when"))
+            if rid is None:
+                return ("Could not schedule that: the time was not understood. "
+                        "Ask the user to restate it.")
+            return f"Reminder #{rid} set for {_fmt_due(due)}: {args.get('text','').strip()}"
+        if name == "list_reminders":
+            rems = list_reminders()
+            if not rems:
+                return "No pending reminders."
+            return "; ".join(f"#{r['id']} at {_fmt_due(r['due_ts'])}: {r['text']}" for r in rems)
+        if name == "cancel_reminder":
+            return ("Cancelled." if delete_reminder(int(args.get("id", -1)))
+                    else "No reminder with that id.")
+        if name == "add_note":
+            text = (args.get("text") or "").strip()
+            if not text:
+                return "Nothing to save."
+            add_note(text)
+            return f"Note saved: {text}"
+    except Exception as e:
+        print(f"[tools] {name} failed: {e}", flush=True)
+        return f"That failed: {e}"
+    return f"Unknown tool {name}."
+
+
+def run_tool_calls(tool_calls):
+    """Execute a model's tool calls, returning tool-role messages for the follow-up."""
+    out = []
+    for tc in tool_calls or []:
+        fn = (tc.get("function") or {})
+        name = fn.get("name", "")
+        raw = fn.get("arguments") or "{}"
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except json.JSONDecodeError:
+            args = {}
+        result = run_tool(name, args)
+        print(f"[tools] {name}({args}) -> {result}", flush=True)
+        out.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                    "name": name, "content": result})
+    return out
+
+
+def _reminder_loop():
+    """Announce reminders as they come due."""
+    while True:
+        try:
+            for rem in due_reminders():
+                msg = f"Reminder: {rem['text']}"
+                print(f"[reminder] {msg}", flush=True)
+                notify = _reminder_notify[0]
+                if notify:
+                    try:
+                        notify(msg)
+                    except Exception as e:
+                        print(f"[reminder] notify failed: {e}", flush=True)
+        except Exception as e:
+            print(f"[reminder] loop error: {e}", flush=True)
+        time.sleep(_REMINDER_POLL_SEC)
 
 
 def delete_note(idx):
@@ -3734,6 +3977,7 @@ def init_learning():
     load_jokes()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
     threading.Thread(target=_memory_maintenance_loop, daemon=True).start()
+    threading.Thread(target=_reminder_loop, daemon=True).start()
 
 
 _MEMORY_MAINT_INTERVAL = 1800   # 30 min
@@ -4106,8 +4350,12 @@ def gcal_fetch(days=1) -> str:
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_post(msgs, model, stream=True, max_tokens=400):
-    """POST to Groq (OpenAI-compatible). Returns (response, error_str)."""
+def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
+    """POST to Groq (OpenAI-compatible). Returns (response, error_str).
+
+    `tools` sends an OpenAI-style tool schema; callers using it must pass
+    stream=False, since tool calls only arrive complete.
+    """
     msgs = _apply_language_suffix(msgs)
     global _groq_model_rate_limited_until
     if time.time() < _groq_model_rate_limited_until.get(model, 0):
@@ -4115,10 +4363,14 @@ def _groq_post(msgs, model, stream=True, max_tokens=400):
     last_err = ""
     for attempt in range(3):
         try:
+            payload = {"model": model, "messages": msgs,
+                       "temperature": 0.75, "max_tokens": max_tokens, "stream": stream}
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
             resp = requests.post(
                 GROQ_URL,
-                json={"model": model, "messages": msgs,
-                      "temperature": 0.75, "max_tokens": max_tokens, "stream": stream},
+                json=payload,
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 stream=stream,
                 timeout=60,
@@ -8110,6 +8362,42 @@ def run_device_mode():
             "and end with 'Want to hear more?' — do NOT expand further."
         )
         payload_msgs = [{"role": "system", "content": sys_prompt}] + session
+
+        # ── Tool use ─────────────────────────────────────────────────────────
+        # Gated behind a cheap regex so ordinary chat never pays for the extra
+        # non-streaming round trip. Routed to 70B: the 8B default is unreliable
+        # at emitting well-formed tool calls. The model needs the wall clock to
+        # resolve "at 4" -- nothing else in the prompt provides it.
+        if _TOOL_INTENT_RE.search(transcript):
+            tool_model = MODELS["2"][0]
+            tool_sys = sys_prompt + (
+                f"\n\nCurrent local time: {datetime.now().strftime('%A %Y-%m-%d %H:%M')}. "
+                "Use the tools when the user asks to be reminded, to set a timer, "
+                "to save a note, or to list or cancel reminders. Resolve relative "
+                "times against the current time above and pass ISO-8601. After a "
+                "tool runs, confirm in one short spoken sentence."
+            )
+            tool_msgs = [{"role": "system", "content": tool_sys}] + session
+            tresp, terr = _groq_post(tool_msgs, tool_model, stream=False,
+                                     max_tokens=400, tools=_TOOLS)
+            if terr is None and tresp is not None and tresp.status_code == 200:
+                try:
+                    tmsg = tresp.json()["choices"][0]["message"]
+                except Exception as e:
+                    print(f"[tools] bad tool response: {e}", flush=True)
+                    tmsg = {}
+                calls = tmsg.get("tool_calls") or []
+                if calls:
+                    results = run_tool_calls(calls)
+                    payload_msgs = tool_msgs + [tmsg] + results
+                    model_id = tool_model
+                    short = _MODEL_SHORT.get(model_id, "70B")
+                    print(f"[+{time.perf_counter()-t0:.1f}s] tools done, composing reply",
+                          flush=True)
+            else:
+                status = tresp.status_code if tresp is not None else terr
+                print(f"[tools] tool call failed ({status}) — plain chat", flush=True)
+
         if needs_parsha_reading(transcript):
             tok_limit = 1600  # room to recite several chapters
         elif needs_torah(transcript):
@@ -8720,6 +9008,21 @@ def run_device_mode():
 
     threading.Thread(target=_keyboard_listener, daemon=True).start()
     threading.Thread(target=_evdev_listener, daemon=True).start()
+    def _announce_reminder(msg):
+        """Speak a due reminder, but never on top of a live turn."""
+        for _ in range(60):          # wait up to ~2 min for the device to be free
+            if _face_state in ("idle", "ready"):
+                break
+            time.sleep(2)
+        _screen_wake()
+        was_idle = _face_state == "idle"
+        _set_face("speaking", msg)
+        board.set_rgb(*_LED_SPEAKING)
+        _speak_device(msg)
+        _go_idle() if was_idle else _go_ready()
+
+    _reminder_notify[0] = _announce_reminder
+
     threading.Thread(target=_wake_listener, daemon=True).start()
     start_health_monitor(lambda msg: _speak_device(f"Warning: {msg}."))
 

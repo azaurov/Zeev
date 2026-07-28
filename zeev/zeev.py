@@ -171,6 +171,14 @@ OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 # from the mic with no echo cancellation, so without this the tail of Zeev's
 # own reply retriggers the wake word.
 OWW_SETTLE     = float(os.environ.get("OWW_SETTLE",    "1.5"))
+# Skip ONNX inference on frames that are plainly silence. In a quiet room that
+# is nearly all of them, and the model is ~70% of one core when it runs on
+# every 80ms frame. Set OWW_ENERGY_GATE=0 to score every frame.
+OWW_ENERGY_GATE  = os.environ.get("OWW_ENERGY_GATE", "1").lower() not in ("0", "false", "no")
+OWW_ENERGY_MULT  = float(os.environ.get("OWW_ENERGY_MULT", "1.8"))   # × rolling median
+OWW_ENERGY_MIN   = float(os.environ.get("OWW_ENERGY_MIN",  "500"))   # absolute floor
+OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of inference
+OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "6"))      # ~0.5s replayed
 
 # Speak device-mode replies sentence-by-sentence as the LLM generates them,
 # instead of waiting for the whole completion. Set STREAM_TTS=0 to fall back to
@@ -8848,12 +8856,24 @@ def run_device_mode():
         the stream the moment a turn starts.
         """
         import numpy as np
+        from collections import deque
 
         frame_samples = 1280
         frame_bytes = frame_samples * 2
         proc = None
         last_trigger = 0.0
         need_reset = False
+
+        # Energy gate state. openWakeWord scores a *rolling* buffer, so simply
+        # skipping frames would feed it discontinuous audio -- the wake phrase
+        # stitched onto whatever preceded the silence. Instead, on speech onset
+        # we reset the model and replay a short pre-roll, giving it a clean,
+        # contiguous run that covers the attack of the phrase.
+        levels = deque(maxlen=80)         # ~6s of frame RMS, for the noise floor
+        preroll = deque(maxlen=max(1, OWW_PREROLL))
+        hold = 0                          # frames of inference still owed
+        gate = OWW_ENERGY_MIN
+        seen = scored = 0                 # for the periodic skip-ratio log
 
         def _release():
             nonlocal proc
@@ -8910,8 +8930,40 @@ def run_device_mode():
                 _release()
                 continue
 
+            frame = np.frombuffer(data, dtype=np.int16)
+            seen += 1
+
+            if OWW_ENERGY_GATE:
+                rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+                levels.append(rms)
+                if len(levels) == levels.maxlen and seen % 40 == 0:
+                    med = sorted(levels)[len(levels) // 2]
+                    gate = max(med * OWW_ENERGY_MULT, OWW_ENERGY_MIN)
+                if hold > 0:
+                    hold -= 1
+                elif rms >= gate:
+                    # Speech onset. Reset so the buffer holds only this
+                    # utterance, then replay the frames just before the
+                    # threshold was crossed so the start isn't clipped.
+                    try:
+                        model.reset()
+                        for pf in preroll:
+                            model.predict(pf)
+                    except Exception as e:
+                        print(f"[wake] preroll failed: {e}", flush=True)
+                    hold = OWW_HOLD_FRAMES
+                else:
+                    preroll.append(frame)
+                    if seen % 750 == 0:
+                        print(f"[wake] energy gate: scored {scored}/{seen} frames "
+                              f"({100.0 * scored / max(seen, 1):.0f}%), gate {gate:.0f}",
+                              flush=True)
+                    continue
+                preroll.append(frame)
+
             try:
-                scores = model.predict(np.frombuffer(data, dtype=np.int16))
+                scored += 1
+                scores = model.predict(frame)
             except Exception as e:
                 print(f"[wake] predict error: {e}", flush=True)
                 continue

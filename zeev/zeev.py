@@ -7667,7 +7667,11 @@ def run_device_mode():
                 # obviously-wrong turn could not be aborted at all, and with
                 # streaming the state stays "thinking" until the first sentence
                 # flushes -- so presses in that window were silently dropped.
-                _interrupt_tts()         # _process will call _go_ready() when TTS exits
+                _interrupt_tts()
+                # Settle the UI now rather than waiting for the turn thread to
+                # unwind: it still has to finish its HTTP read and post-turn
+                # bookkeeping, which felt like the press hadn't registered.
+                _go_ready() if _busy.is_set() else _go_idle()
             elif current == "listening":
                 # Cancel this turn and end the session
                 proc, _rec_proc = _rec_proc, None
@@ -7723,6 +7727,10 @@ def run_device_mode():
         nonlocal session
         global _LAST_VOICE
         t0 = time.perf_counter()
+        # Cleared here, not just before speaking: a press during "thinking"
+        # sets this while the LLM request is still in flight, and clearing it
+        # later erased the interrupt so the reply spoke in full.
+        _speak_cancel.clear()
 
         print(f"You: {transcript}")
         _set_face("thinking", transcript)
@@ -8164,8 +8172,6 @@ def run_device_mode():
         if STREAM_TTS and getattr(resp, "raw", None) is not None:
             board.set_rgb(*_LED_SPEAKING)
             print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
-            _speak_cancel.clear()
-
             def _mark_first():
                 print(f"[+{time.perf_counter()-t0:.1f}s] First audio", flush=True)
 
@@ -8230,7 +8236,7 @@ def run_device_mode():
 
         # If LLM ended with "Want to hear more?", pre-generate the detail in background
         _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
-        if _WANT_MORE_RE.search(speak_text):
+        if _WANT_MORE_RE.search(speak_text) and not _speak_cancel.is_set():
             _pending_detail_source[0] = transcript
             _pending_detail_ready.clear()
 

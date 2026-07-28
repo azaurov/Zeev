@@ -453,7 +453,16 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			go runSequence(0, 1)
 		}
 
-		first := <-results[0]
+		// Select rather than a plain receive: this waits on the TTS backend for
+		// the first chunk, and a cancel arriving in that window has no aplay to
+		// kill yet. Without this the daemon sat here until the backend replied,
+		// which read as "the button is slow".
+		var first synthResult
+		select {
+		case first = <-results[0]:
+		case <-speechCtx.Done():
+			return audio.ErrSpeechCancelled
+		}
 		if first.err != nil {
 			return first.err
 		}

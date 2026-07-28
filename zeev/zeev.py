@@ -7344,6 +7344,13 @@ def run_device_mode():
             time.sleep(5)
             if _screen_on[0] and _face_state in ("idle", "ready"):
                 if time.time() - _last_activity[0] >= _IDLE_SLEEP_SEC:
+                    # A quiet "ready" session must fall back to "idle", or the
+                    # wake listener (which only runs when idle) stays locked out
+                    # for the rest of the boot — _busy is cleared nowhere else on
+                    # the success path. `session` is left intact, so context survives.
+                    if _face_state == "ready":
+                        _set_face("idle")
+                        _busy.clear()
                     _screen_on[0] = False
                     board.set_backlight(0)
                     board.set_rgb(0, 0, 0)
@@ -7380,16 +7387,18 @@ def run_device_mode():
 
     def _on_press():
         nonlocal _rec_proc
-        # If the screen is asleep, wake it and consume the press.
-        if not _screen_on[0]:
-            _screen_wake()
-            return
+        # Release the mic first: the wake listener runs with the screen off too,
+        # so its arecord can be live on either side of the early return below.
         if _wake_rec_proc[0]:
             try:
                 _wake_rec_proc[0].kill()
             except Exception:
                 pass
             _wake_rec_proc[0] = None
+        # If the screen is asleep, wake it and consume the press.
+        if not _screen_on[0]:
+            _screen_wake()
+            return
         with _state_lock:
             current = _face_state
             if current in ("idle", "ready"):
@@ -8032,6 +8041,9 @@ def run_device_mode():
 
     _DEVICE_WAKE_WORDS = {"miss minutes", "hey miss minutes", "hey, miss minutes"}
     _MIC_DEV = "plughw:wm8960soundcard,0"
+    _RMS_GATE_MIN    = 1200   # never gate below this, or a silent room bills nonstop
+    _RMS_WINDOW      = 60     # rolling chunks (~2 min at 2s each) behind the noise floor
+    _RMS_RECAL_EVERY = 15     # re-derive the gate every N chunks (~30s)
 
     def _wake_listener():
         """Listen for 'Miss Minutes' when idle, then record and process follow-up."""
@@ -8041,7 +8053,15 @@ def run_device_mode():
             w = _record_chunk(1.0, _MIC_DEV)
             if w:
                 _floor.append(_rms(w))
-        rms_gate = int(max(_floor) * 1.5) if _floor else 3000
+        rms_gate = max(int(max(_floor) * 1.5) if _floor else 3000, _RMS_GATE_MIN)
+
+        # Every chunk that clears rms_gate costs a paid cloud-STT round trip, so
+        # a gate calibrated once at boot is a standing bill: boot in a quiet room,
+        # then run a TV all evening, and every 2s window ships to Whisper. Keep a
+        # rolling window of recent levels and re-derive the gate from their median
+        # so the floor tracks the room instead of the moment the Pi started.
+        _levels = []
+        _chunks_seen = 0
 
         def _play_wake_beep():
             import struct, math, wave as _wave, io as _io
@@ -8061,7 +8081,14 @@ def run_device_mode():
                 pass
 
         while True:
-            if _face_state != "idle" or not _screen_on[0]:
+            # "ready" is accepted alongside "idle" so a follow-up right after a
+            # reply still wakes -- gating on "idle" alone left the wake word deaf
+            # for the whole _IDLE_SLEEP_SEC window after every turn, which is
+            # exactly when a follow-up is most likely.
+            # Deliberately does NOT gate on _screen_on[0] either: screen sleep is
+            # a display concern, and a wake word that needs the screen awake is
+            # not a wake word. _screen_wake() runs below once we actually wake.
+            if _face_state not in ("idle", "ready"):
                 time.sleep(0.5)
                 continue
 
@@ -8080,9 +8107,23 @@ def run_device_mode():
                 time.sleep(0.5)
                 continue
 
-            if _face_state != "idle" or proc.returncode != 0:
+            if _face_state not in ("idle", "ready") or proc.returncode != 0:
                 continue
-            if not wav or _rms(wav) < rms_gate:
+            if not wav:
+                continue
+
+            level = _rms(wav)
+            _levels.append(level)
+            _chunks_seen += 1
+            if len(_levels) > _RMS_WINDOW:
+                _levels.pop(0)
+            if len(_levels) >= _RMS_WINDOW and _chunks_seen % _RMS_RECAL_EVERY == 0:
+                median = sorted(_levels)[len(_levels) // 2]
+                new_gate = max(int(median * 2.5), _RMS_GATE_MIN)
+                if new_gate != rms_gate:
+                    print(f"[wake] noise floor moved, gate {rms_gate} → {new_gate}", flush=True)
+                    rms_gate = new_gate
+            if level < rms_gate:
                 continue
 
             text = stt(wav)
@@ -8103,9 +8144,9 @@ def run_device_mode():
                     break
 
             with _state_lock:
-                if _face_state != "idle":
+                if _face_state not in ("idle", "ready"):
                     continue
-                _busy.set()
+                _busy.set()   # already set in "ready"; idempotent
 
             _play_wake_beep()
 

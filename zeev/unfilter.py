@@ -27,7 +27,7 @@ def find_and_update_payloads(model_name):
     #    Update payloads within main application scripts
     #
 
-    main_scripts = ['zeev.py', 'zeev2.py']
+    main_scripts = ['zeev.py']
 
     for script in main_scripts:
 

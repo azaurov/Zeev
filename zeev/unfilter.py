@@ -72,5 +72,3 @@ def find_and_update_payloads(model_name):
 
 
 find_and_update_payloads("Zeev")
-
-# rollback drill marker

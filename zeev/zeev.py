@@ -172,6 +172,11 @@ OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 # own reply retriggers the wake word.
 OWW_SETTLE     = float(os.environ.get("OWW_SETTLE",    "1.5"))
 
+# Speak device-mode replies sentence-by-sentence as the LLM generates them,
+# instead of waiting for the whole completion. Set STREAM_TTS=0 to fall back to
+# the buffered path without a redeploy.
+STREAM_TTS = os.environ.get("STREAM_TTS", "1").lower() not in ("0", "false", "no")
+
 # ---------------------------------------------------------------------------
 # Go audio daemon integration
 # ---------------------------------------------------------------------------
@@ -7054,6 +7059,9 @@ def run_device_mode():
 
     def _interrupt_tts():
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
+        # Stop the streaming speaker from queueing the *next* sentence; killing
+        # the current aplay alone would just move on to the rest of the reply.
+        _speak_cancel.set()
         for p in (_tts_p2, _tts_p1):
             if p:
                 try:
@@ -7082,6 +7090,83 @@ def run_device_mode():
         if buf:
             result.append(buf)
         return result or [text]
+
+    _speak_cancel = threading.Event()
+
+    def _stream_speak(resp, provider, voice="sarina", min_chars=45, on_first=None):
+        """Speak the reply as it is generated, returning the full text.
+
+        Device mode used to wait for the whole completion before saying a word,
+        even though the token-streaming stack already existed for web/terminal.
+        Time-to-first-audio here is one sentence, not one completion.
+
+        Tokens are drained by a producer thread rather than inline: _speak_device
+        blocks for the length of the audio, and a reply long enough to matter
+        (the 1600-token Torah path) would otherwise leave the HTTP response
+        unread long enough for the server to drop it.
+        """
+        import queue as _queue
+        q = _queue.Queue()
+        collected = []
+
+        def _produce():
+            try:
+                for tok in _iter_llm_tokens(resp, provider):
+                    if _speak_cancel.is_set():
+                        break
+                    if tok:
+                        collected.append(tok)
+                        q.put(tok)
+            except Exception as e:
+                print(f"[stream] token read failed: {e}", flush=True)
+            finally:
+                q.put(None)
+
+        threading.Thread(target=_produce, daemon=True).start()
+
+        buf, spoken, first = "", "", True
+        # Greedy up to the LAST terminator, so several short sentences are
+        # batched into one utterance instead of being spoken staccato.
+        sent_re = re.compile(r"^(.*[.!?])(?:\s|$)", re.DOTALL)
+
+        def _say(chunk):
+            nonlocal spoken, first
+            chunk = chunk.strip()
+            if not chunk or _speak_cancel.is_set():
+                return
+            spoken = (spoken + " " + chunk).strip()
+            _set_face("speaking", spoken)
+            if first:
+                first = False
+                if on_first:
+                    on_first()
+            _speak_device(chunk, voice)
+
+        while True:
+            tok = q.get()
+            if tok is None:
+                break
+            buf += tok
+            if _speak_cancel.is_set():
+                break
+            m = sent_re.match(buf)
+            if m and len(m.group(1).strip()) >= min_chars:
+                _say(m.group(1))
+                buf = buf[m.end(1):].lstrip()
+
+        if not _speak_cancel.is_set():
+            tail = buf.strip()
+            if tail:
+                m = re.search(r"^(.*[.!?])\s*$", tail, re.DOTALL)
+                if m:
+                    _say(m.group(1))
+                elif first:
+                    # Nothing spoken yet: a reply with no terminal punctuation
+                    # at all must still be said, or short answers are silent.
+                    _say(tail)
+                # Otherwise drop the dangling fragment, matching the buffered
+                # path's truncate-to-last-sentence behavior.
+        return "".join(collected)
 
     def _progressive_speak(reply, voice="sarina"):
         """Speak reply while progressively revealing sentences on screen."""
@@ -8009,7 +8094,7 @@ def run_device_mode():
             tok_limit = 160
         else:
             tok_limit = 160
-        resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
+        resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
         print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
         # 429 or per-model cooldown on 70B/R1 → fall back to 8B before giving up
@@ -8020,7 +8105,7 @@ def run_device_mode():
             model_id = MODELS["1"][0]
             short    = _MODEL_SHORT.get(model_id, "8B")
             tok_limit = 160
-            resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=tok_limit)
+            resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
             print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
 
         # 413 (request too large) → trim oldest history pairs and retry
@@ -8029,7 +8114,7 @@ def run_device_mode():
             while len(trim_payload) > 2:  # keep at least sys_prompt + current_user
                 trim_payload = [trim_payload[0]] + trim_payload[3:]  # drop oldest user+assistant pair
                 print(f"[llm] 413 — trimmed to {len(trim_payload)} msgs, retrying", flush=True)
-                resp, err = _groq_post(trim_payload, model_id, stream=False, max_tokens=tok_limit)
+                resp, err = _groq_post(trim_payload, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
                 if resp is None or resp.status_code != 413:
                     break
 
@@ -8055,7 +8140,39 @@ def run_device_mode():
             _go_ready() if _busy.is_set() else _go_idle()
             return
 
-        reply = resp.json()["choices"][0]["message"]["content"].strip()
+        # Voice is a function of the transcript only, so it can be chosen before
+        # a single token arrives -- required for the streaming path.
+        _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
+
+        streamed = False
+        if STREAM_TTS and getattr(resp, "raw", None) is not None:
+            board.set_rgb(*_LED_SPEAKING)
+            print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
+            _speak_cancel.clear()
+
+            def _mark_first():
+                print(f"[+{time.perf_counter()-t0:.1f}s] First audio", flush=True)
+
+            try:
+                reply = _stream_speak(resp, "groq", voice=_LAST_VOICE,
+                                      on_first=_mark_first).strip()
+                streamed = bool(reply)
+            except Exception as e:
+                print(f"[stream] failed, falling back to buffered: {e}", flush=True)
+                reply, streamed = "", False
+            if not streamed:
+                print("[stream] empty stream — no reply text", flush=True)
+        if not streamed:
+            try:
+                reply = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                print(f"[llm] could not parse reply: {e}", flush=True)
+                _set_face("error", "Empty reply")
+                board.set_rgb(*_LED_ERROR)
+                time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+
         print(f"Zeev [{short}]: {reply}\n")
         session.append({"role": "assistant", "content": reply})
         append_message("assistant", reply)
@@ -8063,8 +8180,21 @@ def run_device_mode():
         if len(session) > 60:
             session = session[-60:]
 
-        # B — refresh RAG index with the new turn so future turns can recall it
-        build_rag_index()
+        # B — refresh RAG index with the new turn so future turns can recall it.
+        # Backgrounded: this re-reads and re-tokenizes 500 rows, and it was
+        # sitting in the turn's critical path on a single-core Pi. Also embed
+        # the new pair so semantic recall sees it without waiting for the
+        # 30-minute maintenance loop.
+        def _bg_index(_reply=reply, _transcript=transcript):
+            try:
+                build_rag_index()
+            except Exception as e:
+                print(f"[rag] index refresh failed: {e}", flush=True)
+            try:
+                backfill_message_vecs(limit=4)
+            except Exception as e:
+                print(f"[embed] turn backfill failed: {e}", flush=True)
+        threading.Thread(target=_bg_index, daemon=True).start()
 
         # A — auto-memorize every 5 turns in a background thread
         _turn_count[0] += 1
@@ -8116,11 +8246,11 @@ def run_device_mode():
                     _pending_detail_ready.set()
             threading.Thread(target=_prefetch_detail, daemon=True).start()
 
-        board.set_rgb(*_LED_SPEAKING)
-        print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
-        _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
-        print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
-        _progressive_speak(speak_text, voice=_LAST_VOICE)
+        if not streamed:
+            board.set_rgb(*_LED_SPEAKING)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
+            print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
+            _progressive_speak(speak_text, voice=_LAST_VOICE)
         print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 
         _go_ready() if _busy.is_set() else _go_idle()

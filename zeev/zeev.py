@@ -164,7 +164,20 @@ for _p, _cfg in _CALL_VOICES.items():
 #
 # Porcupine was evaluated first and rejected: far cheaper at runtime (0.7% of a
 # core vs ~70%), but custom keywords are Enterprise-only at $6k/yr.
+# Comma-separated: several wake models are scored per frame, and the one that
+# fires selects the reply voice. openWakeWord returns a dict keyed by model
+# name, so the *phrase* is known -- an explicit signal, unlike guessing the
+# voice from a regex over the transcript.
 OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "")
+# "stem:voice,stem:voice" — stem is the .onnx filename without extension.
+OWW_VOICE_MAP = {}
+for _pair in os.environ.get("OWW_VOICE_MAP", "").split(","):
+    if ":" in _pair:
+        _k, _v = _pair.split(":", 1)
+        OWW_VOICE_MAP[_k.strip()] = _v.strip()
+# Set by the wake listener, consumed by the next turn. A button-press turn
+# leaves it None and falls back to inferring the voice from the transcript.
+_WAKE_VOICE = [None]
 OWW_THRESHOLD  = float(os.environ.get("OWW_THRESHOLD", "0.5"))
 OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 # Quiet period after a turn ends before the mic re-arms. The speaker is inches
@@ -7662,7 +7675,13 @@ def handle_transcript(ctx, transcript):
 
     # Voice is a function of the transcript only, so it can be chosen before
     # a single token arrives -- required for the streaming path.
-    _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
+    # A wake word is an explicit choice of who was addressed, so it beats
+    # guessing from the transcript. Consumed here so a following button-press
+    # turn falls back to inference rather than inheriting the last wake voice.
+    if _WAKE_VOICE[0]:
+        _LAST_VOICE, _WAKE_VOICE[0] = _WAKE_VOICE[0], None
+    else:
+        _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
 
     streamed = False
     if STREAM_TTS and getattr(resp, "raw", None) is not None:
@@ -9771,13 +9790,20 @@ def run_device_mode():
                 print(f"[wake] predict error: {e}", flush=True)
                 continue
 
-            score = max(scores.values()) if scores else 0.0
+            # Which model fired matters now, not just how strongly.
+            best_name, score = "", 0.0
+            for _name, _s in (scores or {}).items():
+                if _s > score:
+                    best_name, score = _name, _s
             now = time.time()
             if score < OWW_THRESHOLD or (now - last_trigger) < OWW_COOLDOWN:
                 continue
             last_trigger = now
 
-            print(f"[wake] {label} trigger (score {score:.2f})", flush=True)
+            voice = OWW_VOICE_MAP.get(best_name, "")
+            print(f"[wake] {best_name or label} trigger (score {score:.2f})"
+                  + (f" -> voice {voice}" if voice else ""), flush=True)
+            _WAKE_VOICE[0] = voice or None
             _release()
             try:
                 model.reset()      # don't let this detection re-fire on itself
@@ -9882,20 +9908,28 @@ def run_device_mode():
         _greeting_done.wait()  # don't process mic audio while greeting is playing
 
         model = None
-        if OWW_MODEL_PATH:
-            if not Path(OWW_MODEL_PATH).exists():
-                print(f"[wake] model not found: {OWW_MODEL_PATH}", flush=True)
-            else:
+        paths = [p.strip() for p in OWW_MODEL_PATH.split(",") if p.strip()]
+        missing = [p for p in paths if not Path(p).exists()]
+        for p in missing:
+            print(f"[wake] model not found: {p}", flush=True)
+        paths = [p for p in paths if p not in missing]
+        if paths:
+            if True:
                 try:
                     # One ORT thread: the default spawns one per core and just
                     # contends with the face loop and TTS for no throughput gain.
                     os.environ.setdefault("OMP_NUM_THREADS", "1")
                     from openwakeword.model import Model as _OwwModel
                     t0 = time.time()
-                    model = _OwwModel(wakeword_model_paths=[OWW_MODEL_PATH])
-                    print(f"[wake] openwakeword ready — {Path(OWW_MODEL_PATH).name} "
+                    model = _OwwModel(wakeword_model_paths=paths)
+                    names = ", ".join(Path(p).stem for p in paths)
+                    print(f"[wake] openwakeword ready — {names} "
                           f"in {time.time() - t0:.1f}s, threshold {OWW_THRESHOLD}",
                           flush=True)
+                    for _stem in (Path(p).stem for p in paths):
+                        if _stem not in OWW_VOICE_MAP:
+                            print(f"[wake] note: no voice mapped for {_stem!r}; "
+                                  "replies use the transcript-inferred voice", flush=True)
                 except Exception as e:
                     print(f"[wake] openwakeword init failed, using cloud fallback: {e}",
                           flush=True)
@@ -9905,7 +9939,7 @@ def run_device_mode():
                   "(bills Groq per noisy 2s window, 10s minimum each)", flush=True)
 
         if model:
-            _wake_loop_oww(model, Path(OWW_MODEL_PATH).stem)
+            _wake_loop_oww(model, ", ".join(Path(p).stem for p in paths))
         else:
             _wake_loop_cloud()
 

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,12 +23,12 @@ import (
 
 // State shared across handlers, set once at startup.
 type State struct {
-	PiperProc      *piper.Proc
-	PiperBin       string
-	PiperModel     string
-	RemotePiperURL   string // e.g. https://ollama.sogdiana-gematria.net/piper/tts (bosgame)
-	RemotePiperKey   string // X-Zeev-Key value for RemotePiperURL
-	RemotePiperVoice string // Kokoro voice name, e.g. "af_heart"; empty = server default
+	PiperProc         *piper.Proc
+	PiperBin          string
+	PiperModel        string
+	RemotePiperURL    string       // e.g. https://ollama.sogdiana-gematria.net/piper/tts (bosgame)
+	RemotePiperKey    string       // X-Zeev-Key value for RemotePiperURL
+	RemotePiperVoice  string       // Kokoro voice name, e.g. "af_heart"; empty = server default
 	RemotePiperClient *http.Client // shared, keep-alive-tuned client — see remotePiperSynth
 
 	// Second, independent Kokoro backend (e.g. feiergente01 over LAN). When
@@ -83,7 +84,12 @@ func (s *Server) handle(req proto.Request) proto.Response {
 		} else {
 			err = fmt.Errorf("piper not available; use espeak-ng fallback")
 		}
-		if err != nil {
+		if errors.Is(err, audio.ErrSpeechCancelled) {
+			// Interrupted on purpose (device-mode button). Not a failure --
+			// falling back here would re-speak the entire reply.
+			log.Printf("speak: cancelled")
+			err = nil
+		} else if err != nil {
 			// Fallback: espeak-ng → aplay
 			log.Printf("speak: piper failed (%v), falling back to espeak-ng", err)
 			err = speakEspeak(req.Text, dev)
@@ -192,6 +198,15 @@ func (s *Server) handle(req proto.Request) proto.Response {
 	// ── stop ───────────────────────────────────────────────────────────────
 	case "stop":
 		music.Stop()
+		base.OK = true
+
+	// ── speak_stop ─────────────────────────────────────────────────────────
+	// Cancels in-progress speech. "stop" only stops music, so before this the
+	// device-mode button could not interrupt Zeev at all once the daemon owned
+	// playback -- there was no Python subprocess left for it to kill.
+	case "speak_stop":
+		audio.CancelSpeech()
+		audio.StopPlayback()
 		base.OK = true
 
 	// ── record ─────────────────────────────────────────────────────────────
@@ -385,6 +400,7 @@ func splitFirstClause(sentences []string) []string {
 
 func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) error {
 	btStatus := bt.GetStatus()
+	speechCtx := audio.BeginSpeech()
 
 	if s.state.RemotePiperURL != "" {
 		sentences := splitSentences(text)
@@ -449,7 +465,7 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			outDev, outRate, outCh = btStatus.Dev, btStatus.Rate, btStatus.Channels
 		}
 
-		return audio.APlayPipe(outDev, "S16_LE", outRate, outCh, func(w io.Writer) error {
+		playErr := audio.APlayPipe(outDev, "S16_LE", outRate, outCh, func(w io.Writer) error {
 			writePCM := func(pcm []byte) error {
 				if btStatus.Connected && (outRate != ttsRate || outCh != 1) {
 					var e error
@@ -461,11 +477,22 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 				_, err := w.Write(pcm)
 				return err
 			}
+			if audio.SpeechCancelled(speechCtx) {
+				return audio.ErrSpeechCancelled
+			}
 			if err := writePCM(first.pcm); err != nil {
 				return err
 			}
 			for i := 1; i < len(sentences); i++ {
-				res := <-results[i]
+				// Must select, not plain receive: a cancel during synthesis of
+				// a later sentence would otherwise sit here until the backend
+				// replied, and the reply would finish playing regardless.
+				var res synthResult
+				select {
+				case res = <-results[i]:
+				case <-speechCtx.Done():
+					return audio.ErrSpeechCancelled
+				}
 				if res.err != nil {
 					return res.err
 				}
@@ -475,6 +502,13 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			}
 			return nil
 		})
+		// A cancel kills aplay mid-write, which surfaces as a generic pipe
+		// error; report it as cancellation so the caller does not "recover"
+		// by speaking the whole reply again through espeak.
+		if playErr != nil && audio.SpeechCancelled(speechCtx) {
+			return audio.ErrSpeechCancelled
+		}
+		return playErr
 	}
 
 	// Local Piper path.

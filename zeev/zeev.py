@@ -583,10 +583,12 @@ FORCED_LANG       = None    # None = auto; 'en'/'he'/'es'/'ru' = locked language
 _LAST_VOICE       = "sarina" # Tracks the last speaker voice for detail continuation
 _MUSIC_PROC       = None    # active mpg123 playback process
 # Startup speaker volume, 0–100. Kept in sync with the raw amixer value applied
-# in run_device_mode (raw = pct/100 * 127). Lowered from 89 because the speaker
-# sits inches from the mic with no echo cancellation, so a loud reply feeds
-# straight back into the wake detector. Override with ZEEV_VOLUME.
-_STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "65"))))
+# in run_device_mode (raw = pct/100 * 127). Override with ZEEV_VOLUME.
+# Note the speaker sits inches from the mic with no echo cancellation, so louder
+# settings feed more of Zeev's own voice back into the wake detector; the
+# model.reset() + OWW_SETTLE fix addresses the root cause, but if false wakes
+# reappear at high volume this is the first knob to turn down.
+_STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "90"))))
 _VOLUME           = _STARTUP_VOLUME   # 0–100; applied via amixer
 
 
@@ -7062,6 +7064,14 @@ def run_device_mode():
         # Stop the streaming speaker from queueing the *next* sentence; killing
         # the current aplay alone would just move on to the rest of the reply.
         _speak_cancel.set()
+        # When the daemon is running it owns playback and _tts_p1/_tts_p2 are
+        # None, so the loop below has nothing to kill -- the button did nothing
+        # at all on that path until the daemon grew a speak_stop command.
+        if _audio and _audio.available:
+            try:
+                _audio.speak_stop()
+            except Exception as e:
+                print(f"[tts] daemon speak_stop failed: {e}", flush=True)
         for p in (_tts_p2, _tts_p1):
             if p:
                 try:
@@ -7650,7 +7660,13 @@ def run_device_mode():
                 if not _busy.is_set():
                     _busy.set()
                 _start_recording()
-            elif current == "speaking":
+            elif current in ("speaking", "thinking"):
+                # "thinking" is interruptible now that _speak_cancel gives the
+                # streaming speaker a clean stopping point: the in-flight turn
+                # finishes its request but says nothing. Previously a slow or
+                # obviously-wrong turn could not be aborted at all, and with
+                # streaming the state stays "thinking" until the first sentence
+                # flushes -- so presses in that window were silently dropped.
                 _interrupt_tts()         # _process will call _go_ready() when TTS exits
             elif current == "listening":
                 # Cancel this turn and end the session

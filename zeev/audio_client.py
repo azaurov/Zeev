@@ -199,6 +199,29 @@ class AudioClient:
         r = self._call_safe({"title": ""}, _timeout=30.0, cmd="play", query=query)
         return r.get("title", "")
 
+    def speak_stop(self) -> None:
+        """Cancel in-progress speech playback (daemon-side).
+
+        Deliberately opens its own short-lived connection instead of going
+        through _call: that path serializes every request behind self._lock on
+        a single socket, so a stop sent while speak_sync was in flight would
+        block until the speech it was meant to cancel had already finished.
+        The daemon handles each connection in its own goroutine, so a second
+        connection is served immediately.
+        """
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(self.SOCKET)
+            s.sendall((json.dumps({"cmd": "speak_stop", "id": str(uuid.uuid4())}) + "\n").encode())
+            try:
+                s.recv(256)
+            except socket.timeout:
+                pass
+            s.close()
+        except Exception as e:
+            log.debug("audio_client: speak_stop -> %s", e)
+
     def stop(self) -> None:
         """Stop any in-progress music playback."""
         self._call_safe({}, cmd="stop")

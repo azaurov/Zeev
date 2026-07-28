@@ -1,6 +1,8 @@
 package audio
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -15,7 +17,78 @@ var (
 	// aplayMu serializes all aplay calls so the keepalive goroutine and TTS
 	// cannot open the ALSA device simultaneously (causes broken pipe errors).
 	aplayMu sync.Mutex
+
+	// playMu guards the in-flight aplay process so StopPlayback can kill it.
+	// Deliberately NOT aplayMu: that one is held for the whole duration of
+	// playback, so reusing it would make StopPlayback block until the audio
+	// it is trying to cancel had already finished.
+	playMu  sync.Mutex
+	playCmd *exec.Cmd
+
+	// speechCtx scopes one speak request. Killing aplay is not sufficient on
+	// its own: a multi-sentence reply feeds a single aplay from a loop that
+	// blocks waiting for later sentences to come back from the TTS backend, so
+	// a cancel arriving mid-synthesis has nothing to kill and the loop keeps
+	// waiting. Callers select on Done() to break out of that wait.
+	speechMu     sync.Mutex
+	speechCtx    context.Context
+	speechCancel context.CancelFunc
 )
+
+// ErrSpeechCancelled marks a speak aborted by speak_stop. Callers must treat
+// it as success: it is a deliberate interruption, not a synthesis failure, and
+// retrying through a fallback engine would re-speak the whole reply.
+var ErrSpeechCancelled = errors.New("speech cancelled")
+
+// BeginSpeech opens a new cancellable scope for one speak request,
+// superseding any previous one.
+func BeginSpeech() context.Context {
+	speechMu.Lock()
+	defer speechMu.Unlock()
+	if speechCancel != nil {
+		speechCancel()
+	}
+	speechCtx, speechCancel = context.WithCancel(context.Background())
+	return speechCtx
+}
+
+// CancelSpeech aborts the current speech scope.
+func CancelSpeech() {
+	speechMu.Lock()
+	c := speechCancel
+	speechMu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
+// SpeechCancelled reports whether the given scope has been cancelled.
+func SpeechCancelled(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
+// setPlaying records the in-flight aplay process, or clears it with nil.
+func setPlaying(cmd *exec.Cmd) {
+	playMu.Lock()
+	playCmd = cmd
+	playMu.Unlock()
+}
+
+// StopPlayback kills any in-progress speech playback and latches a cancelled
+// flag, so a multi-sentence reply stops instead of advancing to the next
+// chunk. Returns true if something was actually playing.
+func StopPlayback() bool {
+	CancelSpeech()
+	playMu.Lock()
+	cmd := playCmd
+	playCmd = nil
+	playMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		return true
+	}
+	return false
+}
 
 // GetVolume returns the current volume (0–100).
 func GetVolume() int {
@@ -72,6 +145,8 @@ func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	setPlaying(cmd)
+	defer setPlaying(nil)
 	if _, err := stdin.Write(pcmData); err != nil {
 		stdin.Close()
 		cmd.Wait()
@@ -105,6 +180,8 @@ func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) er
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	setPlaying(cmd)
+	defer setPlaying(nil)
 	feedErr := feed(stdin)
 	stdin.Close()
 	waitErr := cmd.Wait()

@@ -127,6 +127,19 @@ Single-file app: `zeev/zeev.py`.
 | `temperature` | 0.75 |
 | `VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` |
 
+### Reminders / timers (LLM tool calling)
+
+Zeev's only write capabilities. `reminders` table (`text`, `due_ts` epoch, `fired`); `_reminder_loop()` polls every 20s and speaks what's due.
+
+- **`due_reminders()` claims and marks fired in one transaction** — the poll loop can overlap itself and a reminder announced twice is worse than one announced late.
+- **Announcement** waits for `_face_state` to leave `thinking`/`speaking` (up to ~2 min) so it never talks over a live turn, then restores the prior state. Device mode sets `_reminder_notify[0]`; web/terminal store reminders but don't speak them.
+- **Tool calling is deliberately narrow.** The 17 regex gates stay the fast path — a tool round trip before dialling would be worse UX. Tools cover only actuators that had no gate at all: `set_reminder`, `list_reminders`, `cancel_reminder`, `add_note` (which existed but was unreachable from the device).
+- **`_TOOL_INTENT_RE` pre-gates the tool path** so ordinary chat never pays for the extra non-streaming round trip (tool calls only arrive complete, so that request can't stream).
+- **Routed to 70B**: the 8B default is unreliable at emitting well-formed tool calls.
+- **The model is given the wall clock** in the tool system prompt — nothing else in the prompt provides it, so "at 4" was otherwise unresolvable. `_parse_when` also accepts `"in 10 minutes"` because models emit relative forms regardless of the schema, and returns `None` on anything unresolvable so the model re-asks instead of believing it succeeded. A bare time already past rolls to tomorrow.
+- **Calendar write is NOT implemented**: `data/gcal_token.json` holds only `calendar.readonly`; widening it needs interactive Google consent (re-run `zeev/gcal_auth.py`).
+- Verified live on the Pi: *"remind me to call Dave at 4"* → `set_reminder{"when":"2026-07-28T16:00:00"}` → row created.
+
 ### Google Calendar
 
 `gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2), auto-refreshes token, cached 5 min. `needs_calendar(text)` triggers on "calendar"/"schedule"/"meeting" — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30.

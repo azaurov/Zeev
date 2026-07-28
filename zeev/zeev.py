@@ -167,6 +167,10 @@ for _p, _cfg in _CALL_VOICES.items():
 OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "")
 OWW_THRESHOLD  = float(os.environ.get("OWW_THRESHOLD", "0.5"))
 OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
+# Quiet period after a turn ends before the mic re-arms. The speaker is inches
+# from the mic with no echo cancellation, so without this the tail of Zeev's
+# own reply retriggers the wake word.
+OWW_SETTLE     = float(os.environ.get("OWW_SETTLE",    "1.5"))
 
 # ---------------------------------------------------------------------------
 # Go audio daemon integration
@@ -8031,7 +8035,12 @@ def run_device_mode():
         board.set_rgb(*_LED_THINKING)
         _set_face("thinking")
         follow_text = stt(follow_wav)
-        if not follow_text or not follow_text.strip():
+        # Same noise-artifact guard the call loop uses (see bt_call_loop): a
+        # spurious wake picks up room noise, and Whisper answers with confident
+        # nonsense like "A A" -- which then became a real LLM turn.
+        if not follow_text or not follow_text.strip() or not re.search(r"\w{2,}", follow_text):
+            if follow_text and follow_text.strip():
+                print(f"[wake] discarded noise transcript: {follow_text.strip()!r}", flush=True)
             _set_face("error", "Didn't catch that")
             board.set_rgb(*_LED_ERROR)
             time.sleep(2)
@@ -8056,6 +8065,7 @@ def run_device_mode():
         frame_bytes = frame_samples * 2
         proc = None
         last_trigger = 0.0
+        need_reset = False
 
         def _release():
             nonlocal proc
@@ -8070,8 +8080,28 @@ def run_device_mode():
             if _face_state not in ("idle", "ready"):
                 # Free the core and the mic while a turn is in flight.
                 _release()
+                need_reset = True
                 time.sleep(0.3)
                 continue
+
+            if need_reset:
+                # A turn just ended. Two things would otherwise re-fire it
+                # instantly, and together they caused an endless self-triggering
+                # conversation loop when this first shipped:
+                #   1. model.predict() scores a *rolling* buffer of embeddings.
+                #      Killing and restarting arecord does not clear it, so the
+                #      wake phrase from the previous turn is still in there and
+                #      scores 1.00 on the very first fresh frame.
+                #   2. The speaker sits next to the mic with no echo
+                #      cancellation, so the tail of Zeev's own reply is audible.
+                time.sleep(OWW_SETTLE)
+                try:
+                    model.reset()
+                except Exception as e:
+                    print(f"[wake] model reset failed: {e}", flush=True)
+                need_reset = False
+                last_trigger = time.time()   # hold the cooldown from here too
+                continue                     # re-check state before arming
 
             if proc is None or proc.poll() is not None:
                 try:
@@ -8106,7 +8136,12 @@ def run_device_mode():
 
             print(f"[wake] {label} trigger (score {score:.2f})", flush=True)
             _release()
+            try:
+                model.reset()      # don't let this detection re-fire on itself
+            except Exception:
+                pass
             _wake_dispatch("")
+            need_reset = True
 
     def _wake_loop_cloud():
         """Fallback: 2s chunks → RMS gate → speech gate → cloud STT → substring match."""

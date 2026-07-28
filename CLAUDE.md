@@ -142,7 +142,13 @@ Zeev's only write capabilities. `reminders` table (`text`, `due_ts` epoch, `fire
 
 ### Google Calendar
 
-`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2), auto-refreshes token, cached 5 min. `needs_calendar(text)` triggers on "calendar"/"schedule"/"meeting" — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30.
+`gcal_fetch(days=1)` reads `data/gcal_token.json` (OAuth2), auto-refreshes token, cached 5 min. `needs_calendar(text)` triggers on "calendar"/"schedule"/"meeting" — silently skips if token absent. `gcal_days_from_query` maps "tomorrow"→2, "this week"→7, "next week"→14, "this month"→30. `_gcal_access_token()` is the shared load+refresh path for both reads and writes.
+
+**Write** (`gcal_create_event`, exposed as the `create_calendar_event` tool): reuses `_parse_when`, so voice phrasing matches reminders exactly. Requires the **`calendar.events`** scope — `gcal_auth.py` requests it, but an existing token is *not* silently upgraded, so changing scope means re-running that script and consenting again in the browser. A stale read-only token keeps reads working while writes 403, so `gcal_create_event` reports 401/403 as "re-run zeev/gcal_auth.py" rather than a bare status code.
+
+`_TOOL_INTENT_RE` covers calendar phrasing but deliberately requires an article after schedule/book (`schedule a|an|the …`): the looser form also matched "what's my schedule today", a calendar *read*, which would pay for the slow non-streaming tool round trip for nothing.
+
+Verified live: *"put dinner with Maria on my calendar Thursday at 7"* → `create_calendar_event{"summary":"dinner with Maria","when":"2026-07-30T19:00:00"}` → real event created, read back, deleted.
 
 ### GPS / geolocation
 

@@ -1564,19 +1564,25 @@ def load_stt_vocabulary():
     return f"{_DEFAULT_EN_PROMPT} {custom}".strip()
 
 
-def groq_stt(wav_bytes):
+def groq_stt(wav_bytes, prompt=None):
     """Send WAV bytes to Groq Whisper. Returns transcript string or ''.
-    Always transcribes in the current FORCED_LANG (default: English)."""
+    Always transcribes in the current FORCED_LANG (default: English).
+    `prompt` overrides the default vocabulary bias for a specific context."""
     if not GROQ_API_KEY or not wav_bytes:
         return ""
     lang = FORCED_LANG or "en"
-    prompt = _HE_PRAYER_PROMPT if lang == "he" else load_stt_vocabulary()
+    if prompt is None:
+        prompt = _HE_PRAYER_PROMPT if lang == "he" else load_stt_vocabulary()
     return _whisper_multipart(GROQ_STT_URL, GROQ_API_KEY, wav_bytes,
                               "whisper-large-v3-turbo", prompt=prompt, language=lang)
 
 
 # Phone-context Whisper prompt — biases transcription toward call vocabulary,
 # suppresses hallucinations on silence/ring tone.
+_FOLLOWUP_WHISPER_PROMPT = (
+    "Yes. No. Yes please. Sure. Go ahead. Tell me more. Not now. Maybe later."
+)
+
 _CALL_WHISPER_PROMPT = (
     "Hello? Hi, who's this? You've reached. I'm not available right now. "
     "Please leave a message after the beep. Press 1 for. Thank you for calling."
@@ -1658,15 +1664,20 @@ def _stt_speech_recognition(wav_bytes):
         return ""
 
 
-def stt(wav_bytes):
-    """Dispatch to the active STT provider. Returns transcript or ''."""
+def stt(wav_bytes, prompt=None):
+    """Dispatch to the active STT provider. Returns transcript or ''.
+
+    `prompt` biases Whisper for a known context. A bare "yes" recorded on its
+    own is close to worst case -- one short word, no surrounding speech -- and
+    came back as "A" in testing, which the noise guard then discarded.
+    """
     if not wav_bytes:
         return ""
     provider = STT_SERVER
     if provider == "speech-recognition":
         return _stt_speech_recognition(wav_bytes)
     if provider == "groq":
-        return groq_stt(wav_bytes)
+        return groq_stt(wav_bytes, prompt=prompt)
     if provider == "openai":
         if not OPENAI_API_KEY:
             return groq_stt(wav_bytes)   # fall back to groq
@@ -1678,7 +1689,7 @@ def stt(wav_bytes):
         return _stt_vosk(wav_bytes)
     if provider == "faster-whisper":
         return _stt_faster_whisper(wav_bytes)
-    return groq_stt(wav_bytes)   # fallback
+    return groq_stt(wav_bytes, prompt=prompt)   # fallback
 
 
 def voice_coach_feedback(transcript: str) -> str:
@@ -7077,7 +7088,7 @@ class _DeviceCtx:
         "_pending_detail_source", "_turn_count", "_voice_coach_pending",
         "_visual_effect_active",
         "_LED_ERROR", "_LED_SPEAKING", "_LED_THINKING",
-        "_MORE_YES_RE", "_have_pil",
+        "_MORE_YES_RE", "_have_pil", "_followup_listen",
     )
 
 
@@ -7759,6 +7770,24 @@ def handle_transcript(ctx, transcript):
         print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
         ctx._progressive_speak(speak_text, voice=_LAST_VOICE)
     print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+
+    # Zeev just asked a question -- listen for the answer instead of making the
+    # user wake the device to reply to it. The detail is normally pre-generated
+    # by now, so an affirmative plays back immediately.
+    if (ctx._pending_detail_source[0]
+            and getattr(ctx, "_followup_listen", None)
+            and not ctx._speak_cancel.is_set()):
+        answer = ctx._followup_listen()
+        if answer and ctx._MORE_YES_RE.search(answer):
+            # Re-enter with the answer. The pending-detail branch at the top
+            # delivers it and clears the pending state, so this cannot recurse
+            # further than one level.
+            return handle_transcript(ctx, answer)
+        if answer:
+            print("[followup] not an affirmative — dropping pending detail", flush=True)
+        ctx._pending_detail[0] = None
+        ctx._pending_detail_source[0] = None
+        ctx._pending_detail_ready.clear()
 
     ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
 
@@ -8801,6 +8830,29 @@ def run_device_mode():
         _speak_device(reply, voice)
         _go_ready() if _busy.is_set() else _go_idle()
 
+    def _followup_listen(max_seconds=6):
+        """Open the mic so the user can answer a question Zeev just asked.
+
+        Requiring the wake word to answer "Want to hear more?" was the design
+        flaw behind the reported miss: the user has to wake, wait for the beep,
+        then speak, and a lone "yes" recorded that way transcribed as "A" and
+        was dropped by the noise guard. Here the mic opens immediately, and the
+        transcript is matched loosely because we already know the answer is a
+        short yes/no.
+        """
+        _set_face("listening", "…")
+        board.set_rgb(*_LED_RECORDING)
+        try:
+            wav = _record_utterance(_MIC_DEV, max_seconds=max_seconds)
+        except Exception as e:
+            print(f"[followup] record failed: {e}", flush=True)
+            return ""
+        if not wav:
+            return ""
+        text = (stt(wav, prompt=_FOLLOWUP_WHISPER_PROMPT) or "").strip()
+        print(f"[followup] heard: {text!r}", flush=True)
+        return text
+
     # ── Hoisted handler (flag-gated) ─────────────────────────────────────
     # handle_transcript() at module level is a mechanical port of the closure
     # below -- verified identical modulo the ctx. prefix. Both paths exist for
@@ -8811,6 +8863,7 @@ def run_device_mode():
     # (and this flag) should be deleted.
     _ctx = _DeviceCtx()
     _ctx.session = session
+    _ctx._followup_listen = _followup_listen
     for _n in ("board", "_set_face", "_go_idle", "_go_ready", "_speak_device",
                "_progressive_speak", "_stream_speak", "_busy", "_speak_cancel",
                "_pending_detail", "_pending_detail_ready", "_pending_detail_source",

@@ -220,7 +220,12 @@ _SEARCH_RE = re.compile(
 )
 
 def needs_search(text):
-    return bool(_SEARCH_RE.search(text))
+    # Weather is a strict subset of search by construction, not by coincidence:
+    # _build_system_prompt checks needs_weather *nested inside* needs_search, so
+    # any weather phrase the search regex misses gets no Tavily lookup at all
+    # and Zeev answers from the model's imagination. "how hot is it" used to hit
+    # exactly that hole -- caught by tests/test_intent_gates.py.
+    return bool(_SEARCH_RE.search(text)) or needs_weather(text)
 
 _WEATHER_RE = re.compile(r"\b(weather|forecast|temperature outside|how (hot|cold) is it)\b", re.IGNORECASE)
 

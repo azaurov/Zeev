@@ -80,7 +80,7 @@ class AudioClient:
 
     # ── low-level call ───────────────────────────────────────────────────────
 
-    def _call(self, _timeout: float = DEFAULT_TIMEOUT, **kwargs) -> dict:
+    def _call(self, _timeout: float = DEFAULT_TIMEOUT, _retry: bool = True, **kwargs) -> dict:
         """
         Send one request and return the parsed response.
         Reconnects once on broken pipe or read timeout; raises _Disconnected
@@ -96,7 +96,8 @@ class AudioClient:
         kwargs["id"] = str(uuid.uuid4())
         payload = (json.dumps(kwargs) + "\n").encode()
 
-        for attempt in range(2):
+        attempts = 2 if _retry else 1
+        for attempt in range(attempts):
             try:
                 with self._lock:
                     self._sock.settimeout(_timeout)
@@ -106,17 +107,18 @@ class AudioClient:
                     raise _Disconnected("daemon closed connection")
                 return json.loads(line)
             except (socket.timeout, BrokenPipeError, OSError, _Disconnected):
-                if attempt == 0:
+                if attempt < attempts - 1:
                     if not self._reconnect():
                         raise _Disconnected("daemon unavailable after reconnect")
                 else:
                     self._available = False
                     raise _Disconnected("daemon unavailable")
 
-    def _call_safe(self, default, _timeout: float = DEFAULT_TIMEOUT, **kwargs) -> dict:
+    def _call_safe(self, default, _timeout: float = DEFAULT_TIMEOUT,
+                   _retry: bool = True, **kwargs) -> dict:
         """Like _call but returns default on any error."""
         try:
-            return self._call(_timeout=_timeout, **kwargs)
+            return self._call(_timeout=_timeout, _retry=_retry, **kwargs)
         except Exception as e:
             log.debug("audio_client: %s -> %s", kwargs.get("cmd"), e)
             return default
@@ -194,10 +196,23 @@ class AudioClient:
         r = self._call_safe({"ok": False}, _timeout=30.0, cmd="bt_pair", mac=mac)
         return bool(r.get("ok"))
 
-    def play(self, query: str) -> str:
-        """Start YouTube playback; returns the resolved title."""
-        r = self._call_safe({"title": ""}, _timeout=30.0, cmd="play", query=query)
-        return r.get("title", "")
+    def play(self, query: str):
+        """Start YouTube playback. Returns (title, error); error is None on success.
+
+        Long timeout and no retry, both measured rather than guessed: resolving
+        a track with yt-dlp on a Pi Zero 2W takes ~45s, so the old 30s timeout
+        always expired -- and the retry re-sent the same request, starting a
+        second competing download instead of recovering. Worse, the failure
+        surfaced as an empty title, which the caller turned into "Playing X"
+        while nothing played.
+        """
+        r = self._call_safe(None, _timeout=150.0, _retry=False,
+                            cmd="play", query=query)
+        if not r:
+            return None, "audio daemon did not respond"
+        if not r.get("ok"):
+            return None, r.get("error") or "playback failed"
+        return r.get("title") or "", None
 
     def speak_stop(self) -> None:
         """Cancel in-progress speech playback (daemon-side).

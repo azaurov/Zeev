@@ -1179,7 +1179,9 @@ def youtube_play(query, adev=None):
     music_stop()  # stop any current track
 
     if _audio and _audio.available:
-        title = _audio.play(query)
+        title, err = _audio.play(query)
+        if err:
+            return None, err
         return title or query, None
 
     if not shutil.which("yt-dlp"):
@@ -8403,15 +8405,22 @@ def run_device_mode():
             # Confirm *before* starting playback: youtube_play blocks for a few
             # seconds resolving the track, and speaking afterwards would talk
             # over the music it just started.
-            reply = f"Playing {music_query}."
+            # Resolving a track takes ~45s on this hardware (yt-dlp search +
+            # format selection), so it runs in the background: blocking the
+            # turn that long would leave the device unusable and unable to
+            # hear a follow-up.
+            reply = f"Looking for {music_query}."
             print(f"Zeev [music]: {reply}")
             _finish_turn(reply, face=False, led=False)
-            title, err = youtube_play(music_query, adev=bt_audio_dev())
-            if err:
-                print(f"[music] failed: {err}", flush=True)
-                _speak_device("Sorry, I couldn't play that.")
-            else:
-                print(f"[music] playing: {title}", flush=True)
+
+            def _bg_play(q=music_query):
+                title, err = youtube_play(q, adev=bt_audio_dev())
+                if err:
+                    print(f"[music] failed: {err}", flush=True)
+                    _speak_device("Sorry, I couldn't find that one.")
+                else:
+                    print(f"[music] playing: {title}", flush=True)
+            threading.Thread(target=_bg_play, daemon=True).start()
             return
         # ─────────────────────────────────────────────────────────────────────
 

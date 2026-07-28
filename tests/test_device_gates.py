@@ -121,3 +121,58 @@ def test_plain_chat_matches_no_actuator_gate(zeev, text):
     assert zeev._MUSIC_STOP_RE.search(text) is None
     assert zeev.extract_quantum_query(text) is None
     assert zeev._TOOL_INTENT_RE.search(text) is None
+
+
+# ---------------------------------------------------------------------------
+# Music failure must not look like success
+# ---------------------------------------------------------------------------
+
+def test_youtube_play_reports_daemon_failure(zeev, monkeypatch):
+    """A failed play was reported as success: the client swallowed the error
+    and returned an empty title, which youtube_play turned into (query, None).
+    The device then said "Playing X" while nothing played.
+    """
+    class FakeAudio:
+        available = True
+
+        def stop(self):        # youtube_play calls music_stop() first
+            return True
+
+        def play(self, query):
+            return None, "yt-dlp URL: exit status 1"
+
+    monkeypatch.setattr(zeev, "_audio", FakeAudio())
+    title, err = zeev.youtube_play("some song")
+    assert title is None
+    assert err and "yt-dlp" in err
+
+
+def test_youtube_play_success_path(zeev, monkeypatch):
+    class FakeAudio:
+        available = True
+
+        def stop(self):        # youtube_play calls music_stop() first
+            return True
+
+        def play(self, query):
+            return "Miles Davis - So What", None
+
+    monkeypatch.setattr(zeev, "_audio", FakeAudio())
+    title, err = zeev.youtube_play("miles davis")
+    assert err is None and title == "Miles Davis - So What"
+
+
+def test_youtube_play_falls_back_to_query_when_title_empty(zeev, monkeypatch):
+    """An empty title with no error is still success — just an unnamed track."""
+    class FakeAudio:
+        available = True
+
+        def stop(self):        # youtube_play calls music_stop() first
+            return True
+
+        def play(self, query):
+            return "", None
+
+    monkeypatch.setattr(zeev, "_audio", FakeAudio())
+    title, err = zeev.youtube_play("some obscure track")
+    assert err is None and title == "some obscure track"

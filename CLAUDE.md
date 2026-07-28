@@ -182,7 +182,9 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 `youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123.
 
 - **Device mode**: `extract_music_query` (play) and `_MUSIC_STOP_RE` (stop) are gated in `_handle_transcript`, placed **after** the visual gates so "play the fire effect" stays a visual request instead of becoming a search for a song. Before this, music was reachable only from the web UI and terminal — and natural-language *stop* did not exist anywhere, only a `/stop` slash command.
-- The confirmation is spoken **before** playback starts: `youtube_play` blocks for a few seconds resolving the track, so speaking afterwards would talk over the music it just started.
+- Zeev says "Looking for X", then resolves in a **background thread**: yt-dlp search + format selection measured **~45s** on this Pi, and blocking the turn that long left the device unusable and deaf to a follow-up.
+- **yt-dlp must be current.** The apt build (`/usr/bin/yt-dlp`, 2025.04.30) could no longer extract audio at all — YouTube's SABR change made it report "Only images are available". Fixed by installing the upstream binary to `/usr/local/bin/yt-dlp` (which precedes `/usr/bin` on PATH). If music silently stops working, check `yt-dlp --version` first.
+- **`AudioClient.play()` returns `(title, error)`.** It used to return just a title with a 30s timeout and the standard one-shot retry, which was wrong three ways on this hardware: 30s < the ~45s resolve, so it always timed out; the retry re-sent the same request and started a *second competing download*; and the failure surfaced as an empty title that `youtube_play` turned into `(query, None)` — so the device cheerfully said "Playing X" while nothing played. Now 150s, no retry, and errors propagate.
 
 ### Multilingual TTS
 

@@ -179,7 +179,10 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 
 ### Music playback
 
-`youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123. `play <query>`/`stop the music` detected before LLM routing.
+`youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123.
+
+- **Device mode**: `extract_music_query` (play) and `_MUSIC_STOP_RE` (stop) are gated in `_handle_transcript`, placed **after** the visual gates so "play the fire effect" stays a visual request instead of becoming a search for a song. Before this, music was reachable only from the web UI and terminal — and natural-language *stop* did not exist anywhere, only a `/stop` slash command.
+- The confirmation is spoken **before** playback starts: `youtube_play` blocks for a few seconds resolving the track, so speaking afterwards would talk over the music it just started.
 
 ### Multilingual TTS
 

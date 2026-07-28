@@ -249,6 +249,16 @@ def extract_music_query(text):
     return m.group("query").strip() if m else None
 
 
+# Natural-language "stop the music". Only a /stop slash command existed before,
+# so there was no way to stop playback by voice at all.
+_MUSIC_STOP_RE = re.compile(
+    r"\b(stop|pause|kill|turn off|shut off|shut up)\b[^.?!]{0,20}"
+    r"\b(music|song|track|playback|playing|tune)\b"
+    r"|\b(stop|pause) (it|that)\b",
+    re.IGNORECASE,
+)
+
+
 # ---------------------------------------------------------------------------
 # Adult jokes
 # ---------------------------------------------------------------------------
@@ -8344,6 +8354,64 @@ def run_device_mode():
             reply = f"I don't have that one, but I can show you: {options}."
             print(f"Zeev: {reply}")
             _finish_turn(reply, led=False)
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Quantum reasoning ────────────────────────────────────────────────
+        # Existed only in web and terminal. The interpretation is prose, so on
+        # the device it is just spoken; the circuit detail stays in the logs.
+        quantum_idea = extract_quantum_query(transcript)
+        if quantum_idea:
+            _set_face("thinking", "Mapping to a circuit…")
+            print(f"[quantum] {quantum_idea[:60]}", flush=True)
+            interpretation = err = None
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                import quantum as _q
+
+                def _qllm(msgs, max_tokens=300, json_mode=False):
+                    return _llm_complete(msgs, MODELS["2"][0],
+                                         max_tokens=max_tokens, json_mode=json_mode)
+
+                past = load_quantum_insights(k=3)
+                interpretation, spec, result, err = _q.quantum_reason(
+                    quantum_idea, _qllm, past_insights=past)
+                if not err and interpretation:
+                    save_quantum_insight(quantum_idea, spec, result, interpretation)
+            except Exception as e:
+                err = str(e)
+            if err or not interpretation:
+                print(f"[quantum] failed: {err}", flush=True)
+                _finish_turn("I couldn't run that one through a circuit.", led=False)
+            else:
+                _finish_turn(interpretation)
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Music ────────────────────────────────────────────────────────────
+        # Placed after the visual gates so "play the fire effect" stays a visual
+        # request rather than becoming a search for a song called "fire effect".
+        if _MUSIC_STOP_RE.search(transcript):
+            reply = "Stopped the music." if music_stop() else "Nothing is playing."
+            print(f"Zeev [music]: {reply}")
+            _finish_turn(reply, face=False, led=False)
+            return
+
+        music_query = extract_music_query(transcript)
+        if music_query:
+            # Confirm *before* starting playback: youtube_play blocks for a few
+            # seconds resolving the track, and speaking afterwards would talk
+            # over the music it just started.
+            reply = f"Playing {music_query}."
+            print(f"Zeev [music]: {reply}")
+            _finish_turn(reply, face=False, led=False)
+            title, err = youtube_play(music_query, adev=bt_audio_dev())
+            if err:
+                print(f"[music] failed: {err}", flush=True)
+                _speak_device("Sorry, I couldn't play that.")
+            else:
+                print(f"[music] playing: {title}", flush=True)
             return
         # ─────────────────────────────────────────────────────────────────────
 

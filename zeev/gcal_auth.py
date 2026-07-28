@@ -6,7 +6,15 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 CREDS = BASE_DIR / "data" / "gcal_credentials.json"
 TOKEN = BASE_DIR / "data" / "gcal_token.json"
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# calendar.events grants read AND write. Zeev needs write to create events from
+# voice ("put dinner with Maria on Thursday at 7"); the old readonly scope made
+# gcal_fetch work but left event creation impossible. Re-running this script
+# after a scope change requires consenting again in the browser -- an existing
+# token is NOT silently upgraded.
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.readonly",
+]
 
 if not CREDS.exists():
     print(f"ERROR: credentials file not found at {CREDS}")

@@ -157,14 +157,16 @@ for _p, _cfg in _CALL_VOICES.items():
     if _env_val:
         _cfg["cartesia"] = _env_val
 
-# Wake-word (Porcupine) — the local detector used by device mode. Unlike the
-# cloud-STT fallback it costs nothing per utterance, so the mic can stay armed
-# continuously. PORCUPINE_KEYWORD_PATH is a custom "Miss Minutes" .ppn built on
-# the Picovoice console for the raspberry-pi platform; without both the key and
-# the .ppn, device mode falls back to the cloud matcher.
-PORCUPINE_ACCESS_KEY   = os.environ.get("PORCUPINE_ACCESS_KEY", "")
-PORCUPINE_KEYWORD_PATH = os.environ.get("PORCUPINE_KEYWORD_PATH", "")
-PORCUPINE_SENSITIVITY  = float(os.environ.get("PORCUPINE_SENSITIVITY", "0.6"))
+# Wake-word (openWakeWord) — the local detector used by device mode. Unlike the
+# cloud-STT fallback it costs nothing per utterance and never sends room audio
+# off-device, so the mic can stay armed continuously. OWW_MODEL_PATH is an .onnx
+# model; without it, device mode falls back to the cloud matcher.
+#
+# Porcupine was evaluated first and rejected: far cheaper at runtime (0.7% of a
+# core vs ~70%), but custom keywords are Enterprise-only at $6k/yr.
+OWW_MODEL_PATH = os.environ.get("OWW_MODEL_PATH", "")
+OWW_THRESHOLD  = float(os.environ.get("OWW_THRESHOLD", "0.5"))
+OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 
 # ---------------------------------------------------------------------------
 # Go audio daemon integration
@@ -6518,14 +6520,43 @@ def run_device_mode():
 
     # ── LCD helpers ──────────────────────────────────────────────────────────
 
-    def _push_lcd(img):
+    def _rgb565_py(img):
+        """Reference conversion. Pure Python over W*H pixels -- slow, kept only
+        as a fallback so a missing numpy can never blank the screen."""
         pixels = list(img.convert("RGB").getdata())
         buf = bytearray(len(pixels) * 2)
         for i, (r, g, b) in enumerate(pixels):
             v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
             buf[i * 2]     = v >> 8
             buf[i * 2 + 1] = v & 0xFF
-        board.draw_image(0, 0, W, H, bytes(buf))
+        return bytes(buf)
+
+    def _rgb565_np(img):
+        """Vectorized equivalent of _rgb565_py.
+
+        The face loop redraws up to 8x/second and this runs over 240*280 =
+        67,200 pixels, so the Python loop was burning real CPU on a core the
+        wake engine and TTS also want. '>u2' emits high byte first, matching
+        the reference byte order exactly.
+        """
+        import numpy as np
+        a = np.asarray(img.convert("RGB"), dtype=np.uint16)
+        v = (((a[:, :, 0] & 0xF8) << 8)
+             | ((a[:, :, 1] & 0xFC) << 3)
+             | (a[:, :, 2] >> 3))
+        return v.astype(">u2").tobytes()
+
+    _rgb565 = [None]   # resolved on first use
+
+    def _push_lcd(img):
+        if _rgb565[0] is None:
+            try:
+                import numpy  # noqa: F401
+                _rgb565[0] = _rgb565_np
+            except Exception as e:
+                print(f"[lcd] numpy unavailable, using slow conversion: {e}", flush=True)
+                _rgb565[0] = _rgb565_py
+        board.draw_image(0, 0, W, H, _rgb565[0](img))
 
     def _load_font(path, size):
         try:
@@ -8010,25 +8041,35 @@ def run_device_mode():
         threading.Thread(target=_handle_transcript, args=(follow_text.strip(),), daemon=True).start()
         return True
 
-    def _wake_loop_porcupine(handle):
+    def _wake_loop_oww(model, label):
         """Local wake detection. One continuous 16kHz stream, no cloud calls.
 
-        Porcupine scores fixed-size frames on-device, so an idle room costs a
-        few percent of one core and zero API spend -- the cloud fallback below
-        pays Whisper for every above-threshold 2s window instead.
+        openWakeWord scores 1280-sample (80ms) frames on-device, so the mic can
+        stay armed with no API spend and no room audio leaving the house. It is
+        not free though -- measured ~70% of one core (of four) and ~166MB RSS on
+        this Pi Zero 2W -- which is why it only runs in idle/ready and releases
+        the stream the moment a turn starts.
         """
-        import struct
-        frame_bytes = handle.frame_length * 2
+        import numpy as np
+
+        frame_samples = 1280
+        frame_bytes = frame_samples * 2
         proc = None
+        last_trigger = 0.0
+
+        def _release():
+            nonlocal proc
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            proc, _wake_rec_proc[0] = None, None
+
         while True:
             if _face_state not in ("idle", "ready"):
-                # Release the mic so _start_recording isn't fighting us for it.
-                if proc:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                    proc, _wake_rec_proc[0] = None, None
+                # Free the core and the mic while a turn is in flight.
+                _release()
                 time.sleep(0.3)
                 continue
 
@@ -8041,33 +8082,30 @@ def run_device_mode():
                     )
                     _wake_rec_proc[0] = proc
                 except Exception as e:
-                    print(f"[wake] porcupine arecord failed: {e}", flush=True)
+                    print(f"[wake] arecord failed: {e}", flush=True)
                     time.sleep(1.0)
                     continue
 
             data = proc.stdout.read(frame_bytes)
             if not data or len(data) < frame_bytes:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                proc, _wake_rec_proc[0] = None, None
+                # Short read is the normal path when _on_press kills the stream.
+                _release()
                 continue
 
             try:
-                pcm = struct.unpack_from(f"<{handle.frame_length}h", data)
-                if handle.process(pcm) < 0:
-                    continue
+                scores = model.predict(np.frombuffer(data, dtype=np.int16))
             except Exception as e:
-                print(f"[wake] porcupine process error: {e}", flush=True)
+                print(f"[wake] predict error: {e}", flush=True)
                 continue
 
-            print("[wake] porcupine trigger", flush=True)
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            proc, _wake_rec_proc[0] = None, None
+            score = max(scores.values()) if scores else 0.0
+            now = time.time()
+            if score < OWW_THRESHOLD or (now - last_trigger) < OWW_COOLDOWN:
+                continue
+            last_trigger = now
+
+            print(f"[wake] {label} trigger (score {score:.2f})", flush=True)
+            _release()
             _wake_dispatch("")
 
     def _wake_loop_cloud():
@@ -8158,43 +8196,38 @@ def run_device_mode():
     def _wake_listener():
         """Listen for 'Miss Minutes', then record and process the follow-up.
 
-        Prefers local Porcupine detection; falls back to the cloud-STT matcher
-        when the access key or the custom .ppn is missing, or the model won't
-        load. The fallback is functionally identical -- it just costs money and
-        a round trip per noisy 2s window.
+        Prefers local openWakeWord detection; falls back to the cloud-STT
+        matcher when OWW_MODEL_PATH is unset or the model won't load. The
+        fallback behaves the same, but bills Groq per noisy 2s window (at a
+        10-second minimum per request) and ships room audio off-device.
         """
         _greeting_done.wait()  # don't process mic audio while greeting is playing
 
-        handle = None
-        if PORCUPINE_ACCESS_KEY and PORCUPINE_KEYWORD_PATH:
-            if not Path(PORCUPINE_KEYWORD_PATH).exists():
-                print(f"[wake] keyword file not found: {PORCUPINE_KEYWORD_PATH}", flush=True)
+        model = None
+        if OWW_MODEL_PATH:
+            if not Path(OWW_MODEL_PATH).exists():
+                print(f"[wake] model not found: {OWW_MODEL_PATH}", flush=True)
             else:
                 try:
-                    import pvporcupine
-                    handle = pvporcupine.create(
-                        access_key=PORCUPINE_ACCESS_KEY,
-                        keyword_paths=[PORCUPINE_KEYWORD_PATH],
-                        sensitivities=[PORCUPINE_SENSITIVITY],
-                    )
-                    print(f"[wake] porcupine ready — {handle.frame_length} samples "
-                          f"@ {handle.sample_rate}Hz, sensitivity {PORCUPINE_SENSITIVITY}",
+                    # One ORT thread: the default spawns one per core and just
+                    # contends with the face loop and TTS for no throughput gain.
+                    os.environ.setdefault("OMP_NUM_THREADS", "1")
+                    from openwakeword.model import Model as _OwwModel
+                    t0 = time.time()
+                    model = _OwwModel(wakeword_model_paths=[OWW_MODEL_PATH])
+                    print(f"[wake] openwakeword ready — {Path(OWW_MODEL_PATH).name} "
+                          f"in {time.time() - t0:.1f}s, threshold {OWW_THRESHOLD}",
                           flush=True)
                 except Exception as e:
-                    print(f"[wake] porcupine init failed, using cloud fallback: {e}", flush=True)
-                    handle = None
+                    print(f"[wake] openwakeword init failed, using cloud fallback: {e}",
+                          flush=True)
+                    model = None
         else:
-            print("[wake] PORCUPINE_ACCESS_KEY/KEYWORD_PATH unset — using cloud fallback "
-                  "(bills Whisper per noisy 2s window)", flush=True)
+            print("[wake] OWW_MODEL_PATH unset — using cloud fallback "
+                  "(bills Groq per noisy 2s window, 10s minimum each)", flush=True)
 
-        if handle:
-            try:
-                _wake_loop_porcupine(handle)
-            finally:
-                try:
-                    handle.delete()
-                except Exception:
-                    pass
+        if model:
+            _wake_loop_oww(model, Path(OWW_MODEL_PATH).stem)
         else:
             _wake_loop_cloud()
 

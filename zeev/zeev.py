@@ -163,6 +163,15 @@ WAKE_WORD_MODELS    = os.environ.get("WAKE_WORD_MODELS",    "")   # comma-sep na
 WAKE_WORD_THRESHOLD = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
 WAKE_WORD_COOLDOWN  = float(os.environ.get("WAKE_WORD_COOLDOWN",  "1.5"))
 
+# Wake-word (Porcupine) — the local detector used by device mode. Unlike the
+# cloud-STT fallback it costs nothing per utterance, so the mic can stay armed
+# continuously. PORCUPINE_KEYWORD_PATH is a custom "Miss Minutes" .ppn built on
+# the Picovoice console for the raspberry-pi platform; without both the key and
+# the .ppn, device mode falls back to the cloud matcher.
+PORCUPINE_ACCESS_KEY   = os.environ.get("PORCUPINE_ACCESS_KEY", "")
+PORCUPINE_KEYWORD_PATH = os.environ.get("PORCUPINE_KEYWORD_PATH", "")
+PORCUPINE_SENSITIVITY  = float(os.environ.get("PORCUPINE_SENSITIVITY", "0.6"))
+
 # ---------------------------------------------------------------------------
 # Go audio daemon integration
 # ---------------------------------------------------------------------------
@@ -6324,6 +6333,42 @@ def _rms(wav_bytes):
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+_vad_singleton = [None]   # lazily built webrtcvad.Vad, or False if unavailable
+
+
+def _has_speech(wav_bytes, rate=16000, aggressiveness=2, min_voiced_frames=3):
+    """True if the clip plausibly contains speech (webrtcvad over 30ms frames).
+
+    An RMS gate only answers "is this loud", so a TV, a fan or a slammed door
+    all clear it and cost a cloud-STT round trip. This answers "is this voice".
+    Returns True when webrtcvad is unavailable, so it can only ever filter out
+    audio, never suppress a wake the old path would have caught.
+    """
+    if _vad_singleton[0] is None:
+        try:
+            import webrtcvad
+            _vad_singleton[0] = webrtcvad.Vad(aggressiveness)
+        except Exception as e:
+            print(f"[wake] webrtcvad unavailable, speech gate disabled: {e}", flush=True)
+            _vad_singleton[0] = False
+    vad = _vad_singleton[0]
+    if not vad:
+        return True
+
+    pcm = wav_bytes[44:]
+    frame_bytes = int(rate * 0.03) * 2      # 30ms frames; webrtcvad accepts 10/20/30 only
+    voiced = 0
+    try:
+        for off in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+            if vad.is_speech(pcm[off:off + frame_bytes], rate):
+                voiced += 1
+                if voiced >= min_voiced_frames:
+                    return True
+    except Exception:
+        return True      # malformed frame/rate — fail open rather than go deaf
+    return False
+
+
 def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
     """Record `duration` seconds of audio and return WAV bytes, or None on error."""
     try:
@@ -8045,9 +8090,125 @@ def run_device_mode():
     _RMS_WINDOW      = 60     # rolling chunks (~2 min at 2s each) behind the noise floor
     _RMS_RECAL_EVERY = 15     # re-derive the gate every N chunks (~30s)
 
-    def _wake_listener():
-        """Listen for 'Miss Minutes' when idle, then record and process follow-up."""
-        _greeting_done.wait()  # don't process mic audio while greeting is playing
+    def _play_wake_beep():
+        import struct as _struct, math, wave as _wave, io as _io
+        sr, dur, freq = 16000, 0.15, 1047  # C6 tone
+        samples = [int(26000 * math.sin(2 * math.pi * freq * i / sr))
+                   for i in range(int(sr * dur))]
+        raw = _struct.pack(f"<{len(samples)}h", *samples)
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+            wf.writeframes(raw)
+        try:
+            subprocess.run(["aplay", "-D", _MIC_DEV, "-q", "-"],
+                           input=buf.getvalue(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _wake_dispatch(utterance=""):
+        """Post-detection path shared by both front-ends.
+
+        Claims the session, beeps, then either dispatches an utterance that
+        arrived with the wake phrase or records a follow-up. Returns True if a
+        turn was started.
+        """
+        _screen_wake()
+        with _state_lock:
+            if _face_state not in ("idle", "ready"):
+                return False
+            _busy.set()   # already set in "ready"; idempotent
+
+        _play_wake_beep()
+
+        if len(utterance) > 2:
+            board.set_rgb(*_LED_THINKING)
+            threading.Thread(target=_handle_transcript, args=(utterance,), daemon=True).start()
+            return True
+
+        _set_face("listening")
+        board.set_rgb(*_LED_RECORDING)
+        follow_wav = _record_utterance(_MIC_DEV)
+        if not follow_wav:
+            _go_idle()
+            return False
+
+        board.set_rgb(*_LED_THINKING)
+        _set_face("thinking")
+        follow_text = stt(follow_wav)
+        if not follow_text or not follow_text.strip():
+            _set_face("error", "Didn't catch that")
+            board.set_rgb(*_LED_ERROR)
+            time.sleep(2)
+            _go_idle()
+            return False
+
+        threading.Thread(target=_handle_transcript, args=(follow_text.strip(),), daemon=True).start()
+        return True
+
+    def _wake_loop_porcupine(handle):
+        """Local wake detection. One continuous 16kHz stream, no cloud calls.
+
+        Porcupine scores fixed-size frames on-device, so an idle room costs a
+        few percent of one core and zero API spend -- the cloud fallback below
+        pays Whisper for every above-threshold 2s window instead.
+        """
+        import struct
+        frame_bytes = handle.frame_length * 2
+        proc = None
+        while True:
+            if _face_state not in ("idle", "ready"):
+                # Release the mic so _start_recording isn't fighting us for it.
+                if proc:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    proc, _wake_rec_proc[0] = None, None
+                time.sleep(0.3)
+                continue
+
+            if proc is None or proc.poll() is not None:
+                try:
+                    proc = subprocess.Popen(
+                        ["arecord", "-D", _MIC_DEV, "-f", "S16_LE", "-r", "16000",
+                         "-c", "1", "-t", "raw", "-"],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    )
+                    _wake_rec_proc[0] = proc
+                except Exception as e:
+                    print(f"[wake] porcupine arecord failed: {e}", flush=True)
+                    time.sleep(1.0)
+                    continue
+
+            data = proc.stdout.read(frame_bytes)
+            if not data or len(data) < frame_bytes:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc, _wake_rec_proc[0] = None, None
+                continue
+
+            try:
+                pcm = struct.unpack_from(f"<{handle.frame_length}h", data)
+                if handle.process(pcm) < 0:
+                    continue
+            except Exception as e:
+                print(f"[wake] porcupine process error: {e}", flush=True)
+                continue
+
+            print("[wake] porcupine trigger", flush=True)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc, _wake_rec_proc[0] = None, None
+            _wake_dispatch("")
+
+    def _wake_loop_cloud():
+        """Fallback: 2s chunks → RMS gate → speech gate → cloud STT → substring match."""
         _floor = []
         for _ in range(3):
             w = _record_chunk(1.0, _MIC_DEV)
@@ -8062,23 +8223,6 @@ def run_device_mode():
         # so the floor tracks the room instead of the moment the Pi started.
         _levels = []
         _chunks_seen = 0
-
-        def _play_wake_beep():
-            import struct, math, wave as _wave, io as _io
-            sr, dur, freq = 16000, 0.15, 1047  # C6 tone
-            samples = [int(26000 * math.sin(2 * math.pi * freq * i / sr))
-                       for i in range(int(sr * dur))]
-            raw = struct.pack(f"<{len(samples)}h", *samples)
-            buf = _io.BytesIO()
-            with _wave.open(buf, "wb") as wf:
-                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
-                wf.writeframes(raw)
-            try:
-                subprocess.run(["aplay", "-D", _MIC_DEV, "-q", "-"],
-                               input=buf.getvalue(),
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
 
         while True:
             # "ready" is accepted alongside "idle" so a follow-up right after a
@@ -8125,6 +8269,10 @@ def run_device_mode():
                     rms_gate = new_gate
             if level < rms_gate:
                 continue
+            # Loud is not the same as spoken. Without this, a TV or a slammed
+            # door clears the RMS gate and bills a Whisper call.
+            if not _has_speech(wav):
+                continue
 
             text = stt(wav)
             if not text:
@@ -8135,7 +8283,6 @@ def run_device_mode():
                 continue
 
             print(f"[wake] heard: {low!r}", flush=True)
-            _screen_wake()
 
             utterance = low
             for w in sorted(_DEVICE_WAKE_WORDS, key=len, reverse=True):
@@ -8143,36 +8290,50 @@ def run_device_mode():
                     utterance = utterance[len(w):].lstrip(" ,.")
                     break
 
-            with _state_lock:
-                if _face_state not in ("idle", "ready"):
-                    continue
-                _busy.set()   # already set in "ready"; idempotent
+            _wake_dispatch(utterance)
 
-            _play_wake_beep()
+    def _wake_listener():
+        """Listen for 'Miss Minutes', then record and process the follow-up.
 
-            if len(utterance) > 2:
-                board.set_rgb(*_LED_THINKING)
-                threading.Thread(target=_handle_transcript, args=(utterance,), daemon=True).start()
-                continue
+        Prefers local Porcupine detection; falls back to the cloud-STT matcher
+        when the access key or the custom .ppn is missing, or the model won't
+        load. The fallback is functionally identical -- it just costs money and
+        a round trip per noisy 2s window.
+        """
+        _greeting_done.wait()  # don't process mic audio while greeting is playing
 
-            _set_face("listening")
-            board.set_rgb(*_LED_RECORDING)
-            follow_wav = _record_utterance(_MIC_DEV)
-            if not follow_wav:
-                _go_idle()
-                continue
+        handle = None
+        if PORCUPINE_ACCESS_KEY and PORCUPINE_KEYWORD_PATH:
+            if not Path(PORCUPINE_KEYWORD_PATH).exists():
+                print(f"[wake] keyword file not found: {PORCUPINE_KEYWORD_PATH}", flush=True)
+            else:
+                try:
+                    import pvporcupine
+                    handle = pvporcupine.create(
+                        access_key=PORCUPINE_ACCESS_KEY,
+                        keyword_paths=[PORCUPINE_KEYWORD_PATH],
+                        sensitivities=[PORCUPINE_SENSITIVITY],
+                    )
+                    print(f"[wake] porcupine ready — {handle.frame_length} samples "
+                          f"@ {handle.sample_rate}Hz, sensitivity {PORCUPINE_SENSITIVITY}",
+                          flush=True)
+                except Exception as e:
+                    print(f"[wake] porcupine init failed, using cloud fallback: {e}", flush=True)
+                    handle = None
+        else:
+            print("[wake] PORCUPINE_ACCESS_KEY/KEYWORD_PATH unset — using cloud fallback "
+                  "(bills Whisper per noisy 2s window)", flush=True)
 
-            board.set_rgb(*_LED_THINKING)
-            _set_face("thinking")
-            follow_text = stt(follow_wav)
-            if not follow_text or not follow_text.strip():
-                _set_face("error", "Didn't catch that")
-                board.set_rgb(*_LED_ERROR)
-                time.sleep(2)
-                _go_idle()
-                continue
-
-            threading.Thread(target=_handle_transcript, args=(follow_text.strip(),), daemon=True).start()
+        if handle:
+            try:
+                _wake_loop_porcupine(handle)
+            finally:
+                try:
+                    handle.delete()
+                except Exception:
+                    pass
+        else:
+            _wake_loop_cloud()
 
     board.on_button_press(_on_press)
     board.on_button_release(_on_release)

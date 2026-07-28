@@ -185,6 +185,11 @@ OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "6"))      # ~0.5s rep
 # the buffered path without a redeploy.
 STREAM_TTS = os.environ.get("STREAM_TTS", "1").lower() not in ("0", "false", "no")
 
+# Use the module-level handle_transcript() instead of the run_device_mode
+# closure. Temporary: both exist for one release so the hoist can be reverted
+# with an .env change while its branches are exercised by voice.
+USE_HOISTED_HANDLER = os.environ.get("USE_HOISTED_HANDLER", "0").lower() in ("1", "true", "yes")
+
 # ---------------------------------------------------------------------------
 # Go audio daemon integration
 # ---------------------------------------------------------------------------
@@ -7036,6 +7041,728 @@ def pick_model(current_locked=None):
         print(f"{DIM}Enter 0, 1, 2, or 3.{RESET}")
 
 
+# ---------------------------------------------------------------------------
+# Device-mode turn handling (hoisted out of run_device_mode)
+# ---------------------------------------------------------------------------
+# These were closures inside run_device_mode, which is ~2200 lines and needs the
+# Whisplay HAT to import -- so the intent router, the single largest piece of
+# device-mode logic, could not be imported or tested at all.
+#
+# They live here rather than in their own module deliberately: they call ~50
+# module-level functions in this file (route_model, needs_torah,
+# _build_system_prompt, extract_bt_intent, run_tool_calls, youtube_play ...), so
+# a separate module would mean either a circular import or prefixing every one
+# of those calls -- a large diff whose only benefit is file location.
+#
+# Everything they used to capture from the enclosing scope now arrives on `ctx`.
+# Module-level globals they only read (_BT_AUDIO_DEV, _IN_CALL) or declare
+# `global` for (FORCED_LANG, _LAST_VOICE) resolve naturally now that these are
+# module-level themselves.
+
+
+class _DeviceCtx:
+    """Handles onto the device-mode hardware and per-session state.
+
+    `session` lives here rather than staying a run_device_mode local because the
+    handler rebinds it (`ctx.session = ctx.session[-60:]`). If the two held
+    separate references, finish_turn would go on appending to the
+    pre-truncation list and history would silently stop growing.
+    """
+
+    __slots__ = (
+        "session", "board",
+        "_set_face", "_go_idle", "_go_ready", "_speak_device",
+        "_progressive_speak", "_stream_speak",
+        "_busy", "_speak_cancel", "_pending_detail", "_pending_detail_ready",
+        "_pending_detail_source", "_turn_count", "_voice_coach_pending",
+        "_visual_effect_active",
+        "_LED_ERROR", "_LED_SPEAKING", "_LED_THINKING",
+        "_MORE_YES_RE", "_have_pil",
+    )
+
+
+def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice="sarina"):
+    """Record `reply`, speak it, and return the device to ready/idle.
+
+    Every intent branch hand-rolled this tail. They are NOT all identical --
+    some show the speaking face, some set the LED, some do neither -- so the
+    flags preserve each caller's existing behavior rather than normalizing
+    it. Only the boilerplate is shared.
+
+    `user_text` is only passed by branches that return *before* the central
+    user-turn record (see the `ctx.session.append` for "user" further down);
+    everything after that point must leave it None or the turn is stored
+    twice.
+    """
+    if user_text is not None:
+        ctx.session.append({"role": "user", "content": user_text})
+        append_message("user", user_text)
+    ctx.session.append({"role": "assistant", "content": reply})
+    append_message("assistant", reply)
+    if led:
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+    if face:
+        ctx._set_face("speaking", reply)
+    ctx._speak_device(reply, voice)
+    ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+
+def handle_transcript(ctx, transcript):
+    """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
+    # session lives on ctx
+    global _LAST_VOICE
+    t0 = time.perf_counter()
+    # Cleared here, not just before speaking: a press during "thinking"
+    # sets this while the LLM request is still in flight, and clearing it
+    # later erased the interrupt so the reply spoke in full.
+    ctx._speak_cancel.clear()
+
+    print(f"You: {transcript}")
+    ctx._set_face("thinking", transcript)
+
+    # ── Voice coach mode ──────────────────────────────────────────────────
+    if ctx._voice_coach_pending[0]:
+        ctx._voice_coach_pending[0] = False
+        print("[voice coach] Analyzing…", flush=True)
+        feedback = voice_coach_feedback(transcript)
+        print(f"Zeev [coach]: {feedback}")
+        finish_turn(ctx, feedback, user_text=transcript)
+        return
+
+    # ── Voice coach intent detection ──────────────────────────────────────
+    if _VOICE_COACH_RE.search(transcript):
+        reply = "Sure! Hold the button and say whatever you'd like to practice. I'll give you feedback when you're done."
+        ctx._voice_coach_pending[0] = True
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, user_text=transcript)
+        return
+
+    # ── Voice-triggered language switch ─────────────────────────────────
+    lang_code = lang_switch_intent(transcript)
+    if lang_code:
+        global FORCED_LANG
+        FORCED_LANG = None if lang_code == "en" else lang_code
+        reply = _LANG_SWITCH_CONFIRM[lang_code]
+        print(f"Zeev [lang]: {reply}")
+        finish_turn(ctx, reply, user_text=transcript)
+        return
+
+    # ── Adult jokes ──────────────────────────────────────────────────────
+    if _JOKE_RE.match(transcript):
+        jlang = joke_lang(transcript)
+        joke = random_joke(jlang)
+        if joke:
+            print(f"Zeev [joke]: {joke}")
+            ctx.session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            ctx.session.append({"role": "assistant", "content": joke})
+            append_message("assistant", joke)
+            ctx._set_face("speaking", joke)
+            ctx.board.set_rgb(*ctx._LED_SPEAKING)
+            ctx._speak_device(joke)
+        else:
+            reply = "I don't have any jokes loaded right now."
+            print(f"Zeev: {reply}")
+            ctx._set_face("speaking", reply)
+            ctx.board.set_rgb(*ctx._LED_SPEAKING)
+            ctx._speak_device(reply)
+        ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+        return
+
+    # ── Pending detail expansion ──────────────────────────────────────────
+    if ctx._pending_detail_source[0] and ctx._MORE_YES_RE.search(transcript):
+        if not ctx._pending_detail_ready.is_set():
+            print(f"[+{time.perf_counter()-t0:.1f}s] waiting on pre-generated detail…", flush=True)
+            ctx._pending_detail_ready.wait(timeout=8)
+        detail = ctx._pending_detail[0]
+        source = ctx._pending_detail_source[0]
+        ctx._pending_detail[0] = None
+        ctx._pending_detail_source[0] = None
+        ctx._pending_detail_ready.clear()
+        if detail:
+            ctx.session.append({"role": "user", "content": transcript})
+            append_message("user", transcript)
+            ctx.session.append({"role": "assistant", "content": detail})
+            append_message("assistant", detail)
+            print(f"Zeev [detail]: {detail}")
+            ctx.board.set_rgb(*ctx._LED_SPEAKING)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
+            ctx._progressive_speak(detail, voice=_LAST_VOICE)
+            print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+        # prefetch failed, timed out, or came back empty — re-run the
+        # original topic (not the bare "yes") so search/model routing
+        # keywords still apply instead of silently losing context
+        print(f"[detail] pending detail unavailable — re-asking original topic", flush=True)
+        transcript = f"{source} Give me more detail on that."
+    else:
+        ctx._pending_detail[0] = None  # any other input clears pending
+        ctx._pending_detail_source[0] = None
+        ctx._pending_detail_ready.clear()
+
+    ctx.session.append({"role": "user", "content": transcript})
+    append_message("user", transcript)
+
+    # ── Bluetooth natural-language handling ───────────────────────────────
+    bt_intent = extract_bt_intent(transcript)
+    if bt_intent == "scan":
+        ctx._speak_device("Scanning for Bluetooth devices. This will take about ten seconds.")
+        found = bt_scan(10)
+        _bt_scan_results[:] = found
+        if found:
+            names = ", ".join(n for _, n in found)
+            reply = f"I found {len(found)} device{'s' if len(found) != 1 else ''}: {names}. Say the name to pair."
+        else:
+            reply = "I didn't find any Bluetooth devices nearby. Make sure your headphones are in pairing mode and try again."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    if bt_intent == "pair" and _bt_scan_results:
+        matched = _bt_match_device(transcript)
+        if matched:
+            mac, name = matched
+            ctx._speak_device(f"Pairing with {name}.")
+            bt_pair(mac)
+            ok = bt_connect(mac)
+            reply = f"Paired and connected to {name}. Audio is now coming through your headphones." if ok else f"Paired {name} but couldn't connect. Try saying connect bluetooth."
+        else:
+            names = ", ".join(n for _, n in _bt_scan_results)
+            reply = f"Which device? I found: {names}."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    if bt_intent == "connect":
+        devices = bt_list()
+        already = next(((m, n) for m, n, c in devices if c), None)
+        if already:
+            reply = f"Already connected to {already[1]}."
+        elif devices:
+            mac, name, _ = devices[0]
+            ok = bt_connect(mac)
+            reply = f"Connected to {name}." if ok else f"Couldn't connect to {name}."
+        else:
+            reply = "No paired devices found. Say scan for bluetooth first."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    if bt_intent == "disconnect":
+        for mac, name, connected in bt_list():
+            if connected:
+                bt_disconnect(mac)
+        reply = "Disconnected. Audio back to the speaker."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    # ── BT tethering ─────────────────────────────────────────────────────
+    if bt_intent == "tether_on":
+        status = bt_pan_status()
+        if status["connected"]:
+            reply = f"Bluetooth tethering is already active. IP address {status['ip']}."
+        else:
+            # Try to find the phone in paired devices
+            devices = bt_list()
+            phone_mac = _BT_PAN_MAC or _BT_PHONE_MAC
+            if not phone_mac and devices:
+                # Pick the first paired device that isn't the current audio device
+                for m, n, _ in devices:
+                    if not _BT_AUDIO_DEV or m not in _BT_AUDIO_DEV:
+                        phone_mac = m
+                        break
+                if not phone_mac:
+                    phone_mac = devices[0][0]
+            if not phone_mac:
+                reply = "No paired phone found. Pair your phone first."
+            else:
+                ctx._speak_device("Connecting to phone tethering. This may take a moment.")
+                ok, msg = bt_pan_connect(phone_mac)
+                reply = f"Connected. {msg.split('—')[-1].strip()}" if ok else f"Tethering failed. {msg.split('—')[-1].strip()} Make sure Bluetooth Tethering is enabled on your phone under Settings, Connections, Mobile Hotspot."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    if bt_intent == "tether_off":
+        status = bt_pan_status()
+        if status["connected"]:
+            bt_pan_disconnect()
+            reply = "Bluetooth tethering disconnected."
+        else:
+            reply = "Tethering isn't active."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    # ── Phone call handling ───────────────────────────────────────────────
+    if _IN_CALL and _BT_HANGUP_RE.search(transcript):
+        bt_call_hangup()
+        reply = "Hanging up."
+        print(f"Zeev: {reply}")
+        ctx._speak_device(reply)
+        ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+        return
+
+    if not _IN_CALL and _bt_call_match(transcript):
+        # Extract number and optional intent ("call 555-1234 to check my balance")
+        number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', transcript)
+        if number_m:
+            number = number_m.group(1).strip()
+            intent_text = transcript[number_m.end():].strip().lstrip("to ").strip()
+            reply = f"Calling {number}."
+            ctx._speak_device(reply)
+            ok = bt_call_dial(number)
+            if ok:
+                import time as _time
+                _time.sleep(3)  # give the call a moment to connect
+                phone_mac = bt_hfp_detect()
+                if not phone_mac:
+                    ctx._speak_device("Call dialed but phone isn't connected via HFP. Make sure your phone is paired and nearby.")
+                    bt_call_hangup()
+                else:
+                    record_dir = str(BASE_DIR / "data" / "call_recordings")
+                    import os as _os
+                    _os.makedirs(record_dir, exist_ok=True)
+
+                    def _stt_from_pcm(pcm: bytes) -> str:
+                        import wave, io as _io, struct as _struct
+                        buf = _io.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(16000)
+                            wf.writeframes(pcm)
+                        return groq_stt(buf.getvalue())
+
+                    def _llm_reply(text: str) -> str:
+                        msgs = [{"role": "system", "content": _build_system_prompt(text, False, session=ctx.session)}]
+                        msgs += ctx.session[-10:]
+                        msgs.append({"role": "user", "content": text})
+                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                        if err or resp is None or resp.status_code != 200:
+                            print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
+                            return ""
+                        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+                    global _call_thread
+                    _call_thread = threading.Thread(
+                        target=bt_call_loop,
+                        args=(ctx._speak_device, _stt_from_pcm, _llm_reply, phone_mac),
+                        kwargs={"record_dir": record_dir, "call_intent": intent_text,
+                                "persona": extract_call_persona(intent_text)},
+                        daemon=True,
+                    )
+                    _call_thread.start()
+            else:
+                ctx._speak_device("Sorry, I couldn't place the call.")
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+        else:
+            reply = "What number should I call?"
+            ctx._speak_device(reply)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Volume natural language handling ──────────────────────────────────
+    if _VOLUME_RE.search(transcript):
+        t = transcript.lower()
+        up = any(w in t for w in ("up", "louder", "higher", "increase", "raise", "boost", "crank", "bump"))
+        new_vol = set_volume(min(100, _VOLUME + 5) if up else max(0, _VOLUME - 5))
+        direction = "up" if up else "down"
+        reply = f"Volume {direction} to {new_vol} percent."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    # ── Camera natural language handling ──────────────────────────────────
+    if CAMERA_AVAILABLE and _CAMERA_RE.search(transcript):
+        print(f"[camera] capturing…", flush=True)
+        ctx._set_face("thinking", "Capturing…")
+        img = capture_image()
+        if not img:
+            reply = "Sorry, I couldn't capture an image right now."
+            ctx._speak_device(reply)
+            ctx.session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+        vision_payload = _build_vision_msgs(img, transcript)
+        print(f"[camera] calling vision LLM…", flush=True)
+        resp, err = _groq_post(vision_payload, VISION_MODEL, stream=False, max_tokens=600)
+        if err or resp is None or resp.status_code != 200:
+            status_code = resp.status_code if resp is not None else "no resp"
+            detail = err or (resp.text if resp is not None else "no response")
+            print(f"Vision LLM error [{status_code}]: {detail}", flush=True)
+            try:
+                import datetime as _dt
+                with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
+                    _ef.write(f"{_dt.datetime.now().isoformat()} Vision [{status_code}]: {detail[:300]}\n")
+            except Exception as e:
+                print(f"[llm] failed to write zeev_errors.log: {e}", flush=True)
+            display_msg = "Rate limited" if status_code == 429 else f"LLM err {status_code}"
+            ctx._set_face("error", display_msg)
+            ctx.board.set_rgb(*ctx._LED_ERROR)
+            time.sleep(2)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+        reply = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"Zeev [Scout]: {reply}\n")
+        finish_turn(ctx, reply)
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Visual-effect natural language handling (Whisplay LCD) ────────────
+    if ctx._have_pil and _VISUAL_TRIGGER_RE.search(transcript):
+        effect_key = "psychedelic"
+        for pat, key in _VISUAL_EFFECT_KEYWORDS:
+            if pat.search(transcript):
+                effect_key = key
+                break
+        print(f"[visual] running {effect_key} effect…", flush=True)
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            import shapes_test as _shapes
+        except ImportError as e:
+            _shapes = None
+            print(f"[visual] shapes_test import failed: {e}", flush=True)
+        if _shapes is None:
+            reply = "Sorry, I can't run visual effects right now."
+            ctx._speak_device(reply)
+            ctx.session.append({"role": "assistant", "content": reply})
+            append_message("assistant", reply)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+        runner = {
+            "fire":        _shapes.run_fire,
+            "matrix":      _shapes.run_matrix,
+            "psychedelic": _shapes.run_psychedelic,
+            "liquid":      _shapes.run_liquid,
+            "tunnel":      _shapes.run_tunnel,
+            "plasma":      _shapes.run_plasma,
+            "cartoon":     _shapes.run_cartoon,
+            "starfield":   _shapes.run_starfield,
+            "bounce":      _shapes.run_animation,
+        }[effect_key]
+        reply = f"Here's {_VISUAL_EFFECT_LABELS[effect_key]} for you."
+        print(f"Zeev: {reply}")
+        ctx.session.append({"role": "assistant", "content": reply})
+        append_message("assistant", reply)
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        ctx._speak_device(reply)
+        ctx.board.set_rgb(*ctx._LED_THINKING)
+        ctx._visual_effect_active[0] = True   # pause face-loop's SPI writes while the effect runs
+        try:
+            runner(ctx.board, 12)
+        except Exception as e:
+            print(f"[visual] effect error: {e}", flush=True)
+        finally:
+            ctx._visual_effect_active[0] = False
+        ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Unsupported visual effect ("show me a flying eagle") ──────────────
+    # Catches "show me <something>" requests that clearly want an on-screen
+    # visual but don't name one of the effects we actually have, so Zeev
+    # tells the user what's available instead of silently answering with
+    # ASCII art and leaving the LCD blank.
+    if (ctx._have_pil and _VISUAL_FALLBACK_RE.search(transcript)
+            and not any(pat.search(transcript) for pat, _ in _VISUAL_EFFECT_KEYWORDS)):
+        options = ", ".join(_VISUAL_EFFECT_LABELS[k] for k in
+                             ("fire", "matrix", "psychedelic", "liquid",
+                              "tunnel", "plasma", "cartoon", "starfield", "bounce"))
+        reply = f"I don't have that one, but I can show you: {options}."
+        print(f"Zeev: {reply}")
+        finish_turn(ctx, reply, led=False)
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Quantum reasoning ────────────────────────────────────────────────
+    # Existed only in web and terminal. The interpretation is prose, so on
+    # the device it is just spoken; the circuit detail stays in the logs.
+    quantum_idea = extract_quantum_query(transcript)
+    if quantum_idea:
+        ctx._set_face("thinking", "Mapping to a circuit…")
+        print(f"[quantum] {quantum_idea[:60]}", flush=True)
+        interpretation = err = None
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent))
+            import quantum as _q
+
+            def _qllm(msgs, max_tokens=300, json_mode=False):
+                return _llm_complete(msgs, MODELS["2"][0],
+                                     max_tokens=max_tokens, json_mode=json_mode)
+
+            past = load_quantum_insights(k=3)
+            interpretation, spec, result, err = _q.quantum_reason(
+                quantum_idea, _qllm, past_insights=past)
+            if not err and interpretation:
+                save_quantum_insight(quantum_idea, spec, result, interpretation)
+        except Exception as e:
+            err = str(e)
+        if err or not interpretation:
+            print(f"[quantum] failed: {err}", flush=True)
+            finish_turn(ctx, "I couldn't run that one through a circuit.", led=False)
+        else:
+            finish_turn(ctx, interpretation)
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Music ────────────────────────────────────────────────────────────
+    # Placed after the visual gates so "play the fire effect" stays a visual
+    # request rather than becoming a search for a song called "fire effect".
+    if _MUSIC_STOP_RE.search(transcript):
+        reply = "Stopped the music." if music_stop() else "Nothing is playing."
+        print(f"Zeev [music]: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    music_query = extract_music_query(transcript)
+    if music_query:
+        # Confirm *before* starting playback: youtube_play blocks for a few
+        # seconds resolving the track, and speaking afterwards would talk
+        # over the music it just started.
+        # Resolving a track takes ~45s on this hardware (yt-dlp search +
+        # format selection), so it runs in the background: blocking the
+        # turn that long would leave the device unusable and unable to
+        # hear a follow-up.
+        reply = f"Looking for {music_query}."
+        print(f"Zeev [music]: {reply}")
+        finish_turn(ctx, reply, face=False, led=False)
+
+        def _bg_play(q=music_query):
+            title, err = youtube_play(q, adev=bt_audio_dev())
+            if err:
+                print(f"[music] failed: {err}", flush=True)
+                ctx._speak_device("Sorry, I couldn't find that one.")
+            else:
+                print(f"[music] playing: {title}", flush=True)
+        threading.Thread(target=_bg_play, daemon=True).start()
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    model_id = route_model(transcript)
+    if needs_torah(transcript) or needs_parsha_reading(transcript) or (needs_search(transcript) and TAVILY_API_KEY):
+        # Torah/parsha/search payloads inject large text blocks; 8B's 6k TPM limit is too small
+        model_id = MODELS["2"][0]
+    short    = _MODEL_SHORT.get(model_id, "?")
+
+    print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
+    sys_prompt   = _build_system_prompt(transcript, session=ctx.session) + (
+        "\n\nVOICE INTERFACE: You are speaking aloud. Rules:\n"
+        "1. Always reply in exactly 1-2 sentences. Never more.\n"
+        "2. No lists, bullet points, headers, or preamble.\n"
+        "3. If the topic deserves a longer answer, give a 1-2 sentence summary "
+        "and end with 'Want to hear more?' — do NOT expand further."
+    )
+    payload_msgs = [{"role": "system", "content": sys_prompt}] + ctx.session
+
+    # ── Tool use ─────────────────────────────────────────────────────────
+    # Gated behind a cheap regex so ordinary chat never pays for the extra
+    # non-streaming round trip. Routed to 70B: the 8B default is unreliable
+    # at emitting well-formed tool calls. The model needs the wall clock to
+    # resolve "at 4" -- nothing else in the prompt provides it.
+    if _TOOL_INTENT_RE.search(transcript):
+        tool_model = MODELS["2"][0]
+        tool_sys = sys_prompt + (
+            f"\n\nCurrent local time: {datetime.now().strftime('%A %Y-%m-%d %H:%M')}. "
+            "Use the tools when the user asks to be reminded, to set a timer, "
+            "to save a note, or to list or cancel reminders. Resolve relative "
+            "times against the current time above and pass ISO-8601. After a "
+            "tool runs, confirm in one short spoken sentence."
+        )
+        tool_msgs = [{"role": "system", "content": tool_sys}] + ctx.session
+        tresp, terr = _groq_post(tool_msgs, tool_model, stream=False,
+                                 max_tokens=400, tools=_TOOLS)
+        if terr is None and tresp is not None and tresp.status_code == 200:
+            try:
+                tmsg = tresp.json()["choices"][0]["message"]
+            except Exception as e:
+                print(f"[tools] bad tool response: {e}", flush=True)
+                tmsg = {}
+            calls = tmsg.get("tool_calls") or []
+            if calls:
+                results = run_tool_calls(calls)
+                payload_msgs = tool_msgs + [tmsg] + results
+                model_id = tool_model
+                short = _MODEL_SHORT.get(model_id, "70B")
+                print(f"[+{time.perf_counter()-t0:.1f}s] tools done, composing reply",
+                      flush=True)
+        else:
+            status = tresp.status_code if tresp is not None else terr
+            print(f"[tools] tool call failed ({status}) — plain chat", flush=True)
+
+    if needs_parsha_reading(transcript):
+        tok_limit = 1600  # room to recite several chapters
+    elif needs_torah(transcript):
+        tok_limit = 350
+    elif model_id in (MODELS["3"][0], MODELS["2"][0]):
+        tok_limit = 160
+    else:
+        tok_limit = 160
+    resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
+    print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
+
+    # 429 or per-model cooldown on 70B/R1 → fall back to 8B before giving up
+    if (model_id in (MODELS["2"][0], MODELS["3"][0])
+            and ((resp is not None and resp.status_code == 429)
+                 or err == "rate-limited")):
+        print(f"[llm] 429 on {short} — retrying with 8B", flush=True)
+        model_id = MODELS["1"][0]
+        short    = _MODEL_SHORT.get(model_id, "8B")
+        tok_limit = 160
+        resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
+        print(f"[+{time.perf_counter()-t0:.1f}s] LLM fallback done", flush=True)
+
+    # 413 (request too large) → trim oldest history pairs and retry
+    if resp is not None and resp.status_code == 413:
+        trim_payload = list(payload_msgs)
+        while len(trim_payload) > 2:  # keep at least sys_prompt + current_user
+            trim_payload = [trim_payload[0]] + trim_payload[3:]  # drop oldest user+assistant pair
+            print(f"[llm] 413 — trimmed to {len(trim_payload)} msgs, retrying", flush=True)
+            resp, err = _groq_post(trim_payload, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
+            if resp is None or resp.status_code != 413:
+                break
+
+    if err or resp is None or resp.status_code != 200:
+        status_code = resp.status_code if resp is not None else "no resp"
+        detail = err or (resp.text if resp is not None else "no response")
+        print(f"LLM error [{status_code}]: {detail}", flush=True)
+        import datetime as _dt
+        try:
+            with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
+                _ef.write(f"{_dt.datetime.now().isoformat()} LLM [{status_code}]: {detail[:300]}\n")
+        except Exception as e:
+            print(f"[llm] failed to write zeev_errors.log: {e}", flush=True)
+        if status_code == 429:
+            display_msg = "Rate limited"
+        elif err and ("resolve" in err.lower() or "connection" in err.lower() or "timeout" in err.lower()):
+            display_msg = "No network"
+        else:
+            display_msg = f"LLM err {status_code}"
+        ctx._set_face("error", display_msg)
+        ctx.board.set_rgb(*ctx._LED_ERROR)
+        time.sleep(2)
+        ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+        return
+
+    # Voice is a function of the transcript only, so it can be chosen before
+    # a single token arrives -- required for the streaming path.
+    _LAST_VOICE = "daniel" if re.search(r"\b(zeev|zeve|zieve|ziva|zivi|daniel|danielle|danny|dan|z)\b", transcript, re.IGNORECASE) else "sarina"
+
+    streamed = False
+    if STREAM_TTS and getattr(resp, "raw", None) is not None:
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
+        def _mark_first():
+            print(f"[+{time.perf_counter()-t0:.1f}s] First audio", flush=True)
+
+        try:
+            reply = ctx._stream_speak(resp, "groq", voice=_LAST_VOICE,
+                                  on_first=_mark_first).strip()
+            streamed = bool(reply)
+        except Exception as e:
+            print(f"[stream] failed, falling back to buffered: {e}", flush=True)
+            reply, streamed = "", False
+        if not streamed:
+            print("[stream] empty stream — no reply text", flush=True)
+    if not streamed:
+        try:
+            reply = resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"[llm] could not parse reply: {e}", flush=True)
+            ctx._set_face("error", "Empty reply")
+            ctx.board.set_rgb(*ctx._LED_ERROR)
+            time.sleep(2)
+            ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+            return
+
+    print(f"Zeev [{short}]: {reply}\n")
+    ctx.session.append({"role": "assistant", "content": reply})
+    append_message("assistant", reply)
+
+    if len(ctx.session) > 60:
+        ctx.session = ctx.session[-60:]
+
+    # B — refresh RAG index with the new turn so future turns can recall it.
+    # Backgrounded: this re-reads and re-tokenizes 500 rows, and it was
+    # sitting in the turn's critical path on a single-core Pi. Also embed
+    # the new pair so semantic recall sees it without waiting for the
+    # 30-minute maintenance loop.
+    def _bg_index(_reply=reply, _transcript=transcript):
+        try:
+            build_rag_index()
+        except Exception as e:
+            print(f"[rag] index refresh failed: {e}", flush=True)
+        try:
+            backfill_message_vecs(limit=4)
+        except Exception as e:
+            print(f"[embed] turn backfill failed: {e}", flush=True)
+    threading.Thread(target=_bg_index, daemon=True).start()
+
+    # A — auto-memorize every 5 turns in a background thread
+    ctx._turn_count[0] += 1
+    if ctx._turn_count[0] % 5 == 0:
+        snap = list(ctx.session)
+        def _bg_memorize():
+            facts = extract_memory(snap)
+            if facts is not None:
+                print(f"[memory] {len(facts)} fact(s) stored", flush=True)
+        threading.Thread(target=_bg_memorize, daemon=True).start()
+
+    # Truncate to last complete sentence so TTS never gets a dangling fragment
+    last_complete = re.search(r'^(.*[.!?])\s*$', reply.strip(), re.DOTALL)
+    speak_text = last_complete.group(1) if last_complete else reply
+    if speak_text != reply:
+        print(f"[tts] truncated to last sentence ({len(speak_text)}/{len(reply)} chars)", flush=True)
+
+    # If LLM ended with "Want to hear more?", pre-generate the detail in background
+    _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
+    if _WANT_MORE_RE.search(speak_text) and not ctx._speak_cancel.is_set():
+        ctx._pending_detail_source[0] = transcript
+        ctx._pending_detail_ready.clear()
+
+        def _prefetch_detail():
+            # ctx.session's last entry is our own "...want to hear more?" reply, so
+            # add an explicit user turn — a message list ending on 'assistant'
+            # with no follow-up 'user' turn is a malformed continuation request
+            # and Groq/OpenRouter often answer it with thin or empty content.
+            detail_sys_prompt = _build_system_prompt(transcript, session=ctx.session) + (
+                "\n\nVOICE INTERFACE: You are speaking aloud. Give the requested detail in "
+                "4-5 sentences at most — this is still a spoken answer, not an essay. "
+                "No lists, bullet points, or headers."
+            )
+            detail_msgs = ([{"role": "system", "content": detail_sys_prompt}]
+                            + ctx.session
+                            + [{"role": "user", "content": "Yes, please continue with more detail on that."}])
+            content = ""
+            try:
+                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
+                if r and r.status_code == 200:
+                    content = (r.json()["choices"][0]["message"]["content"] or "").strip()
+                if content:
+                    ctx._pending_detail[0] = content
+                    print("[detail] pre-generated and ready", flush=True)
+                else:
+                    status = r.status_code if r else "no resp"
+                    print(f"[detail] pre-generation failed or empty [{status}]", flush=True)
+            finally:
+                ctx._pending_detail_ready.set()
+        threading.Thread(target=_prefetch_detail, daemon=True).start()
+
+    if not streamed:
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
+        print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
+        ctx._progressive_speak(speak_text, voice=_LAST_VOICE)
+    print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+
+    ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+
+
 def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
     global _LAST_VOICE
@@ -8074,6 +8801,29 @@ def run_device_mode():
         _speak_device(reply, voice)
         _go_ready() if _busy.is_set() else _go_idle()
 
+    # ── Hoisted handler (flag-gated) ─────────────────────────────────────
+    # handle_transcript() at module level is a mechanical port of the closure
+    # below -- verified identical modulo the ctx. prefix. Both paths exist for
+    # one release so a regression in a branch that only shows up by voice can
+    # be reverted with an .env change instead of a redeploy. Set
+    # USE_HOISTED_HANDLER=1 to use it; the closure remains the default until
+    # the branches have been exercised on hardware, after which the closure
+    # (and this flag) should be deleted.
+    _ctx = _DeviceCtx()
+    _ctx.session = session
+    for _n in ("board", "_set_face", "_go_idle", "_go_ready", "_speak_device",
+               "_progressive_speak", "_stream_speak", "_busy", "_speak_cancel",
+               "_pending_detail", "_pending_detail_ready", "_pending_detail_source",
+               "_turn_count", "_voice_coach_pending", "_visual_effect_active",
+               "_LED_ERROR", "_LED_SPEAKING", "_LED_THINKING",
+               "_MORE_YES_RE", "_have_pil"):
+        setattr(_ctx, _n, locals()[_n])
+
+    def _dispatch_transcript(transcript):
+        if USE_HOISTED_HANDLER:
+            return handle_transcript(_ctx, transcript)
+        return _handle_transcript(transcript)
+
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
         nonlocal session
@@ -8772,7 +9522,7 @@ def run_device_mode():
                 _go_ready() if _busy.is_set() else _go_idle()
                 return
 
-            _handle_transcript(transcript)
+            _dispatch_transcript(transcript)
 
         threading.Thread(target=_process, daemon=True).start()
 
@@ -8818,7 +9568,7 @@ def run_device_mode():
 
         if len(utterance) > 2:
             board.set_rgb(*_LED_THINKING)
-            threading.Thread(target=_handle_transcript, args=(utterance,), daemon=True).start()
+            threading.Thread(target=_dispatch_transcript, args=(utterance,), daemon=True).start()
             return True
 
         _set_face("listening")
@@ -8843,7 +9593,7 @@ def run_device_mode():
             _go_idle()
             return False
 
-        threading.Thread(target=_handle_transcript, args=(follow_text.strip(),), daemon=True).start()
+        threading.Thread(target=_dispatch_transcript, args=(follow_text.strip(),), daemon=True).start()
         return True
 
     def _wake_loop_oww(model, label):
@@ -9112,7 +9862,7 @@ def run_device_mode():
     board.set_rgb(*_LED_IDLE)
     _set_face("idle")
 
-    turns = len(session) // 2
+    turns = len(_ctx.session) // 2
     print(f"\n{BOLD}Zeev Device Mode{RESET} — Whisplay HAT", flush=True)
     if turns:
         print(f"{DIM}({turns} prior turn{'s' if turns != 1 else ''} loaded){RESET}", flush=True)

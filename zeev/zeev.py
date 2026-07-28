@@ -6336,11 +6336,19 @@ def _rms(wav_bytes):
 _vad_singleton = [None]   # lazily built webrtcvad.Vad, or False if unavailable
 
 
-def _has_speech(wav_bytes, rate=16000, aggressiveness=2, min_voiced_frames=3):
+def _has_speech(wav_bytes, rate=16000, aggressiveness=3, min_voiced_frames=3):
     """True if the clip plausibly contains speech (webrtcvad over 30ms frames).
 
-    An RMS gate only answers "is this loud", so a TV, a fan or a slammed door
-    all clear it and cost a cloud-STT round trip. This answers "is this voice".
+    An RMS gate only answers "is this loud", so a fan or a slammed door clears
+    it and costs a cloud-STT round trip. This answers "is this voice".
+
+    Aggressiveness 3 is deliberate, not the library default. Measured on this
+    Pi against synthetic signals, levels 0-2 passed *everything* except digital
+    silence -- which the RMS gate already rejects -- making the whole gate a
+    no-op. Level 3 additionally rejects pure tones and low-level hiss. It still
+    passes broadband noise and mains hum, so this is a partial filter: local
+    Porcupine detection, not this, is what removes the per-utterance cost.
+
     Returns True when webrtcvad is unavailable, so it can only ever filter out
     audio, never suppress a wake the old path would have caught.
     """

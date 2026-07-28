@@ -30,3 +30,7 @@ zeev/previews/
 
 # Added by ggshield
 .cache_ggshield
+
+# Compiled Go daemon — built with `make pi`, deployed to ~/zeev-audio/ on the Pi
+zeev-audio/zeev-audio
+zeev-audio/bin/

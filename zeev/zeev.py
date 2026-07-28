@@ -7387,6 +7387,31 @@ def run_device_mode():
         re.IGNORECASE,
     )
 
+    def _finish_turn(reply, user_text=None, face=True, led=True, voice="sarina"):
+        """Record `reply`, speak it, and return the device to ready/idle.
+
+        Every intent branch hand-rolled this tail. They are NOT all identical --
+        some show the speaking face, some set the LED, some do neither -- so the
+        flags preserve each caller's existing behavior rather than normalizing
+        it. Only the boilerplate is shared.
+
+        `user_text` is only passed by branches that return *before* the central
+        user-turn record (see the `session.append` for "user" further down);
+        everything after that point must leave it None or the turn is stored
+        twice.
+        """
+        if user_text is not None:
+            session.append({"role": "user", "content": user_text})
+            append_message("user", user_text)
+        session.append({"role": "assistant", "content": reply})
+        append_message("assistant", reply)
+        if led:
+            board.set_rgb(*_LED_SPEAKING)
+        if face:
+            _set_face("speaking", reply)
+        _speak_device(reply, voice)
+        _go_ready() if _busy.is_set() else _go_idle()
+
     def _handle_transcript(transcript):
         """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
         nonlocal session
@@ -7402,14 +7427,7 @@ def run_device_mode():
             print("[voice coach] Analyzing…", flush=True)
             feedback = voice_coach_feedback(transcript)
             print(f"Zeev [coach]: {feedback}")
-            session.append({"role": "user", "content": transcript})
-            append_message("user", transcript)
-            session.append({"role": "assistant", "content": feedback})
-            append_message("assistant", feedback)
-            _set_face("speaking", feedback)
-            board.set_rgb(*_LED_SPEAKING)
-            _speak_device(feedback)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(feedback, user_text=transcript)
             return
 
         # ── Voice coach intent detection ──────────────────────────────────────
@@ -7417,14 +7435,7 @@ def run_device_mode():
             reply = "Sure! Hold the button and say whatever you'd like to practice. I'll give you feedback when you're done."
             _voice_coach_pending[0] = True
             print(f"Zeev: {reply}")
-            session.append({"role": "user", "content": transcript})
-            append_message("user", transcript)
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _set_face("speaking", reply)
-            board.set_rgb(*_LED_SPEAKING)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, user_text=transcript)
             return
 
         # ── Voice-triggered language switch ─────────────────────────────────
@@ -7434,14 +7445,7 @@ def run_device_mode():
             FORCED_LANG = None if lang_code == "en" else lang_code
             reply = _LANG_SWITCH_CONFIRM[lang_code]
             print(f"Zeev [lang]: {reply}")
-            session.append({"role": "user", "content": transcript})
-            append_message("user", transcript)
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _set_face("speaking", reply)
-            board.set_rgb(*_LED_SPEAKING)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, user_text=transcript)
             return
 
         # ── Adult jokes ──────────────────────────────────────────────────────
@@ -7513,10 +7517,7 @@ def run_device_mode():
             else:
                 reply = "I didn't find any Bluetooth devices nearby. Make sure your headphones are in pairing mode and try again."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         if bt_intent == "pair" and _bt_scan_results:
@@ -7531,10 +7532,7 @@ def run_device_mode():
                 names = ", ".join(n for _, n in _bt_scan_results)
                 reply = f"Which device? I found: {names}."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         if bt_intent == "connect":
@@ -7549,10 +7547,7 @@ def run_device_mode():
             else:
                 reply = "No paired devices found. Say scan for bluetooth first."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         if bt_intent == "disconnect":
@@ -7561,10 +7556,7 @@ def run_device_mode():
                     bt_disconnect(mac)
             reply = "Disconnected. Audio back to the speaker."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         # ── BT tethering ─────────────────────────────────────────────────────
@@ -7591,10 +7583,7 @@ def run_device_mode():
                     ok, msg = bt_pan_connect(phone_mac)
                     reply = f"Connected. {msg.split('—')[-1].strip()}" if ok else f"Tethering failed. {msg.split('—')[-1].strip()} Make sure Bluetooth Tethering is enabled on your phone under Settings, Connections, Mobile Hotspot."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         if bt_intent == "tether_off":
@@ -7605,10 +7594,7 @@ def run_device_mode():
             else:
                 reply = "Tethering isn't active."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         # ── Phone call handling ───────────────────────────────────────────────
@@ -7689,10 +7675,7 @@ def run_device_mode():
             direction = "up" if up else "down"
             reply = f"Volume {direction} to {new_vol} percent."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, face=False, led=False)
             return
 
         # ── Camera natural language handling ──────────────────────────────────
@@ -7728,12 +7711,7 @@ def run_device_mode():
                 return
             reply = resp.json()["choices"][0]["message"]["content"].strip()
             print(f"Zeev [Scout]: {reply}\n")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            board.set_rgb(*_LED_SPEAKING)
-            _set_face("speaking", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply)
             return
         # ─────────────────────────────────────────────────────────────────────
 
@@ -7799,11 +7777,7 @@ def run_device_mode():
                                   "tunnel", "plasma", "cartoon", "starfield", "bounce"))
             reply = f"I don't have that one, but I can show you: {options}."
             print(f"Zeev: {reply}")
-            session.append({"role": "assistant", "content": reply})
-            append_message("assistant", reply)
-            _set_face("speaking", reply)
-            _speak_device(reply)
-            _go_ready() if _busy.is_set() else _go_idle()
+            _finish_turn(reply, led=False)
             return
         # ─────────────────────────────────────────────────────────────────────
 

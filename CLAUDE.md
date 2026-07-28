@@ -141,7 +141,13 @@ Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) →
 
 ### History RAG
 
-`build_rag_index()` — last 500 `messages` rows, inverted word index, stop words filtered. `retrieve_relevant(query, k=2, min_score=2)` injects as `## Relevant past exchanges:`. Called by `init_learning()` at startup.
+Two layers. `_build_system_prompt` calls `retrieve_semantic(...) or retrieve_relevant(...)` — semantic first, keyword as the offline fallback — and injects the winner as `## Relevant past exchanges:`.
+
+- **Semantic (preferred)**: `embed_text()` → bosgame `nomic-embed-text` via the existing `/ollama` proxy (`{BOSGAME_URL}/api/embeddings`, `X-Zeev-Key`). Vectors cached in the `message_vecs` table (`message_id`, `dim`, `vec` BLOB of little-endian f32), so retrieval is a local dot product — only the query embedding is a network call. Embedding runs remotely for the same reason Russian TTS does: the Pi has one usable core and ~200 MB headroom. Measured backfill rate: **~1.4 msg/s**. `EMBED_MODEL` overrides the model; vectors whose `dim` doesn't match the query are skipped, so switching models degrades instead of corrupting.
+- **Keyword (fallback)**: `build_rag_index()` — last 500 rows, inverted index, stop words filtered; `retrieve_relevant(query, k=2, min_score=2)`. Its `_tokenize` is `\b[a-z]{3,}` — **ASCII-only, so Hebrew/Russian/Spanish history was never indexed at all**, and it can't see past 500 messages. Both are why the semantic layer exists. Kept because `embed_text()` returning `None` is a normal state for a travelling Pi.
+- **Language guard**: because semantic recall can now surface Hebrew/Cyrillic into an English turn's prompt, `_build_system_prompt` appends an explicit "reply in English regardless" note when a hit contains those scripts and no `FORCED_LANG` is set. The 8B model flips script easily — see the transliteration notes above.
+- **`_memory_maintenance_loop()`** (started by `init_learning()`): every 30 min, backfills up to 50 new message vectors and re-runs `load_latest_reflection()`. Both were startup-only before, so a device up for weeks never saw a new weekly reflection and post-boot messages were never embedded.
+- **`save_memory()` is transactional** (`BEGIN IMMEDIATE` + rollback). It previously did `DELETE FROM facts` then re-INSERT outside a transaction — an exception or power cut between the two lost every fact. Pinned by `tests/test_semantic_memory.py`.
 
 ### Torah RAG (Sefaria)
 

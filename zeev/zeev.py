@@ -6916,6 +6916,19 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 # ---------------------------------------------------------------------------
 
 
+def _mem_snapshot():
+    """'avail 163M, swap 116M' — enough to tell thrash from a slow model."""
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, _, v = line.partition(":")
+            info[k] = int(v.split()[0]) // 1024        # kB -> MB
+        swap_used = info.get("SwapTotal", 0) - info.get("SwapFree", 0)
+        return f"avail {info.get('MemAvailable', 0)}M, swap {swap_used}M"
+    except Exception:
+        return "mem unknown"
+
+
 def _rms(wav_bytes):
     """Return RMS amplitude of raw 16-bit LE PCM (skipping the 44-byte WAV header)."""
     import struct, math
@@ -8083,12 +8096,21 @@ def run_device_mode():
 
     threading.Thread(target=_face_loop, daemon=True).start()
 
+    # Startup prewarms run one behind the other, not all at once. On a fresh
+    # boot every one of them wants cold pages off the SD card at the same time
+    # on a 463 MB machine, and they thrash: the openWakeWord load, measured at
+    # 4.7s on a settled system, took 3171s at boot — the wake word was deaf for
+    # the first 53 minutes. The mic is the primary input, so it loads first and
+    # the rest wait behind it.
+    _wake_model_ready = threading.Event()
+
     # Pre-warm shapes_test (numpy + PIL import) in the background so the first
     # "show me fire/matrix/..." request doesn't pay the cold-import cost —
     # this took 2.5min right after a fresh reboot and left the LCD blank the
     # whole time since nothing touches the screen during the import.
     if _have_pil:
         def _prewarm_shapes():
+            _wake_model_ready.wait(timeout=180)
             try:
                 sys.path.insert(0, str(Path(__file__).parent))
                 import shapes_test  # noqa: F401 — caches in sys.modules for later use
@@ -8138,6 +8160,7 @@ def run_device_mode():
             model = (PIPER_MODELS.get("en")) if PIPER_BIN else None
             if not model or _BT_AUDIO_DEV:
                 return  # BT uses one-shot path; no persistent process to pre-warm
+            _wake_model_ready.wait(timeout=180)
             try:
                 _piper_dev_proc = subprocess.Popen(
                     [PIPER_BIN, "--model", model, "--output_raw"],
@@ -9217,8 +9240,10 @@ def run_device_mode():
         fallback behaves the same, but bills Groq per noisy 2s window (at a
         10-second minimum per request) and ships room audio off-device.
         """
-        _greeting_done.wait()  # don't process mic audio while greeting is playing
-
+        # Load the model *before* waiting on the greeting. The greeting is audio
+        # playback; it doesn't need the model, and loading is the long pole. The
+        # wait moves down to just before the mic opens, which is what it was
+        # actually guarding.
         model = None
         paths = [p.strip() for p in OWW_MODEL_PATH.split(",") if p.strip()]
         missing = [p for p in paths if not Path(p).exists()]
@@ -9235,9 +9260,13 @@ def run_device_mode():
                     t0 = time.time()
                     model = _OwwModel(wakeword_model_paths=paths)
                     names = ", ".join(Path(p).stem for p in paths)
+                    # Memory is logged with the load time because a slow load
+                    # here means swap thrash, not a slow model — 4.7s settled
+                    # vs 3171s at boot, with no way to tell them apart after
+                    # the fact without this line.
                     print(f"[wake] openwakeword ready — {names} "
-                          f"in {time.time() - t0:.1f}s, threshold {OWW_THRESHOLD}",
-                          flush=True)
+                          f"in {time.time() - t0:.1f}s, threshold {OWW_THRESHOLD}"
+                          f", {_mem_snapshot()}", flush=True)
                     for _stem in (Path(p).stem for p in paths):
                         if _stem not in OWW_VOICE_MAP:
                             print(f"[wake] note: no voice mapped for {_stem!r}; "
@@ -9246,9 +9275,16 @@ def run_device_mode():
                     print(f"[wake] openwakeword init failed, using cloud fallback: {e}",
                           flush=True)
                     model = None
+                finally:
+                    # Release the other prewarms even if the load blew up, or a
+                    # bad model path would leave them parked forever.
+                    _wake_model_ready.set()
         else:
             print("[wake] OWW_MODEL_PATH unset — using cloud fallback "
                   "(bills Groq per noisy 2s window, 10s minimum each)", flush=True)
+            _wake_model_ready.set()
+
+        _greeting_done.wait()  # don't open the mic while the greeting is playing
 
         if model:
             _wake_loop_oww(model, ", ".join(Path(p).stem for p in paths))

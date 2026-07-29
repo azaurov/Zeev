@@ -205,13 +205,32 @@ OWW_VOICE_MAP=zeev:daniel,sarina:sarina
 journalctl -u zeev-device -f | grep '\[wake\]'
 ```
 
-You want `[wake] openwakeword ready — zeev, sarina in ~5s`. A
-`model not found` or `init failed` line means the path is wrong or the file
+Observed with both custom models loaded (warm restart, not a cold boot):
+
+```
+[wake] openwakeword ready — zeev, sarina in 4.8s, threshold 0.5, avail 140M, swap 22M
+```
+
+A `model not found` or `init failed` line means the path is wrong or the file
 didn't survive the copy.
 
-The stem of the filename is the key in `OWW_VOICE_MAP` — rename the files and
-the map must follow, or the wake fires but the voice falls back to whatever the
-transcript regex guesses.
+**That line is also how you verify the prediction keys**, and it is worth
+reading rather than skimming. A trained model does not carry its name: the ONNX
+graph output is just `output` (input `onnx::Flatten_0`), so openWakeWord derives
+the key from the **filename stem**. Rename `sarina.onnx` and the key changes
+with it — the wake still fires, but `OWW_VOICE_MAP` misses and the voice falls
+back to whatever the transcript regex guesses, which surfaces much later as
+"right wake word, wrong voice" rather than as an error. The ready line
+enumerating exactly `zeev, sarina` is the confirmation.
+
+Note also that both files are byte-for-byte the same **size** (790,682) — same
+classifier-head architecture, different weights. Size is not a way to tell them
+apart; use `md5sum` after the copy.
+
+**`OWW_THRESHOLD` is global.** There is no per-model threshold, so a phrase
+that turns out trigger-happy cannot be tuned in isolation — raising the
+threshold for one model makes the other deaf. If one of two models is hot, the
+fix is a longer phrase or a retrain, not a knob.
 
 ## 4. Tune
 

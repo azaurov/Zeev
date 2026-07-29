@@ -459,7 +459,11 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			// first sentence and espeak restarting the reply from the top,
 			// twice in four turns (feiergente01 down, HTTP 502, 2026-07-29).
 			// Retrying on the primary costs the parallelism, not the voice.
-			if err != nil && onSecond {
+			// A cancel also makes remotePiperSynthAt fail, and that error is
+			// indistinguishable from a 502 here. Retrying it would bench a
+			// healthy backend and re-synthesize a reply the user just
+			// interrupted, so the cancel check has to come first.
+			if err != nil && onSecond && !audio.SpeechCancelled(speechCtx) {
 				log.Printf("piper: backend2 chunk %d failed (%v); benching it for %s, retrying on primary", i, err, backend2Cooldown)
 				s.state.backend2DownUntil.Store(time.Now().Add(backend2Cooldown).Unix())
 				pcm, rate, err = s.remotePiperSynthAt(s.state.RemotePiperURL, s.state.RemotePiperKey, sentences[i], voice, lang)

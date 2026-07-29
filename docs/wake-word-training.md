@@ -122,6 +122,29 @@ library.
 
 Run it twice, once per phrase.
 
+### Raise the sample counts — the notebook's defaults undertrain badly
+
+The notebook ships a reduced config tuned for a fast demo run, not a usable
+model. Measured on the first `zeev` run: **recall 0.44, 2.0 false positives per
+hour** — it would miss more than half of what you say. Upstream's own
+`examples/custom_model.yml` targets **0.2 fp/hr**, ten times better.
+
+| Key | Notebook | Upstream default | Use |
+|---|---|---|---|
+| `n_samples` | 2000 | 10000 | **10000** |
+| `n_samples_val` | 1000 | 2000 | **2000** |
+| `steps` | 20000 | 50000 | **50000** |
+
+Editing these in cell 10 costs roughly half an hour more: TTS generation in
+cell 11 scales linearly with `n_samples` (~15 min at 10000), while training
+itself is cheap — 20000 steps measured at 1.9 min on a T4, so 50000 is about
+five.
+
+**A short phrase needs the higher counts most.** `zeev` at 2000 samples was the
+worst case: fewest samples, fewest syllables. If recall still comes out below
+~0.85 at 10000 samples, lengthen the phrase to `['hey zeev', 'hey ze ev']`
+rather than spending another run on tuning.
+
 It's a single-author community repo, so read it before running — I checked, and
 every download goes to a legitimate upstream (`rhasspy/piper-sample-generator`,
 `dscripka/openWakeWord` releases, the ACAV100M feature set on HuggingFace, the

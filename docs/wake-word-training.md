@@ -57,12 +57,39 @@ MODEL_NAME    = 'zeev'
 pronunciation problem gets solved: give it the spellings that make the TTS say
 the word correctly and it trains on all of them.
 
-**Add `deep-phonemizer` to cell 1's pip block first** — the notebook omits it,
-and only the *negative* clip path imports it (`from dp.phonemizer import
-Phonemizer`), so cell 11 generates all 3000 positive clips, runs for fifteen
-minutes, then dies with `ModuleNotFoundError: No module named 'dp'`. Put it
-next to `pronouncing` in the big `!pip install -q \` list so a Run-all carries
-it.
+**Two fixes belong in cell 1 before you run anything**, both on the negative
+clip path — which means cell 11 generates all 3000 positive clips and runs a
+full fifteen minutes before either one surfaces.
+
+1. **`deep-phonemizer` is missing from the pip block.** Add it next to
+   `pronouncing` so a Run-all carries it. Without it: `ModuleNotFoundError: No
+   module named 'dp'`.
+2. **PyTorch 2.6 broke DeepPhonemizer's checkpoint load.** `torch.load`
+   flipped its `weights_only` default to `True`, and the checkpoint pickles a
+   `dp.preprocessing.text.Preprocessor`, so it raises
+   `_pickle.UnpicklingError: Weights only load failed`. Patch the single
+   `torch.load` call in `dp/model/model.py` (line 306 in 0.0.19):
+
+   ```python
+   import dp.model.model as _m, ast
+   _p = _m.__file__
+   _src = open(_p).read()
+   _old = 'checkpoint = torch.load(checkpoint_path, map_location=device)'
+   if 'weights_only' not in _src:
+       assert _src.count(_old) == 1
+       _src = _src.replace(_old, _old[:-1] + ', weights_only=False)')
+       ast.parse(_src)                 # never write a file you haven't parsed
+       open(_p, 'w').write(_src)
+   ```
+
+   `weights_only=False` permits arbitrary code execution from the checkpoint.
+   It's the standard fix here and the file comes from DeepPhonemizer's own S3
+   bucket — the same source openWakeWord has always pulled it from — but that
+   is the trade being made.
+
+Note the shape of that patch: exact-string match, asserted unique, parsed
+before writing. That is the difference between this and the Colab assistant's
+line-index rewrite that corrupted `data.py`.
 
 - **Free Colab (T4)**: ~2.5 h, and free sessions get reclaimed when idle — keep
   the tab open and the machine awake. **Do not leave it running overnight on

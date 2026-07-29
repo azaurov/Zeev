@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/azaurov/zeev-audio/internal/audio"
@@ -37,7 +38,16 @@ type State struct {
 	// multiple concurrent requests to a single backend slower (measured).
 	RemotePiperURL2 string
 	RemotePiperKey2 string
+
+	// Unix seconds until which the second backend is considered down. A 502
+	// from the reverse proxy costs ~2s, so probing a dead backend once per
+	// odd chunk taxes every multi-sentence reply for the whole outage.
+	backend2DownUntil atomic.Int64
 }
+
+// How long the second backend stays benched after a failure. It is a Windows
+// box on a NSSM auto-restart, so an outage is usually short but not instant.
+const backend2Cooldown = 2 * time.Minute
 
 // newRemotePiperClient builds an http.Client whose Transport keeps the
 // connection to bosgame alive across the multi-minute gaps typical between
@@ -433,12 +443,27 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 		// Piper models set up — only bosgame handles those, so skip the
 		// split for them and keep every chunk on the primary backend.
 		hasSecondBackend := s.state.RemotePiperURL2 != "" && lang != "ru" && lang != "es"
+		secondUsable := func() bool {
+			return hasSecondBackend && time.Now().Unix() >= s.state.backend2DownUntil.Load()
+		}
 		synthOne := func(i int) {
 			url, key := s.state.RemotePiperURL, s.state.RemotePiperKey
-			if hasSecondBackend && i%2 == 1 {
+			onSecond := secondUsable() && i%2 == 1
+			if onSecond {
 				url, key = s.state.RemotePiperURL2, s.state.RemotePiperKey2
 			}
 			pcm, rate, err := s.remotePiperSynthAt(url, key, sentences[i], voice, lang)
+			// One dead backend must not garble the reply. Previously a failed
+			// chunk aborted speakPiper and the handler's espeak fallback then
+			// re-spoke the *entire* text: heard live as Kokoro delivering the
+			// first sentence and espeak restarting the reply from the top,
+			// twice in four turns (feiergente01 down, HTTP 502, 2026-07-29).
+			// Retrying on the primary costs the parallelism, not the voice.
+			if err != nil && onSecond {
+				log.Printf("piper: backend2 chunk %d failed (%v); benching it for %s, retrying on primary", i, err, backend2Cooldown)
+				s.state.backend2DownUntil.Store(time.Now().Add(backend2Cooldown).Unix())
+				pcm, rate, err = s.remotePiperSynthAt(s.state.RemotePiperURL, s.state.RemotePiperKey, sentences[i], voice, lang)
+			}
 			results[i] <- synthResult{pcm, rate, err}
 		}
 		runSequence := func(startIdx, step int) {
@@ -446,7 +471,10 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 				synthOne(i)
 			}
 		}
-		if hasSecondBackend && len(sentences) > 1 {
+		// If the cooldown expires mid-reply the odd-index goroutine simply
+		// starts hitting the primary too — slower (same-CPU contention) but
+		// correct, and it self-corrects on the next reply.
+		if secondUsable() && len(sentences) > 1 {
 			go runSequence(0, 2) // bosgame: chunks 0, 2, 4, ...
 			go runSequence(1, 2) // feiergente01: chunks 1, 3, 5, ...
 		} else {
@@ -475,10 +503,18 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 		}
 
 		playErr := audio.APlayPipe(outDev, "S16_LE", outRate, outCh, func(w io.Writer) error {
-			writePCM := func(pcm []byte) error {
-				if btStatus.Connected && (outRate != ttsRate || outCh != 1) {
+			// Keyed on each chunk's own rate, not chunk 0's. aplay is opened
+			// once at outRate for the whole reply, so a chunk that comes back
+			// at a different rate — a failover to a backend whose Kokoro
+			// errored into 22050Hz Piper, say — would otherwise be written raw
+			// and play pitch-shifted from that sentence on.
+			writePCM := func(pcm []byte, inRate int) error {
+				if inRate == 0 {
+					inRate = ttsRate
+				}
+				if inRate != outRate || outCh != 1 {
 					var e error
-					pcm, e = resampleFFmpeg(pcm, ttsRate, 1, outRate, outCh)
+					pcm, e = resampleFFmpeg(pcm, inRate, 1, outRate, outCh)
 					if e != nil {
 						return fmt.Errorf("resample: %w", e)
 					}
@@ -489,7 +525,7 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 			if audio.SpeechCancelled(speechCtx) {
 				return audio.ErrSpeechCancelled
 			}
-			if err := writePCM(first.pcm); err != nil {
+			if err := writePCM(first.pcm, ttsRate); err != nil {
 				return err
 			}
 			for i := 1; i < len(sentences); i++ {
@@ -505,7 +541,7 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 				if res.err != nil {
 					return res.err
 				}
-				if err := writePCM(res.pcm); err != nil {
+				if err := writePCM(res.pcm, res.rate); err != nil {
 					return err
 				}
 			}

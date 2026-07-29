@@ -57,8 +57,18 @@ MODEL_NAME    = 'zeev'
 pronunciation problem gets solved: give it the spellings that make the TTS say
 the word correctly and it trains on all of them.
 
-- **Free Colab (T4)**: ~2.5 h, and free sessions get disconnected — keep the tab
-  open.
+**Add `deep-phonemizer` to cell 1's pip block first** — the notebook omits it,
+and only the *negative* clip path imports it (`from dp.phonemizer import
+Phonemizer`), so cell 11 generates all 3000 positive clips, runs for fifteen
+minutes, then dies with `ModuleNotFoundError: No module named 'dp'`. Put it
+next to `pronouncing` in the big `!pip install -q \` list so a Run-all carries
+it.
+
+- **Free Colab (T4)**: ~2.5 h, and free sessions get reclaimed when idle — keep
+  the tab open and the machine awake. **Do not leave it running overnight on
+  the free tier.** A reclaimed runtime wipes `/content` entirely: the 17 GB
+  ACAV download, the generated clips, the config, all of it. Verified the hard
+  way. Unattended runs are what Colab Pro's background execution is for.
 - **Colab Pro (L4 + High RAM)**: ~75–90 min, $10/month, about 1/100th of the
   monthly credits per run. An A100 buys nothing; the job is network- and
   CPU-bound.

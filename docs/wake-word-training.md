@@ -3,17 +3,33 @@
 Everything on the device side is already built and proven with stock models. Two
 trained `.onnx` files and two `.env` lines are all that is left.
 
-## 1. Pick the phrase — use "Hey Zeev" and "Hey Sarina", not the bare names
+## 1. Pick the phrase — length is the single biggest lever
 
-openWakeWord's false-accept rate is dominated by phrase length. **"Zeev" is one
-syllable**, and a one-syllable target fires on ordinary speech and television
-constantly — training it would make the false-wake problem worse, not better,
-after ninety minutes of GPU time. "Hey Zeev" and "Hey Sarina" are 3–4 syllables
-and sit in the range these models are good at.
+openWakeWord's false-accept rate is dominated by phrase length. Short targets
+fire on ordinary speech and television constantly.
 
-Both phrases share the "Hey" onset, which is the lesser risk. If they end up
-cross-triggering, the fix is per-model thresholds, not retraining — ask and it
-gets added.
+- **"Sarina"** — three syllables. Fine on its own.
+- **"Ze'ev"** (zeh-EV) — two syllables, and genuinely better than the
+  one-syllable "Zeev". Two is workable but it is the shortest thing worth
+  training; expect to spend some time on the threshold.
+- **"Zeev"** as one syllable — don't. It would make the false-wake problem
+  worse, not better, after ninety minutes of GPU time.
+- **"Hey Ze'ev" / "Hey Sarina"** — the safe option, 3–4 syllables each, if
+  "Ze'ev" alone turns out too trigger-happy. The shared "Hey" onset is the
+  lesser risk; if the two models cross-trigger, the fix is per-model
+  thresholds, not retraining — ask and it gets added.
+
+Training is free and unattended, so the empirical route is reasonable: train
+`Ze'ev` and `Sarina`, live with them for a few days, and only fall back to the
+"Hey" prefix if the log shows real false wakes rather than a threshold that
+wants nudging.
+
+**Spelling matters more than usual for `Ze'ev`.** The notebook generates its own
+training audio from the text you type, so it trains on whatever the TTS thinks
+that string sounds like. The apostrophe is not reliably pronounced. Listen to
+the generated samples the notebook plays back — if they sound wrong, retype it
+phonetically (`Zeh ev`, `Zeh-ev`) until the samples sound like the word you
+actually say. A model trained on a mispronunciation will never hear you.
 
 ## 2. Train
 
@@ -30,14 +46,14 @@ Colab disconnects idle sessions, so keep the tab open or check back.
 
 ```bash
 ssh ragnar@ragnarok "mkdir -p ~/oww"
-scp hey_zeev.onnx hey_sarina.onnx ragnar@ragnarok:~/oww/
+scp zeev.onnx sarina.onnx ragnar@ragnarok:~/oww/
 ```
 
 Then in `/home/ragnar/Zeev/.env`:
 
 ```
-OWW_MODEL_PATH=/home/ragnar/oww/hey_zeev.onnx,/home/ragnar/oww/hey_sarina.onnx
-OWW_VOICE_MAP=hey_zeev:daniel,hey_sarina:sarina
+OWW_MODEL_PATH=/home/ragnar/oww/zeev.onnx,/home/ragnar/oww/sarina.onnx
+OWW_VOICE_MAP=zeev:daniel,sarina:sarina
 ```
 
 `sudo systemctl restart zeev-device`, then watch it arm:
@@ -46,7 +62,7 @@ OWW_VOICE_MAP=hey_zeev:daniel,hey_sarina:sarina
 journalctl -u zeev-device -f | grep '\[wake\]'
 ```
 
-You want `[wake] openwakeword ready — hey_zeev, hey_sarina in ~5s`. A
+You want `[wake] openwakeword ready — zeev, sarina in ~5s`. A
 `model not found` or `init failed` line means the path is wrong or the file
 didn't survive the copy.
 
@@ -69,7 +85,7 @@ Both knobs live in the same `.env`.
 Change **one at a time**. Every trigger is logged with its score:
 
 ```
-[wake] hey_zeev trigger (score 0.92) -> voice daniel
+[wake] zeev trigger (score 0.92) -> voice daniel
 ```
 
 so after a false wake, `journalctl -u zeev-device | grep trigger` tells you which

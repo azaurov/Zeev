@@ -191,7 +191,14 @@ OWW_ENERGY_GATE  = os.environ.get("OWW_ENERGY_GATE", "1").lower() not in ("0", "
 OWW_ENERGY_MULT  = float(os.environ.get("OWW_ENERGY_MULT", "1.8"))   # × rolling median
 OWW_ENERGY_MIN   = float(os.environ.get("OWW_ENERGY_MIN",  "500"))   # absolute floor
 OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of inference
-OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "6"))      # ~0.5s replayed
+# The pre-roll must refill the model's window, not just catch the attack: the
+# classifier reads 16 embedding frames, and model.reset() at onset empties that
+# buffer. At the old value of 6, a short wake word ended before the buffer was
+# full, so the classifier never saw the whole phrase in one window. Measured on
+# the Pi with a trained two-syllable "Ze'ev": 7/20 at 6 frames, 10/10 with the
+# gate off entirely. "Hey Jarvis" hid the bug — it is long enough to refill the
+# window by itself (5/5 throughout).
+OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "20"))     # ~1.6s replayed
 
 # Speak device-mode replies sentence-by-sentence as the LLM generates them,
 # instead of waiting for the whole completion. Set STREAM_TTS=0 to fall back to

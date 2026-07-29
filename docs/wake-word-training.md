@@ -63,6 +63,26 @@ the word correctly and it trains on all of them.
   monthly credits per run. An A100 buys nothing; the job is network- and
   CPU-bound.
 
+### Never accept Colab's "fix this error" suggestion — this cost a whole run
+
+Colab offers an AI assistant that patches errors for you. On this notebook it
+rewrites **library source in place, by line index**, and when the patch misses
+it leaves the file syntactically broken. Observed live: an inserted "Patch G"
+cell that ran `git checkout -- openwakeword/data.py`, re-applied itself, printed
+`(Success: False)`, and left `data.py` with a `return` outside a function. Every
+subsequent run restored the file and re-broke it, so the error kept coming back
+at a *different line number* — which is exactly what makes it look like a
+mysterious moving target rather than one bad cell.
+
+The tell: a `SyntaxError` inside an installed package that a fresh clone parses
+cleanly. If you see that, the runtime has been mutated. Don't patch further —
+`Runtime → Disconnect and delete runtime` and start clean from the GitHub copy,
+not from your saved one (your saved copy contains the injected cells).
+
+If a cell genuinely fails, the notebook's own cells are all idempotent and
+cache-aware — re-running is safe and cheap. Fix the cause, don't rewrite the
+library.
+
 Run it twice, once per phrase.
 
 It's a single-author community repo, so read it before running — I checked, and

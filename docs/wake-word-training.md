@@ -145,6 +145,36 @@ worst case: fewest samples, fewest syllables. If recall still comes out below
 ~0.85 at 10000 samples, lengthen the phrase to `['hey zeev', 'hey ze ev']`
 rather than spending another run on tuning.
 
+### Keep every variant on the same pronunciation
+
+Cell 11 logs how the phrase was phonemized. For `zeev` it printed:
+
+```
+WARNING:root:Phones for 'zeev': [Z][IY][V]
+```
+
+One syllable — "Zeve", rhyming with *leave*, not "zeh-EV". So
+`['zeev', 'ze ev', 'zeh ev']` trained on **two different words at once**,
+splitting the positive class and blurring it. Dropping `'zeev'` and keeping
+`['ze ev', 'zeh ev']` puts every sample on one target.
+
+Measured across the two runs:
+
+| Run | Samples | Variants | recall | fp/hr |
+|---|---|---|---|---|
+| 1 | 2000 | mixed 1- and 2-syllable | 0.44 | 2.00 |
+| 2 | 10000 | 2-syllable only | 0.72 | 0.95 |
+
+**Read the phonemizer line before letting a run finish.** It is the only place
+the notebook tells you what it actually thinks the word sounds like.
+
+### Validation metrics are measured on TTS voices, not yours
+
+`recall` and `fp/hr` come from synthetic speech. They rank models usefully but
+they are not your voice on the Whisplay mic. Before spending another 45-minute
+run on a marginal model, put the `.onnx` on the Pi and count real triggers out
+of twenty — that measurement is ten minutes and it is the one that decides.
+
 It's a single-author community repo, so read it before running — I checked, and
 every download goes to a legitimate upstream (`rhasspy/piper-sample-generator`,
 `dscripka/openWakeWord` releases, the ACAV100M feature set on HuggingFace, the

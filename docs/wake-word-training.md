@@ -33,14 +33,47 @@ actually say. A model trained on a mispronunciation will never hear you.
 
 ## 2. Train
 
-<https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb?usp=sharing>
+**Do not use openWakeWord's own `automatic_model_training.ipynb`.** It bit-rotted
+against current Colab images and fails for about eight independent reasons —
+Python 3.12 has no `piper-phonemize` wheels, `torchaudio` 2.x dropped
+`set_audio_backend`, several config keys became required-or-`KeyError`, and the
+`piper-sample-generator` package layout moved. Upstream issues
+[#296](https://github.com/dscripka/openWakeWord/issues/296) and
+[#70](https://github.com/dscripka/openWakeWord/issues/70) track it.
 
-openWakeWord's own automatic training notebook. Free, runs on a Colab T4,
-roughly 75–90 minutes per phrase, unattended — the only input is the phrase
-text; it synthesizes its own training audio. Run it twice, once per phrase, and
-download the resulting `.onnx` from each run.
+Use the patched 2026 notebook instead:
 
-Colab disconnects idle sessions, so keep the tab open or check back.
+<https://colab.research.google.com/github/alfiedennen/openwakeword-colab-2026/blob/main/train_wakeword.ipynb>
+
+Run all, walk away, download the `.onnx` at the end. Two lines to edit, in
+cell 10:
+
+```python
+TARGET_PHRASE = ['zeev', 'ze ev', 'zeh ev']   # pronunciation variants
+MODEL_NAME    = 'zeev'
+```
+
+`TARGET_PHRASE` is a **list of variants**, which is exactly where the `Ze'ev`
+pronunciation problem gets solved: give it the spellings that make the TTS say
+the word correctly and it trains on all of them.
+
+- **Free Colab (T4)**: ~2.5 h, and free sessions get disconnected — keep the tab
+  open.
+- **Colab Pro (L4 + High RAM)**: ~75–90 min, $10/month, about 1/100th of the
+  monthly credits per run. An A100 buys nothing; the job is network- and
+  CPU-bound.
+
+Run it twice, once per phrase.
+
+It's a single-author community repo, so read it before running — I checked, and
+every download goes to a legitimate upstream (`rhasspy/piper-sample-generator`,
+`dscripka/openWakeWord` releases, the ACAV100M feature set on HuggingFace, the
+FMA music set). No credentials, no Drive mount.
+
+**Local training is not an option here.** The maintained local pipeline
+([CoreWorxLab/openwakeword-training](https://github.com/CoreWorxLab/openwakeword-training))
+needs an NVIDIA GPU — RTX 3060 12 GB or better, 4–8 h per run. bosgame and
+feiergente01 are both CPU-only, so Colab it is.
 
 ## 3. Install
 

@@ -279,3 +279,39 @@ def test_no_cameras_configured_falls_through_to_llm(zeev, ctx, monkeypatch):
     except Exception:
         pass
     assert called.get("yes"), "should have reached the LLM path"
+
+
+def test_camera_ack_uses_the_turns_voice(zeev, ctx, monkeypatch):
+    """A "Hey Ze'ev" camera request must not be announced by Sarina.
+
+    The ack called _speak_device without a voice, so it took the hardcoded
+    "sarina" default while the reply used the resolved _LAST_VOICE -- two
+    different speakers inside one turn.
+    """
+    _wyze_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: ("A hallway.", None))
+    said = []
+    ctx._speak_device = lambda text, voice="sarina": said.append((text, voice))
+    monkeypatch.setattr(zeev, "_WAKE_VOICE", ["daniel"])
+    zeev.handle_transcript(ctx, "what's going on upstairs")
+    assert said, "nothing was spoken"
+    voices = {v for _, v in said}
+    assert voices == {"daniel"}, f"expected one voice, got {said}"
+
+
+def test_all_stage_direction_reply_still_says_something(zeev, ctx, monkeypatch):
+    """Observed live: the model returned only "(Sarina's voice...)" and nothing
+    else. Stripping that leaves an empty string, and empty is spoken as silence.
+    """
+    _wyze_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("(Sarina's voice, calm and professional, "
+                                         "delivers Zeev's words.)", None))
+    zeev.handle_transcript(ctx, "what's going on upstairs")
+    spoken = " ".join(ctx.spoke)
+    assert zeev._clean_for_tts(spoken).strip(), f"turn spoke silence: {ctx.spoke}"
+    assert "couldn't make anything out" in spoken.lower(), ctx.spoke

@@ -7942,7 +7942,11 @@ def handle_transcript(ctx, transcript):
         # a keyframe, then a free-tier vision model), and silence that long reads
         # as a dead device. Same reason youtube_play announces "Looking for X"
         # before its ~45s resolve.
-        ctx._speak_device(f"Let me look at the {wyze_cam_label(stream)}.")
+        # Must carry the turn's voice. Without it this used _speak_device's
+        # hardcoded "sarina" default while the reply used the resolved
+        # _LAST_VOICE, so a "Hey Ze'ev" camera request was announced by Sarina
+        # and answered by Zeev -- two speakers in one turn.
+        ctx._speak_device(f"Let me look at the {wyze_cam_label(stream)}.", _LAST_VOICE)
         img = wyze_snapshot(stream)
         if not img:
             reply = (f"I couldn't get a picture from the {wyze_cam_label(stream)} "
@@ -7956,6 +7960,13 @@ def handle_transcript(ctx, transcript):
             finish_turn(ctx, "Sorry, I couldn't look at that camera just now.")
             return
         print(f"Zeev [vision/{stream}]: {reply}\n")
+        # A vision reply can be *entirely* stage direction -- observed live:
+        # "(Sarina's voice, calm and professional, delivers Zeev's words.)" and
+        # nothing else. Stripping that correctly leaves an empty string, and an
+        # empty reply is spoken as silence, which reads as a broken device.
+        if not _strip_stage_directions(reply):
+            reply = (f"I looked at the {wyze_cam_label(stream)}, but I couldn't "
+                     "make anything out clearly.")
         finish_turn(ctx, reply)
         return
     # ─────────────────────────────────────────────────────────────────────

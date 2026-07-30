@@ -8,21 +8,25 @@ trained `.onnx` files and two `.env` lines are all that is left.
 openWakeWord's false-accept rate is dominated by phrase length. Short targets
 fire on ordinary speech and television constantly.
 
-- **"Sarina"** — three syllables. Fine on its own.
+- **"Sarina"** — three syllables. Looked fine on paper; measured ~1.4 fp/hr
+  against real household conversation (see §3), which is 7× upstream's target.
+  Superseded by "Hey Sarina". Three syllables was not enough.
 - **"Ze'ev"** (zeh-EV) — two syllables, and genuinely better than the
   one-syllable "Zeev". Two is workable but it is the shortest thing worth
   training; expect to spend some time on the threshold.
 - **"Zeev"** as one syllable — don't. It would make the false-wake problem
   worse, not better, after ninety minutes of GPU time.
-- **"Hey Ze'ev" / "Hey Sarina"** — the safe option, 3–4 syllables each, if
-  "Ze'ev" alone turns out too trigger-happy. The shared "Hey" onset is the
-  lesser risk; if the two models cross-trigger, the fix is per-model
-  thresholds, not retraining — ask and it gets added.
+- **"Hey Ze'ev" / "Hey Sarina"** — 4 syllables each, and **this is what is now
+  being trained**, the short forms having measured too hot. The shared "Hey"
+  onset is the lesser risk; if the two models cross-trigger, the fix is
+  `OWW_THRESHOLDS` (per-model, §3), which now exists.
 
-Training is free and unattended, so the empirical route is reasonable: train
-`Ze'ev` and `Sarina`, live with them for a few days, and only fall back to the
-"Hey" prefix if the log shows real false wakes rather than a threshold that
-wants nudging.
+The empirical route was taken and it decided the question: `Ze'ev` and `Sarina`
+were trained and lived with, and the log showed real false wakes on ordinary
+conversation rather than a threshold wanting a nudge. Hence the `Hey` prefix.
+Worth noting the short forms were **not** cheap to disprove — two runs on
+`zeev`, one on `sarina` — but validation metrics could not have told us this,
+only the mic could.
 
 **Spelling matters more than usual for `Ze'ev`.** The notebook generates its own
 training audio from the text you type, so it trains on whatever the TTS thinks
@@ -121,6 +125,44 @@ cache-aware — re-running is safe and cheap. Fix the cause, don't rewrite the
 library.
 
 Run it twice, once per phrase.
+
+### The current run: "Hey Sarina" and "Hey Ze'ev"
+
+Decided 2026-07-29 on the strength of the live false-wake data below — the
+three-syllable `sarina` measured ~1.4 fp/hr against real household
+conversation, so both phrases move to the four-syllable `Hey` form.
+
+```python
+# run 1
+TARGET_PHRASE = ['hey sarina']
+MODEL_NAME    = 'hey_sarina'
+
+# run 2 — note 'hey zeev' is deliberately absent, see below
+TARGET_PHRASE = ['hey ze ev', 'hey zeh ev']
+MODEL_NAME    = 'hey_zeev'
+
+# both runs, per the table above
+n_samples, n_samples_val, steps = 10000, 2000, 50000
+```
+
+`'hey zeev'` is omitted on purpose: bare `zeev` phonemizes to `[Z][IY][V]`, one
+syllable, so including it would again train two different words as one positive
+class — the exact mistake that cost run 1. Check the phonemizer line in cell 11
+for **both** remaining variants and confirm they agree before letting the run
+finish.
+
+**`MODEL_NAME` is the prediction key, so the `.env` must move with it.** The
+filename stem is what openWakeWord keys on, so renaming the phrase renames the
+key and the old `OWW_VOICE_MAP` silently stops matching — right wake word, wrong
+voice, no error. Both lines change together:
+
+```
+OWW_MODEL_PATH=/home/ragnar/oww/hey_zeev.onnx,/home/ragnar/oww/hey_sarina.onnx
+OWW_VOICE_MAP=hey_zeev:daniel,hey_sarina:sarina
+```
+
+Keep the old `zeev.onnx`/`sarina.onnx` on the Pi until the new pair is measured
+against a real mic — reverting is then two `.env` edits, not another 90 minutes.
 
 ### Raise the sample counts — the notebook's defaults undertrain badly
 

@@ -337,6 +337,124 @@ def test_camera_grab_overlaps_the_announcement(zeev, ctx, monkeypatch):
         "grab had not started while the announcement was speaking (still serial)"
 
 
+# --- Named subject sweep ("check on Smokey") --------------------------------
+
+def _subject_env(zeev, monkeypatch, cams=("basement-cam", "upstairs")):
+    _wyze_env(zeev, monkeypatch)
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {
+        "smokey": {"name": "Smokey", "kind": "cat", "cams": list(cams)}})
+
+
+def test_subject_sweep_stops_at_the_first_hit(zeev, ctx, monkeypatch):
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    looked = []
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda s, **k: looked.append(s) or "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: yes\nA grey cat is asleep on the couch.", None))
+    zeev.handle_transcript(ctx, "check on Smokey")
+    reply = ctx.spoke[-1].lower()
+    assert "smokey" in reply and "basement cam" in reply and "asleep" in reply, ctx.spoke
+    # The second grab may have been started speculatively under the first
+    # vision call, but no second camera may have been *reported*.
+    assert "upstairs" not in reply
+
+
+def test_subject_sweep_moves_on_after_a_miss(zeev, ctx, monkeypatch):
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    def _vision(img, prompt):
+        if img == "img-basement-cam":
+            return ("FOUND: no\nAn empty basement.", None)
+        return ("FOUND: yes\nThe cat is on the landing.", None)
+    monkeypatch.setattr(zeev, "vision_complete", _vision)
+    zeev.handle_transcript(ctx, "where's Smokey")
+    assert "upstairs" in ctx.spoke[-1].lower(), ctx.spoke
+    assert "landing" in ctx.spoke[-1].lower(), ctx.spoke
+
+
+def test_subject_miss_is_worded_as_not_seen(zeev, ctx, monkeypatch):
+    """"I didn't see him", never "he isn't there" -- a small model missing a
+    dark cat on a dark couch is the wrong-city failure class."""
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: no\nAn empty room.", None))
+    zeev.handle_transcript(ctx, "check on Smokey")
+    assert "didn't see" in ctx.spoke[-1].lower(), ctx.spoke
+
+
+def test_subject_reports_a_dead_camera_as_such(zeev, ctx, monkeypatch):
+    """No frame at all must not be reported as "I didn't see Smokey"."""
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: None)
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: pytest.fail("no frame: must not call vision"))
+    zeev.handle_transcript(ctx, "check on Smokey")
+    assert "couldn't get a picture" in ctx.spoke[-1].lower(), ctx.spoke
+
+
+def test_named_room_narrows_the_sweep(zeev, ctx, monkeypatch):
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    looked = []
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda s, **k: looked.append(s) or "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: no\nAn empty basement.", None))
+    zeev.handle_transcript(ctx, "check on Smokey in the basement cam")
+    assert looked == ["basement-cam"], looked
+
+
+def test_subject_ack_and_progress_use_the_turns_voice(zeev, ctx, monkeypatch):
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: no\nEmpty.", None))
+    said = []
+    ctx._speak_device = lambda text, voice="sarina": said.append((text, voice))
+    monkeypatch.setattr(zeev, "_WAKE_VOICE", ["daniel"])
+    zeev.handle_transcript(ctx, "check on Smokey")
+    assert said and {v for _, v in said} == {"daniel"}, said
+
+
+def test_subject_reminder_goes_to_the_tool_branch(zeev, ctx, monkeypatch):
+    """This branch sits above the tool branch -- it must not swallow reminders."""
+    _subject_env(zeev, monkeypatch)
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda *a, **k: pytest.fail("a reminder must not grab a frame"))
+    reached = {}
+    monkeypatch.setattr(zeev, "_groq_post",
+                        lambda *a, **k: reached.setdefault("yes", True) and (None, "stop"))
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: reached.setdefault("yes", True) and (None, "stop", None))
+    try:
+        zeev.handle_transcript(ctx, "remind me to check on Smokey at four")
+    except Exception:
+        pass
+    assert reached.get("yes"), "reminder never reached the LLM/tool path"
+
+
+def test_no_subjects_configured_falls_through(zeev, ctx, monkeypatch):
+    _wyze_env(zeev, monkeypatch)
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {})
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda *a, **k: pytest.fail("no subjects: must not grab"))
+    reached = {}
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: reached.setdefault("yes", True) and (None, "stop", None))
+    try:
+        zeev.handle_transcript(ctx, "check on Smokey")
+    except Exception:
+        pass
+    assert reached.get("yes")
+
+
 def test_all_stage_direction_reply_still_says_something(zeev, ctx, monkeypatch):
     """Observed live: the model returned only "(Sarina's voice...)" and nothing
     else. Stripping that leaves an empty string, and empty is spoken as silence.

@@ -160,6 +160,19 @@ House cameras reach the same vision path. Wyze exposes **nothing** on the LAN by
 - **Secure RTSP (RTSPS, port 322) does not work with ffmpeg** — TLS 1.3 self-signed, and ffmpeg fails the handshake with `Error in the pull function` with or without verification. Turn it off; port 322 keeps listening afterwards but stops answering TLS.
 - **Never put a camera password in a URL or a shell command.** This one contained `%`, which `printf` ate — the value reached `.env` as 32 spaces plus `0.000000rak4^^+nop3=` — and its `@` then split the URL at the wrong place. `WYZE_RTSP_USER`/`WYZE_RTSP_PASS` are plain values, percent-encoded by `wyze_stream_url()`. Edit them with an editor, never `printf`.
 
+### Named subjects ("check on Smokey")
+
+A pet or person Zeev can be asked about **by name**, sweeping cameras until it finds them. `ZEEV_SUBJECTS=smokey:cat:basement-cam|upstairs` (comma-separated entries, `name:kind[:cam|cam]`, same unquoted shape as `OWW_VOICE_MAP`). Cameras default to those with a direct RTSP URL, capped at `ZEEV_SUBJECT_MAX_CAMS` (3).
+
+- **`kind` is what the vision model is asked about, never the name.** "Is there a cat in this image" is judgeable; "where's Smokey" invites the model to narrate a shadow as a resting cat — it cannot know which cat is Smokey and will not say so. The name is substituted back into Zeev's reply.
+- **The branch sits above the tool branch, so `resolve_subject()` rejects `_TOOL_INTENT_RE` phrasing outright.** "Remind me to check on Smokey at four" is a reminder; without the guard the camera sweep swallows it. Trigger must also appear in the first 60 chars with the name within 40 after it (the `_bt_call_match` shape) — a bare name mid-sentence is far too common.
+- **`parse_subject_sighting()` is three-state: yes / no / `None`.** Free-tier vision ignores the `FOUND:` format routinely. Folding unparseable into "no" burns the next camera and then denies the sighting while holding the description that made it; `None` reports the description as uncertain instead.
+- **Camera list must not default to all of `WYZE_CAMERAS`** — six of eight never answer, so an unlisted default spends `WYZE_SNAP_TIMEOUT` on each before speaking.
+- **Next grab starts under the current vision call** (grab 4–8s vs vision ~21–25s), so a two-camera sweep is ~38s rather than ~58s. Wasted work on a hit is one background ffmpeg.
+- A miss is worded **"I didn't see Smokey on …"**, never "he isn't there" — a small model missing a dark cat on a dark couch is the wrong-city failure class. Zero frames reports the cameras as asleep/offline instead, which is a different answer.
+- Speaking *through* a camera is **not possible**: the RTSP firmware is outbound-only (no ONVIF backchannel; v3 isn't ONVIF), and docker-wyze-bridge closed audio-out as `wontfix`. A BT speaker in the room is the route if this is ever wanted.
+- Pinned by `tests/test_wyze_subjects.py` (config, gate, verdict parsing) and the subject-sweep block in `tests/test_handle_transcript.py`.
+
 ### Reminders / timers (LLM tool calling)
 
 Zeev's only write capabilities. `reminders` table (`text`, `due_ts` epoch, `fired`); `_reminder_loop()` polls every 20s and speaks what's due.

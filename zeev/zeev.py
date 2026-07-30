@@ -5833,6 +5833,142 @@ def resolve_wyze_cam(text: str, cams: list[str] | None = None):
     return top[0], sorted(cams)
 
 
+# ---------------------------------------------------------------------------
+# Named subjects ("check on Smokey")
+# ---------------------------------------------------------------------------
+# A pet or a person Zeev can be asked about by name. This cannot go through
+# resolve_wyze_cam: "where's Smokey" names *who* to look for, and the room is
+# precisely what the question is asking. So it sweeps cameras instead of
+# resolving one.
+#
+# Format mirrors OWW_VOICE_MAP -- comma-separated, unquoted:
+#   ZEEV_SUBJECTS=smokey:cat:basement-cam|upstairs
+#   name : kind [: cam|cam]
+# `kind` is what the vision model is actually asked about ("is there a cat in
+# this image"); the name only ever appears in Zeev's reply. Asking a small model
+# for "Smokey" invites it to narrate a shadow as a resting cat -- it has no way
+# to know which cat is Smokey, and it will not say so.
+_SUBJECT_MAX_CAMS = int(os.environ.get("ZEEV_SUBJECT_MAX_CAMS", "3"))
+
+
+def parse_subjects(spec: str, known_cams=None, default_cams=None):
+    """Parse ZEEV_SUBJECTS into {key: {name, kind, cams}}.
+
+    Runs at import, so a typo in `.env` must skip-and-log rather than raise --
+    otherwise one bad character stops the whole app from starting.
+
+    Cameras default to those with a direct RTSP URL, not to every configured
+    camera: six of the eight here never answer, and an unlisted default would
+    spend WYZE_SNAP_TIMEOUT on each of them before saying anything.
+    """
+    known = list(WYZE_CAMERAS if known_cams is None else known_cams)
+    if default_cams is None:
+        default_cams = [c for c in known if c in WYZE_CAMERA_URLS] or known
+    out = {}
+    for entry in (spec or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            parts = [p.strip() for p in entry.split(":")]
+            name = parts[0]
+            kind = parts[1].lower() if len(parts) > 1 else ""
+            if not name or not kind:
+                print(f"[subject] ignoring {entry!r}: expected name:kind[:cam|cam]",
+                      flush=True)
+                continue
+            if len(parts) > 2 and parts[2]:
+                cams = [c.strip() for c in parts[2].split("|") if c.strip()]
+            else:
+                cams = list(default_cams)
+            good = [c for c in cams if c in known]
+            for c in cams:
+                if c not in known:
+                    print(f"[subject] {name}: unknown camera {c!r}, skipping it",
+                          flush=True)
+            if not good:
+                print(f"[subject] {name}: no usable cameras, ignoring", flush=True)
+                continue
+            out[name.lower()] = {"name": name, "kind": kind,
+                                 "cams": good[:_SUBJECT_MAX_CAMS]}
+        except Exception as e:
+            print(f"[subject] ignoring {entry!r}: {e}", flush=True)
+    return out
+
+
+WYZE_SUBJECTS = parse_subjects(os.environ.get("ZEEV_SUBJECTS", ""))
+
+# The trigger must sit near the start of the utterance and the name close
+# behind it, the same shape as _bt_call_match's first-60-chars rule -- a bare
+# name anywhere in a sentence is far too easy to hit in ordinary conversation.
+_SUBJECT_TRIGGER_RE = re.compile(
+    r"\b(check(?: on| in on)?|look(?:ing)? (?:for|in on)|find|peek at|"
+    r"keep an eye on|where(?:'?s| is| are)|how(?:'?s| is)|"
+    r"what(?:'?s| is|'?re| are))\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_subject(text: str, subjects=None):
+    """The subject named in `text`, or None.
+
+    Rejects reminder/calendar phrasing outright: "remind me to check on Smokey
+    at four" is a reminder, and this branch sits *above* the tool branch, so
+    without the guard it would swallow it and go stare at a camera instead.
+    """
+    subs = WYZE_SUBJECTS if subjects is None else subjects
+    if not subs or not text:
+        return None
+    if _TOOL_INTENT_RE.search(text):
+        return None
+    t = re.sub(r"[^a-z0-9' ]+", " ", text.lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    m = _SUBJECT_TRIGGER_RE.search(t[:60])
+    if not m:
+        return None
+    tail = t[m.end():m.end() + 40]
+    for key, info in subs.items():
+        if re.search(rf"\b{re.escape(key)}\b", tail):
+            return info
+    return None
+
+
+def subject_vision_prompt(kind: str, cam_label: str) -> str:
+    """Ask about the *kind*, and demand a parseable verdict line."""
+    return (
+        f"Is there a {kind} visible in this image? This is the {cam_label} "
+        f"camera.\nAnswer in exactly this form:\n"
+        f"FOUND: yes\nor\nFOUND: no\n"
+        f"Then one short sentence: if yes, where the {kind} is and what it is "
+        f"doing; if no, what you can see instead."
+    )
+
+
+_SUBJECT_FOUND_RE = re.compile(r"^[^\w]*found\s*[:\-]?\s*(yes|no)\b", re.I | re.M)
+
+
+def parse_subject_sighting(reply: str):
+    """``(found, description)`` where `found` is True, False or None.
+
+    None means the model ignored the format -- routine on the free tier, and
+    CLAUDE.md already records a vision reply that was *entirely* stage
+    direction. Folding that into "no" is the expensive mistake: it burns the
+    next camera and then denies the sighting while holding the description that
+    made it.
+    """
+    text = (reply or "").strip()
+    if not text:
+        return None, ""
+    m = _SUBJECT_FOUND_RE.search(text)
+    desc = (text[:m.start()] + text[m.end():]).strip() if m else text
+    desc = re.sub(r"^[\s:.,\-–—]+", "", desc)
+    if not _strip_stage_directions(desc):
+        desc = ""
+    if not m:
+        return None, desc
+    return m.group(1).lower() == "yes", desc
+
+
 def wyze_snapshot(stream: str, timeout: float | None = None):
     """Grab one frame from a bridge stream. Returns base64 JPEG or None.
 
@@ -7942,6 +8078,86 @@ def handle_transcript(ctx, transcript):
         print(f"Zeev: {reply}")
         finish_turn(ctx, reply, face=False, led=False)
         return
+
+    # ── Named subject on the house cameras ("check on Smokey") ────────────
+    # Above the room branch: "check on Smokey" names who, not where, and the
+    # sweep is what answers it. Above the tool branch too, hence the
+    # reminder guard inside resolve_subject().
+    _subj = resolve_subject(transcript) if WYZE_SUBJECTS else None
+    if _subj:
+        name, kind = _subj["name"], _subj["kind"]
+        # "check on Smokey in the basement" is a question about the basement.
+        # A named room narrows the sweep to that room rather than reordering it.
+        named_cam, _ = resolve_wyze_cam(transcript)
+        cams = ([named_cam] if named_cam else list(_subj["cams"]))[:_SUBJECT_MAX_CAMS]
+        if not cams:
+            finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
+            return
+        print(f"[subject] looking for {name} on {', '.join(cams)}", flush=True)
+        ctx._set_face("thinking", f"{name}…")
+
+        def _grab(stream):
+            box = []
+            th = threading.Thread(
+                target=lambda: box.append(wyze_snapshot(stream)), daemon=True)
+            th.start()
+            return th, box
+
+        # First grab runs under the announcement, same as the room branch below.
+        pending = {cams[0]: _grab(cams[0])}
+        ctx._speak_device(f"Let me look for {name}.", _LAST_VOICE)
+        found = best = None      # best = an inconclusive read worth reporting
+        frames = 0
+        for i, stream in enumerate(cams):
+            th, box = pending.get(stream) or _grab(stream)
+            th.join(WYZE_SNAP_TIMEOUT + 5)
+            img = box[0] if box else None
+            if not img:
+                print(f"[subject] no frame from {stream}", flush=True)
+                continue
+            frames += 1
+            # Start the next grab *under* this vision call: measured here, a
+            # grab is 4-8s against ~21-25s of free-tier vision, so overlapping
+            # them is most of the second camera's cost. On a hit the wasted
+            # work is one background ffmpeg.
+            if i + 1 < len(cams) and cams[i + 1] not in pending:
+                pending[cams[i + 1]] = _grab(cams[i + 1])
+            label = wyze_cam_label(stream)
+            vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
+            if not vreply:
+                print(f"[subject] vision failed on {stream}: {verr}", flush=True)
+                continue
+            seen, desc = parse_subject_sighting(vreply)
+            print(f"[subject] {stream}: found={seen} {desc[:80]!r}", flush=True)
+            if seen is True:
+                found = (label, desc)
+                break
+            if seen is None and desc and best is None:
+                best = (label, desc)
+            if i + 1 < len(cams):
+                ctx._speak_device(
+                    f"Not on the {label} camera. Checking the "
+                    f"{wyze_cam_label(cams[i + 1])}.", _LAST_VOICE)
+        if found:
+            label, desc = found
+            reply = (f"{name} is on the {label} camera. {desc}" if desc
+                     else f"I can see {name} on the {label} camera.")
+        elif best:
+            label, desc = best
+            reply = (f"I'm not sure whether that's {name}. On the {label} "
+                     f"camera I can see: {desc}")
+        elif not frames:
+            where = " or the ".join(wyze_cam_label(c) for c in cams)
+            reply = (f"I couldn't get a picture from the {where} camera just "
+                     "now — it may be asleep or offline.")
+        else:
+            where = " or the ".join(wyze_cam_label(c) for c in cams)
+            # "I didn't see him", not "he isn't there": a small model missing a
+            # dark cat on a dark couch is the wrong-city failure class again.
+            reply = f"I didn't see {name} on the {where} camera."
+        finish_turn(ctx, reply)
+        return
+    # ─────────────────────────────────────────────────────────────────────
 
     # ── Wyze house cameras ────────────────────────────────────────────────
     # Before the local-camera branch: naming a room should look at that room,

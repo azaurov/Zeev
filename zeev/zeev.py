@@ -4084,6 +4084,8 @@ def init_learning():
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
     threading.Thread(target=_memory_maintenance_loop, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
+    if _AMBIENT_LOCATION:
+        threading.Thread(target=_gps_refresh_loop, daemon=True).start()
 
 
 _MEMORY_MAINT_INTERVAL = 1800   # 30 min
@@ -4153,8 +4155,56 @@ _gps_cache: dict = {}     # {"result": dict, "ts": float}
 _GPS_CACHE_TTL = 1800     # 30 minutes
 
 
+def _nm_percent_to_dbm(pct: int) -> int:
+    """Convert NetworkManager's 0-100 SIGNAL to dBm.
+
+    Both geolocation APIs document `signalStrength` as **dBm**, but nmcli
+    reports a percentage, and passing the percentage through is silently
+    accepted -- it just makes the fix far worse. Measured against Google with
+    the same 7 APs: percentage gave **869 m** accuracy, dBm gave **11 m**.
+    NM derives the percentage as roughly `2 * (dBm + 100)`, so this is its
+    inverse, clamped to a plausible radio range.
+    """
+    return max(-100, min(-20, int(pct / 2) - 100))
+
+
+_WIFI_RESCAN_WAIT = 8       # seconds to wait for rescan results to populate
+
+
 def _wifi_scan_aps() -> list[dict]:
-    """Scan nearby WiFi APs via nmcli. Returns list of {macAddress, signalStrength}."""
+    """Scan nearby WiFi APs via nmcli. Returns list of {macAddress, signalStrength}.
+
+    signalStrength is **dBm** (see `_nm_percent_to_dbm`), not nmcli's percent.
+    """
+    # `nmcli dev wifi list` reports NetworkManager's *cached* scan, and nothing
+    # here ever asked for a fresh one. On an idle Pi that cache held a single AP
+    # -- below the two-AP minimum `_wifi_geolocate` needs -- so triangulation
+    # never ran and every fix silently fell through to IP geolocation, ~25 km
+    # out and naming the wrong town. An explicit rescan took it from 1 AP to 7.
+    #
+    # Best-effort on purpose: NM refuses a rescan within ~10s of the previous
+    # one, and refuses entirely without the polkit grant (it is a privileged
+    # operation and the service runs as `ragnar`). Either way the cached list is
+    # still used, so this degrades rather than failing.
+    try:
+        rs = subprocess.run(["nmcli", "dev", "wifi", "rescan"],
+                            capture_output=True, text=True, timeout=15)
+        if rs.returncode != 0:
+            print(f"[gps] wifi rescan unavailable ({rs.stderr.strip()[:90]}); "
+                  "using cached scan", flush=True)
+        else:
+            # Results populate progressively; stop as soon as there are enough
+            # rather than always paying the full wait.
+            for _ in range(_WIFI_RESCAN_WAIT):
+                time.sleep(1)
+                probe = subprocess.run(
+                    ["nmcli", "-t", "-f", "BSSID", "dev", "wifi", "list"],
+                    capture_output=True, text=True, timeout=10)
+                if len(probe.stdout.splitlines()) >= 2:
+                    break
+    except Exception as e:
+        print(f"[gps] wifi rescan skipped: {e}", flush=True)
+
     try:
         r = subprocess.run(
             ["nmcli", "-t", "-f", "BSSID,SIGNAL", "dev", "wifi", "list"],
@@ -4167,7 +4217,8 @@ def _wifi_scan_aps() -> list[dict]:
             if m:
                 bssid = m.group(1).replace("\\:", ":")
                 signal = int(m.group(2))
-                aps.append({"macAddress": bssid, "signalStrength": signal})
+                aps.append({"macAddress": bssid,
+                            "signalStrength": _nm_percent_to_dbm(signal)})
         return aps
     except Exception as e:
         print(f"[gps] wifi scan failed: {e}", flush=True)
@@ -4325,6 +4376,85 @@ def gps_summary(loc: dict) -> str:
 
 def needs_gps(text: str) -> bool:
     return bool(_GPS_RE.search(text))
+
+
+_AMBIENT_LOCATION = os.environ.get("ZEEV_AMBIENT_LOCATION", "1") != "0"
+_AMBIENT_GPS_MAX_AGE = 6 * 3600   # serve a stale place name rather than none
+_AMBIENT_CITY_MAX_ACC = 5000      # metres; coarser than this, drop to region
+
+
+def gps_cached() -> dict | None:
+    """Last known fix, or None. **Never triggers a scan.**
+
+    The ambient block runs on every turn, and a cold `gps_locate()` measured
+    1.27s here (nmcli subprocess + HTTP) -- plus the rescan wait. On one core
+    that is turn latency for something that changes on the scale of hours, so
+    the read path is cache-only and `_gps_refresh_loop` keeps it warm.
+
+    Tolerates a much older fix than `_GPS_CACHE_TTL` because a stale city is
+    far more useful than no city, and the refresher is what keeps it current.
+    """
+    r = _gps_cache.get("result")
+    if not r or "error" in r:
+        return None
+    if time.time() - _gps_cache.get("ts", 0) > _AMBIENT_GPS_MAX_AGE:
+        return None
+    return r
+
+
+def ambient_place(loc: dict | None = None) -> str:
+    """Coarse 'City, Region, Country' for the always-on prompt block, or ''.
+
+    Deliberately omits lat/lon and accuracy. This goes to Groq and OpenRouter on
+    *every* turn, and the coarse name carries the whole benefit (weather, "what's
+    near me", timezone sanity) at a fraction of the exposure. `gps_summary()`,
+    which includes coordinates, stays behind the `needs_gps` gate where the user
+    actually asked to be located.
+
+    An IP fix is ~25 km and names the wrong town -- measured Braintree and
+    Brockton for a device sitting in Canton -- so anything coarser than
+    `_AMBIENT_CITY_MAX_ACC` reports region only. Asserting a wrong city is worse
+    than saying less, because the model repeats it as fact.
+    """
+    loc = gps_cached() if loc is None else loc
+    if not loc or "error" in loc:
+        return ""
+    acc = loc.get("accuracy") or 0
+    fields = ["city", "regionName", "country"]
+    if acc and acc > _AMBIENT_CITY_MAX_ACC:
+        fields = ["regionName", "country"]
+    return ", ".join(str(loc[f]) for f in fields if loc.get(f))
+
+
+def _gps_refresh_loop():
+    """Keep the location cache warm so the prompt path never has to fetch.
+
+    Interval is deliberately *below* `_GPS_CACHE_TTL`: refreshing exactly at the
+    TTL leaves a window where every read finds an expired entry, which is how a
+    cache-only reader ends up serving nothing.
+    """
+    time.sleep(20)      # let startup have the core
+    while True:
+        try:
+            loc = gps_locate()
+            if "error" not in loc:
+                # A WiFi fix carries no place name; the ambient block is nothing
+                # but place names, so resolve it here in the background rather
+                # than on a turn.
+                if not loc.get("city") and loc.get("lat") is not None:
+                    geo = _reverse_geocode(loc["lat"], loc["lon"])
+                    if geo:
+                        loc = {**loc, **{k: v for k, v in geo.items() if v}}
+                        _gps_cache["result"] = loc
+                print(f"[gps] fix: {ambient_place(loc) or 'unknown'} "
+                      f"(±{int(loc.get('accuracy') or 0)}m via {loc.get('method')})",
+                      flush=True)
+        except Exception as e:
+            print(f"[gps] refresh loop error: {e}", flush=True)
+        time.sleep(_GPS_REFRESH_INTERVAL)
+
+
+_GPS_REFRESH_INTERVAL = 1200   # 20 min, under the 30-min cache TTL
 
 
 def _now_str() -> str:
@@ -5197,6 +5327,20 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     # timedatectl on the Pi is correct (America/New_York), so this needs no
     # lookup and cannot fail.
     parts.append(f"\n\n## Right now: {_now_str()}")
+
+    # Ambient location, coarse and cache-only. Previously the model only knew
+    # where it was when `needs_gps` matched -- i.e. when asked "where am I" --
+    # so it was blind to location on every other turn, including weather. That
+    # answer looked right only because a memorised fact happened to name the
+    # town, which goes stale the moment they travel.
+    if _AMBIENT_LOCATION:
+        place = ambient_place()
+        if place:
+            parts.append(
+                f"\n\n## Approximate location: {place}\n"
+                "This is ambient context. Do not mention it unless the user asks "
+                "where they are, or it is needed to answer (weather, what's nearby)."
+            )
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])

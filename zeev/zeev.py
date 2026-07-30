@@ -4327,6 +4327,18 @@ def needs_gps(text: str) -> bool:
     return bool(_GPS_RE.search(text))
 
 
+def _now_str() -> str:
+    """Local wall clock for the system prompt, e.g. 'Thursday, 30 July 2026, 9:55 AM EDT'.
+
+    %Z is included because the model was previously asked to "recalibrate your
+    time zone" and had no way to know it; naming the zone makes the answer
+    checkable instead of a guess. Note the `.astimezone()`: `datetime.now()` is
+    naive, so `%Z` on it formats as an empty string and the zone silently
+    vanishes -- which is the one part of this string that had to be there.
+    """
+    return datetime.now().astimezone().strftime("%A, %-d %B %Y, %-I:%M %p %Z").strip()
+
+
 # ---------------------------------------------------------------------------
 # Google Calendar
 # ---------------------------------------------------------------------------
@@ -5176,6 +5188,15 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         custom_sys_prompt = SYSTEM_PROMPT.replace("You are talking to Alex.", "You are talking to Maria (Alex's wife).")
         
     parts = [custom_sys_prompt]
+
+    # The wall clock belongs in *every* prompt, not just the tool prompt.
+    # Without it the model has no clock at all and confabulates rather than
+    # declining: observed live 2026-07-29 21:02-21:04, three consecutive turns
+    # answering "8:45 AM", then "2:45 PM", when the Pi's own clock read 21:03
+    # EDT throughout. datetime.now() is local and network-independent, and
+    # timedatectl on the Pi is correct (America/New_York), so this needs no
+    # lookup and cannot fail.
+    parts.append(f"\n\n## Right now: {_now_str()}")
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])

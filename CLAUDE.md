@@ -125,7 +125,27 @@ Single-file app: `zeev/zeev.py`.
 | `PRIOR_TURNS` | 15 turns loaded from DB per session |
 | `max_tokens` | 600 (8B) / 1200 (70B, R1, Torah) |
 | `temperature` | 0.75 |
-| `VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` |
+| `VISION_MODELS` | OpenRouter free tier (see below) — **Groq dropped vision** |
+
+### Vision
+
+**Groq no longer serves any vision model** (verified 2026-07-30 against `/v1/models`: 15 models, none accept images), so the old `_groq_post(VISION_MODEL)` 404s and every camera path that used it was dead — the Pi camera, web `/snap`, and terminal `/look`. All now go through **`vision_complete(image_b64, question)`**, which walks `VISION_MODELS` on **OpenRouter's free tier** in order, because a 429 or a stall on a free endpoint is routine rather than exceptional. Measured on a real frame: `google/gemma-4-26b-a4b-it:free` answered correctly in 9.8s, `gemma-4-31b:free` was 429, `nvidia/nemotron-nano-12b-v2-vl:free` didn't respond in 60s — hence that order.
+
+- Needs `OPENROUTER_API_KEY`. It was on the Pi but **missing from the dev checkout**, so the OpenRouter fallback CLAUDE.md documented had never actually run locally.
+- Web `/snap` no longer streams the vision reply — it sends one `token` event. A half-streamed reply from a model that then 429s can't be taken back.
+- Also gone from Groq: **`deepseek-r1-distill-llama-70b`**, the `3` reasoning route in `MODELS`.
+
+### Wyze cameras
+
+House cameras reach the same vision path. Wyze exposes **nothing** on the LAN by itself — no RTSP, no snapshot endpoint, and the cloud API has no still-frame call — so `docker-wyze-bridge` runs on bosgame (`/opt/wyze-bridge`, `network_mode: host`, UFW-restricted to `10.0.0.0/24`) and republishes each camera as RTSP. `wyze_snapshot(stream)` pulls one frame with `ffmpeg -rtsp_transport tcp -frames:v 1` and hands the base64 JPEG to `vision_complete`.
+
+- **Config**: `WYZE_RTSP_BASE` (`rtsp://user:pass@host:8554`), `WYZE_CAMERAS` (comma-separated stream names), `WYZE_SNAP_TIMEOUT`.
+- **Streams authenticate with `WB_API`, not `WB_PASSWORD`** — separate credentials, and using the wrong one gives a bare 401. Now set via `STREAM_AUTH`, pinned to the Pi and bosgame IPs.
+- **`_scrub_rtsp()` before logging anything from ffmpeg.** ffmpeg echoes the full input URL — password included — in *every* error line; that leaked a credential into a terminal transcript once. Pinned by `tests/test_wyze_cameras.py`.
+- **`resolve_wyze_cam()` asks rather than guesses.** No match or an ambiguous match returns `None` plus the candidate list, and the turn replies "Which camera? I can check …". Describing the wrong room confidently is the same failure class as the wrong-city problem — the model states it as fact.
+- `_WYZE_CAM_RE` is checked **before** `_CAMERA_RE` so naming a room looks at that room, not at whatever the Pi faces.
+- **Latency is bad and it is announced**: ~50s end to end (keyframe wait + free-tier vision), so the branch speaks "Let me look at the …" first, like `youtube_play`'s "Looking for X". Note the 17s grab in testing was inflated by the synthetic stream's 250-frame GOP; real cameras key far more often.
+- **Blocked on hardware, not code**: the cameras report `dtls: 1` and the bridge times out on the TUTK handshake (`IOTC_ER_TIMEOUT`) — a known open upstream issue. Verified end-to-end against a synthetic RTSP stream instead. Wyze's official RTSP firmware (v2/v3/Pan only; `rtsp_fw: False` on all eight today) bypasses both the bridge and DTLS.
 
 ### Reminders / timers (LLM tool calling)
 

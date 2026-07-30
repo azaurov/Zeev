@@ -450,6 +450,18 @@ _CAMERA_RE = re.compile(
     r"|\bcan you see (anything|something|what'?s|me)\b",
     re.IGNORECASE,
 )
+# A house camera is asked about differently from the Pi's own eye: "what's going
+# on in the basement", not "what do you see". Kept separate from _CAMERA_RE so
+# the local camera keeps its own phrasing, and checked first so naming a room
+# routes to that room rather than to whatever the Pi is pointed at.
+_WYZE_CAM_RE = re.compile(
+    r"\b(check|look at|look in|show me|peek at|pull up|what'?s (happening|going on|up))\b"
+    r".{0,30}\b(cam|camera|room|yard|basement|upstairs|downstairs|doorbell|door|garage)\b"
+    r"|\b(cam|camera)s?\b.{0,20}\b(see|show|view|feed)\b"
+    r"|\b(who|what|anyone|anybody|something)\b.{0,25}\b(at|in|on) the\b"
+    r".{0,20}\b(door|porch|driveway|yard|basement|kitchen|living room|garage)\b",
+    re.IGNORECASE,
+)
 _VISUAL_TRIGGER_RE = re.compile(
     r"\b(show|display|put on|pull up|do|play|start|run|light up|give me)\b.{0,25}"
     r"\b(the )?(screen|display|lcd|light show|visual|visuals|screensaver|effect|gfx|colors)\b"
@@ -647,6 +659,18 @@ _MODEL_SHORT = {
 }
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Groq removed every vision model (verified 2026-07-30 against /v1/models: 15
+# models, none accept images), so VISION_MODEL 404s and the camera paths that
+# depend on it are dead there. Vision now goes to OpenRouter's free tier.
+# Ordered by what actually answered a real frame: gemma-4-26b returned a correct
+# description in 9.8s, gemma-4-31b was 429 rate-limited, and the nvidia VL model
+# did not respond inside 60s. Free-tier 429s are routine, hence the list.
+VISION_MODELS = [
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+]
+VISION_TIMEOUT = float(os.environ.get("VISION_TIMEOUT", "60"))
 
 CAMERA_AVAILABLE  = False   # set by init_camera()
 THERMAL_AVAILABLE = False   # set by init_thermal()
@@ -5548,6 +5572,142 @@ def _build_vision_msgs(image_b64, question=""):
     ]
 
 
+def vision_complete(image_b64, question="", models=None, timeout=None):
+    """Describe an image. Returns ``(text, error)``; text is None on failure.
+
+    Walks `VISION_MODELS` in order because these are free-tier endpoints: a 429
+    or a stall on one is an ordinary Tuesday, not a reason to fail the turn.
+    Replaces the old single `_groq_post(VISION_MODEL)` call, which now 404s --
+    Groq dropped vision entirely.
+    """
+    if not OPENROUTER_API_KEY:
+        return None, "no OPENROUTER_API_KEY (Groq no longer serves vision models)"
+    msgs = _build_vision_msgs(image_b64, question)
+    last = "no models tried"
+    for m in (models or VISION_MODELS):
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": m, "messages": msgs, "max_tokens": 600},
+                timeout=timeout or VISION_TIMEOUT,
+            )
+            if r.status_code == 200:
+                txt = r.json()["choices"][0]["message"]["content"].strip()
+                if txt:
+                    return txt, None
+                last = f"{m}: empty reply"
+            else:
+                last = f"{m}: HTTP {r.status_code}"
+        except Exception as e:
+            last = f"{m}: {type(e).__name__}"
+        print(f"[vision] {last}, trying next", flush=True)
+    return None, last
+
+
+# ---------------------------------------------------------------------------
+# Wyze cameras (via docker-wyze-bridge on bosgame)
+# ---------------------------------------------------------------------------
+# Wyze cameras expose nothing on the LAN by themselves -- no RTSP, no snapshot
+# endpoint -- so a bridge republishes them as RTSP and Zeev pulls a single frame
+# into the same vision path the Pi's own camera uses.
+WYZE_RTSP_BASE  = os.environ.get("WYZE_RTSP_BASE", "")   # rtsp://user:pass@host:8554
+WYZE_CAMERAS    = [c.strip() for c in os.environ.get("WYZE_CAMERAS", "").split(",") if c.strip()]
+WYZE_SNAP_TIMEOUT = float(os.environ.get("WYZE_SNAP_TIMEOUT", "25"))
+
+_RTSP_URL_RE = re.compile(r"rtsp://\S+")
+
+
+def _scrub_rtsp(text: str) -> str:
+    """Strip RTSP URLs out of text before it is logged.
+
+    ffmpeg echoes the full input URL in *every* error line, and the stream
+    password lives in that URL. Learned the hard way: an unscrubbed ffmpeg
+    failure printed the credential straight into a terminal transcript.
+    """
+    return _RTSP_URL_RE.sub("rtsp://<redacted>", text or "")
+
+
+def wyze_cam_label(stream: str) -> str:
+    """'living-room-cam' -> 'living room cam'. Used for matching and speech."""
+    return stream.replace("-", " ").replace("_", " ").strip().lower()
+
+
+def resolve_wyze_cam(text: str, cams: list[str] | None = None):
+    """Pick the camera named in `text`. Returns ``(stream, alternatives)``.
+
+    `stream` is None when nothing matched, and `alternatives` is then the list
+    to offer the user. Describing the wrong room confidently is the same failure
+    class as reporting the wrong city -- the model repeats it as fact -- so an
+    ambiguous or missing match must ask rather than guess.
+
+    Longest label wins, so 'front yard' beats a bare 'yard' and 'living room
+    cam' is not shadowed by a camera merely called 'cam'.
+    """
+    cams = WYZE_CAMERAS if cams is None else cams
+    if not cams:
+        return None, []
+    t = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
+    t = re.sub(r"\s+", " ", t)
+    hits = []
+    for c in cams:
+        label = wyze_cam_label(c)
+        # Try the full label, then the label minus a trailing "cam"/"camera",
+        # so "check the living room" matches `living-room-cam`.
+        for phrase in (label, re.sub(r"\s+(cam|camera)$", "", label)):
+            if phrase and f" {phrase} " in t:
+                hits.append((len(phrase), c))
+                break
+    if not hits:
+        return None, sorted(cams)
+    hits.sort(reverse=True)
+    best_len = hits[0][0]
+    top = sorted({c for n, c in hits if n == best_len})
+    if len(top) > 1:
+        return None, top          # genuinely ambiguous -- ask
+    return top[0], sorted(cams)
+
+
+def wyze_snapshot(stream: str, timeout: float | None = None):
+    """Grab one frame from a bridge stream. Returns base64 JPEG or None.
+
+    RTSP over TCP because the default UDP transport drops frames on a busy Pi
+    and there is only one frame to lose.
+    """
+    if not WYZE_RTSP_BASE:
+        print("[wyze] WYZE_RTSP_BASE not set", flush=True)
+        return None
+    url = f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
+    out = f"/tmp/zeev_wyze_{stream}.jpg"
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-rtsp_transport", "tcp",
+             "-i", url, "-frames:v", "1", "-q:v", "3", "-y", out],
+            capture_output=True, text=True,
+            timeout=timeout or WYZE_SNAP_TIMEOUT,
+        )
+        if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+            print(f"[wyze] {stream} grab failed: {_scrub_rtsp(r.stderr)[:200]}", flush=True)
+            return None
+        with open(out, "rb") as fh:
+            return base64.b64encode(fh.read()).decode()
+    except subprocess.TimeoutExpired:
+        # Battery cameras sleep and the bridge starts streams on demand, so a
+        # timeout is an ordinary outcome here, not an exception worth a trace.
+        print(f"[wyze] {stream} timed out after {timeout or WYZE_SNAP_TIMEOUT}s "
+              "(camera asleep or still connecting)", flush=True)
+        return None
+    except Exception as e:
+        print(f"[wyze] {stream} grab error: {_scrub_rtsp(str(e))}", flush=True)
+        return None
+    finally:
+        try:
+            os.path.exists(out) and os.remove(out)
+        except Exception:
+            pass
+
+
 def _rtl_print(text):
     """Print text in correct RTL visual order via fribidi, falling back to plain print."""
     if not text:
@@ -6897,26 +7057,17 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 snap_sse({"image": f"data:image/jpeg;base64,{img}"})
                 snap_sse({"model": "Scout"})
 
-                vision_payload = _build_vision_msgs(img, question)
+                # Sent as one token event rather than streamed: the free vision
+                # endpoints are tried in order on 429/stall, and a half-streamed
+                # reply from a model that then fails cannot be taken back.
                 snap_reply = ""
                 try:
-                    resp, err = _groq_post(vision_payload, VISION_MODEL, max_tokens=600)
-                    if err:
-                        snap_sse({"error": err})
+                    snap_reply, verr = vision_complete(img, question)
+                    if not snap_reply:
+                        snap_reply = ""
+                        snap_sse({"error": verr or "vision unavailable"})
                     else:
-                        for line in resp.iter_lines():
-                            if not line or not line.startswith(b"data: "):
-                                continue
-                            chunk = line[6:]
-                            if chunk == b"[DONE]":
-                                break
-                            try:
-                                delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
-                                if delta:
-                                    snap_reply += delta
-                                    snap_sse({"token": delta})
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                pass
+                        snap_sse({"token": snap_reply})
                 except requests.RequestException as e:
                     snap_sse({"error": str(e)})
 
@@ -7627,6 +7778,45 @@ def handle_transcript(ctx, transcript):
         finish_turn(ctx, reply, face=False, led=False)
         return
 
+    # ── Wyze house cameras ────────────────────────────────────────────────
+    # Before the local-camera branch: naming a room should look at that room,
+    # not at whatever the Pi happens to face.
+    if WYZE_CAMERAS and WYZE_RTSP_BASE and (
+            _WYZE_CAM_RE.search(transcript)
+            or (_CAMERA_RE.search(transcript) and resolve_wyze_cam(transcript)[0])):
+        stream, alts = resolve_wyze_cam(transcript)
+        if not stream:
+            # Ask instead of picking one. A confidently described wrong room is
+            # worse than a one-line question.
+            names = ", ".join(wyze_cam_label(c) for c in alts[:6])
+            reply = f"Which camera? I can check {names}."
+            print(f"[wyze] no camera matched; asking. options: {names}", flush=True)
+            finish_turn(ctx, reply)
+            return
+        print(f"[wyze] grabbing {stream}…", flush=True)
+        ctx._set_face("thinking", f"{wyze_cam_label(stream)}…")
+        # Say something first. Measured end to end at ~50s (frame grab waits for
+        # a keyframe, then a free-tier vision model), and silence that long reads
+        # as a dead device. Same reason youtube_play announces "Looking for X"
+        # before its ~45s resolve.
+        ctx._speak_device(f"Let me look at the {wyze_cam_label(stream)}.")
+        img = wyze_snapshot(stream)
+        if not img:
+            reply = (f"I couldn't get a picture from the {wyze_cam_label(stream)} "
+                     "just now — it may be asleep or offline.")
+            finish_turn(ctx, reply)
+            return
+        reply, verr = vision_complete(
+            img, f"{transcript}\n\n(This is the {wyze_cam_label(stream)} camera feed.)")
+        if not reply:
+            print(f"[wyze] vision failed: {verr}", flush=True)
+            finish_turn(ctx, "Sorry, I couldn't look at that camera just now.")
+            return
+        print(f"Zeev [vision/{stream}]: {reply}\n")
+        finish_turn(ctx, reply)
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # ── Camera natural language handling ──────────────────────────────────
     if CAMERA_AVAILABLE and _CAMERA_RE.search(transcript):
         print(f"[camera] capturing…", flush=True)
@@ -7639,27 +7829,22 @@ def handle_transcript(ctx, transcript):
             append_message("assistant", reply)
             ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
             return
-        vision_payload = _build_vision_msgs(img, transcript)
         print(f"[camera] calling vision LLM…", flush=True)
-        resp, err = _groq_post(vision_payload, VISION_MODEL, stream=False, max_tokens=600)
-        if err or resp is None or resp.status_code != 200:
-            status_code = resp.status_code if resp is not None else "no resp"
-            detail = err or (resp.text if resp is not None else "no response")
-            print(f"Vision LLM error [{status_code}]: {detail}", flush=True)
+        reply, verr = vision_complete(img, transcript)
+        if not reply:
+            print(f"Vision error: {verr}", flush=True)
             try:
                 import datetime as _dt
                 with open(BASE_DIR / "data" / "zeev_errors.log", "a") as _ef:
-                    _ef.write(f"{_dt.datetime.now().isoformat()} Vision [{status_code}]: {detail[:300]}\n")
+                    _ef.write(f"{_dt.datetime.now().isoformat()} Vision: {str(verr)[:300]}\n")
             except Exception as e:
                 print(f"[llm] failed to write zeev_errors.log: {e}", flush=True)
-            display_msg = "Rate limited" if status_code == 429 else f"LLM err {status_code}"
-            ctx._set_face("error", display_msg)
+            ctx._set_face("error", "Vision err")
             ctx.board.set_rgb(*ctx._LED_ERROR)
             time.sleep(2)
             ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
             return
-        reply = resp.json()["choices"][0]["message"]["content"].strip()
-        print(f"Zeev [Scout]: {reply}\n")
+        print(f"Zeev [vision]: {reply}\n")
         finish_turn(ctx, reply)
         return
     # ─────────────────────────────────────────────────────────────────────
@@ -10153,26 +10338,11 @@ def main():
             if not img:
                 print(f"{DIM}Capture failed.{RESET}\n")
                 continue
-            vision_msgs = _build_vision_msgs(img, question)
-            resp, err = _groq_post(vision_msgs, VISION_MODEL, stream=True, max_tokens=600)
-            if err:
-                print(f"Error: {err}\n")
+            full_reply, verr = vision_complete(img, question)
+            if not full_reply:
+                print(f"Error: {verr}\n")
                 continue
-            print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
-            full_reply = ""
-            for line in resp.iter_lines():
-                if not line or not line.startswith(b"data: "):
-                    continue
-                chunk = line[6:]
-                if chunk == b"[DONE]":
-                    break
-                try:
-                    delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
-                    print(delta, end="", flush=True)
-                    full_reply += delta
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    pass
-            print()
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {full_reply}")
             if full_reply:
                 q_text = question or "What do you see?"
                 session.append({"role": "user", "content": f"[camera] {q_text}"})

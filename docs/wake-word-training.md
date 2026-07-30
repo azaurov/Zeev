@@ -132,6 +132,8 @@ Decided 2026-07-29 on the strength of the live false-wake data below — the
 three-syllable `sarina` measured ~1.4 fp/hr against real household
 conversation, so both phrases move to the four-syllable `Hey` form.
 
+The two marked lines at the top of cell 10:
+
 ```python
 # run 1
 TARGET_PHRASE = ['hey sarina']
@@ -140,9 +142,15 @@ MODEL_NAME    = 'hey_sarina'
 # run 2 — note 'hey zeev' is deliberately absent, see below
 TARGET_PHRASE = ['hey ze ev', 'hey zeh ev']
 MODEL_NAME    = 'hey_zeev'
+```
 
-# both runs, per the table above
-n_samples, n_samples_val, steps = 10000, 2000, 50000
+and three values in the `config = {…}` dict further down the *same* cell — they
+are dict keys, not bare locals:
+
+```python
+    'n_samples':       10000,   # was 2000
+    'n_samples_val':   2000,    # was 1000
+    'steps':           50000,   # was 20000
 ```
 
 `'hey zeev'` is omitted on purpose: bare `zeev` phonemizes to `[Z][IY][V]`, one
@@ -150,6 +158,17 @@ syllable, so including it would again train two different words as one positive
 class — the exact mistake that cost run 1. Check the phonemizer line in cell 11
 for **both** remaining variants and confirm they agree before letting the run
 finish.
+
+**`MODEL_NAME` is not phonetic — `hey_zeev` is safe here.** It reads oddly right
+next to "'hey zeev' is deliberately absent", so: the notebook uses `model_name`
+only for the output path (`out_path = f"{cfg['feature_save_dir']}/{cfg['model_name']}.onnx"`)
+and log lines. Only `target_phrase` reaches the sample generator. Verified by
+reading the notebook, because getting this wrong reintroduces the one-syllable
+target and costs the whole run.
+
+Note also that `steps` is **stage 1 only**. Cell 14 runs three stages, adding
+`max(2000, steps // 10)` each for stages 2 and 3, so `50000` actually trains
+60000 steps.
 
 **`MODEL_NAME` is the prediction key, so the `.env` must move with it.** The
 filename stem is what openWakeWord keys on, so renaming the phrase renames the
@@ -164,6 +183,24 @@ OWW_VOICE_MAP=hey_zeev:daniel,hey_sarina:sarina
 Keep the old `zeev.onnx`/`sarina.onnx` on the Pi until the new pair is measured
 against a real mic — reverting is then two `.env` edits, not another 90 minutes.
 
+**What would show the prefix worked, and what would show it didn't.** This is a
+bet on phrase length: there is good evidence the short forms failed and none yet
+that the long ones succeed. Four of the five false wakes were on sentences with
+no target-adjacent phonemes at all ("where's Leo's medication", "it going was the
+opposite"), which is a weak positive class firing on generic speech, not
+confusion with a near-homophone — and more syllables is only indirectly a fix
+for that. So count false wakes **per model** over a few hours:
+
+- Both `hey_sarina` and `hey_zeev` firing on the same conversational audio means
+  the shared onset bought syllables without buying separation. The next lever is
+  sample count or a phrase with a distinctive consonant onset — **not** another
+  prefix.
+- One hot and one quiet is what `OWW_THRESHOLDS` is for.
+- Under ~0.2 fp/hr with recall holding on a real mic is the actual pass.
+
+`journalctl -u zeev-device | grep trigger` gives per-model names and scores, so
+this is a read, not an instrumentation job.
+
 ### Raise the sample counts — the notebook's defaults undertrain badly
 
 The notebook ships a reduced config tuned for a fast demo run, not a usable
@@ -177,10 +214,11 @@ hour** — it would miss more than half of what you say. Upstream's own
 | `n_samples_val` | 1000 | 2000 | **2000** |
 | `steps` | 20000 | 50000 | **50000** |
 
-Editing these in cell 10 costs roughly half an hour more: TTS generation in
-cell 11 scales linearly with `n_samples` (~15 min at 10000), while training
-itself is cheap — 20000 steps measured at 1.9 min on a T4, so 50000 is about
-five.
+These are keys in cell 10's `config = {…}` dict, not the two marked
+`TARGET_PHRASE`/`MODEL_NAME` lines above it. Editing them costs roughly half an
+hour more: TTS generation in cell 11 scales linearly with `n_samples` (~15 min
+at 10000), while training itself is cheap — 20000 steps measured at 1.9 min on a
+T4, so 50000 (60000 with stages 2–3) is about six.
 
 **A short phrase needs the higher counts most.** `zeev` at 2000 samples was the
 worst case: fewest samples, fewest syllables. If recall still comes out below

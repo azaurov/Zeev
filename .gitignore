@@ -21,6 +21,11 @@ __pycache__/
 
 # Environment secrets — never commit the real .env
 .env
+# Key rotations leave timestamped copies next to it, and those hold live
+# credentials too. Only `.env` itself was ignored, so a `git add -A` during a
+# rotation would have staged one.
+.env.*
+!.env.example
 
 # Personal call scripts
 zeev/quantum_convo.py

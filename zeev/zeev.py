@@ -9311,10 +9311,19 @@ def run_device_mode():
                     print(f"[wake] openwakeword ready — {names} "
                           f"in {time.time() - t0:.1f}s, threshold {OWW_THRESHOLD}"
                           f", {_mem_snapshot()}", flush=True)
-                    for _stem in (Path(p).stem for p in paths):
+                    _stems = {Path(p).stem for p in paths}
+                    for _stem in _stems:
                         if _stem not in OWW_VOICE_MAP:
                             print(f"[wake] note: no voice mapped for {_stem!r}; "
                                   "replies use the transcript-inferred voice", flush=True)
+                    # A misspelled stem here is otherwise invisible: the model
+                    # loads fine and silently keeps the global threshold, which
+                    # looks exactly like the override not working.
+                    for _key in OWW_THRESHOLDS:
+                        if _key not in _stems:
+                            print(f"[wake] warning: OWW_THRESHOLDS names {_key!r}, "
+                                  f"which is not a loaded model ({', '.join(sorted(_stems))}); "
+                                  "that threshold does nothing", flush=True)
                 except Exception as e:
                     print(f"[wake] openwakeword init failed, using cloud fallback: {e}",
                           flush=True)

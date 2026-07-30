@@ -245,8 +245,8 @@ it usually isn't the fix.
 
 ### A threshold cannot separate overlapping distributions
 
-Measured live over eight hours of ordinary household conversation
-(2026-07-29, `sarina` + `zeev` loaded, 13 triggers):
+Measured live over the `sarina` model's whole first session — 2026-07-29
+19:25–23:00, **3 h 35 min** of ordinary household conversation, 13 triggers:
 
 | | scores |
 |---|---|
@@ -263,8 +263,10 @@ distinct scores (the stale-buffer signature is *identical* scores), and one of
 them was "That's not right" seconds after Zeev gave the wrong time. That is a
 person addressing the device. Take the plain reading.
 
-Note also that **~0.7 false wakes/hour on fluent human speech is a phrase-length
-problem, not a tuning problem** — upstream targets 0.2 fp/hr. Three syllables
+Note also that **5 false wakes in 3 h 35 min — ~1.4 fp/hr — is a phrase-length
+problem, not a tuning problem**: upstream targets 0.2 fp/hr, so this is seven
+times over. (The listener only runs in `idle`/`ready`, so true armed time is a
+little under the wall clock and the real rate a little above 1.4.) Three syllables
 turned out not to be enough against real conversation, so the fix is the `Hey`
 prefix from §1: retrain as `['hey sarina']`. No noise guard can help here
 either; all four false transcripts were fluent multi-word speech and sail

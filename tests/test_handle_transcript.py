@@ -301,6 +301,42 @@ def test_camera_ack_uses_the_turns_voice(zeev, ctx, monkeypatch):
     assert voices == {"daniel"}, f"expected one voice, got {said}"
 
 
+def test_camera_grab_overlaps_the_announcement(zeev, ctx, monkeypatch):
+    """The frame grab must run *under* the ack, not after it.
+
+    _speak_device blocks for the duration of the audio (~3.2s measured on the
+    Pi). The ack exists precisely because the grab is slow, so running them in
+    series made the wait it apologises for ~3s longer. This is pure ordering --
+    a functional test still passes with the serial version -- so it needs its
+    own pin: the grab has to have *started* before the ack returns.
+    """
+    _wyze_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    grab_started = threading.Event()
+    release_grab = threading.Event()
+
+    def _slow_snap(stream, **kw):
+        grab_started.set()
+        release_grab.wait(5)
+        return "ZmFrZQ=="
+
+    monkeypatch.setattr(zeev, "wyze_snapshot", _slow_snap)
+    monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: ("A hallway.", None))
+
+    overlapped = []
+
+    def _speak(text, voice="sarina"):
+        # Runs where the real TTS would block; the grab must already be in
+        # flight by now, and must not have needed the ack to finish first.
+        overlapped.append(grab_started.wait(5))
+        release_grab.set()
+
+    ctx._speak_device = _speak
+    zeev.handle_transcript(ctx, "what's going on upstairs")
+    assert overlapped and overlapped[0], \
+        "grab had not started while the announcement was speaking (still serial)"
+
+
 def test_all_stage_direction_reply_still_says_something(zeev, ctx, monkeypatch):
     """Observed live: the model returned only "(Sarina's voice...)" and nothing
     else. Stripping that leaves an empty string, and empty is spoken as silence.

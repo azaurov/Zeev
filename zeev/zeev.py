@@ -7973,8 +7973,22 @@ def handle_transcript(ctx, transcript):
         # hardcoded "sarina" default while the reply used the resolved
         # _LAST_VOICE, so a "Hey Ze'ev" camera request was announced by Sarina
         # and answered by Zeev -- two speakers in one turn.
+        #
+        # The grab runs *under* the announcement rather than after it.
+        # _speak_device blocks for the duration of the audio (~3.2s measured),
+        # and the announcement exists precisely because the grab is slow, so
+        # serializing them made the wait it apologises for ~3s longer. They
+        # share nothing: the grab is ffmpeg pulling RTSP, the announcement is
+        # the daemon playing remote-synthesised audio.
+        _snap = []
+        _snap_t = threading.Thread(
+            target=lambda: _snap.append(wyze_snapshot(stream)), daemon=True)
+        _snap_t.start()
         ctx._speak_device(f"Let me look at the {wyze_cam_label(stream)}.", _LAST_VOICE)
-        img = wyze_snapshot(stream)
+        # Bounded by wyze_snapshot's own timeout; the join cap is slack above it
+        # so a wedged thread can't hang the turn forever.
+        _snap_t.join(WYZE_SNAP_TIMEOUT + 5)
+        img = _snap[0] if _snap else None
         if not img:
             reply = (f"I couldn't get a picture from the {wyze_cam_label(stream)} "
                      "just now — it may be asleep or offline.")

@@ -75,3 +75,38 @@ def test_scrub_handles_empty(zeev):
 def test_snapshot_without_config_returns_none(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "")
     assert zeev.wyze_snapshot("upstairs") is None
+
+
+# --- direct-camera URLs -----------------------------------------------------
+#
+# A camera flashed with Wyze's RTSP firmware answers at rtsp://user:pass@ip/live
+# and never appears as a bridge path, so both forms have to coexist: bare names
+# resolve under WYZE_RTSP_BASE, `name=rtsp://...` entries override it.
+
+def test_bridge_camera_uses_base(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "rtsp://u:p@10.0.0.141:8554")
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
+    assert zeev.wyze_stream_url("basement-cam") == "rtsp://u:p@10.0.0.141:8554/basement-cam"
+
+
+def test_direct_camera_overrides_base(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "rtsp://u:p@10.0.0.141:8554")
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        {"upstairs": "rtsp://zeev:pw@10.0.0.217/live"})
+    assert zeev.wyze_stream_url("upstairs") == "rtsp://zeev:pw@10.0.0.217/live"
+    # the others must still go via the bridge
+    assert zeev.wyze_stream_url("basement-cam") == "rtsp://u:p@10.0.0.141:8554/basement-cam"
+
+
+def test_direct_camera_works_without_any_base(zeev, monkeypatch):
+    """Flashing every camera should not require the bridge to stay configured."""
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "")
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {"upstairs": "rtsp://a:b@10.0.0.217/live"})
+    assert zeev.wyze_stream_url("upstairs") == "rtsp://a:b@10.0.0.217/live"
+    assert zeev.wyze_stream_url("basement-cam") == ""
+
+
+def test_trailing_slash_on_base_does_not_double(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "rtsp://u:p@10.0.0.141:8554/")
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
+    assert zeev.wyze_stream_url("upstairs") == "rtsp://u:p@10.0.0.141:8554/upstairs"

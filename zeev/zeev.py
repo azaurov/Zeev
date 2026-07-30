@@ -5645,8 +5645,35 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
 # endpoint -- so a bridge republishes them as RTSP and Zeev pulls a single frame
 # into the same vision path the Pi's own camera uses.
 WYZE_RTSP_BASE  = os.environ.get("WYZE_RTSP_BASE", "")   # rtsp://user:pass@host:8554
-WYZE_CAMERAS    = [c.strip() for c in os.environ.get("WYZE_CAMERAS", "").split(",") if c.strip()]
 WYZE_SNAP_TIMEOUT = float(os.environ.get("WYZE_SNAP_TIMEOUT", "25"))
+
+# WYZE_CAMERAS entries are either a bare stream name, served under
+# WYZE_RTSP_BASE by the bridge, or `name=rtsp://…` for a camera that speaks RTSP
+# itself. Both forms coexist because they must: a camera flashed with Wyze's
+# RTSP firmware is reached directly at rtsp://user:pass@ip/live and never
+# appears as a bridge path, while un-flashed cameras only exist via the bridge.
+WYZE_CAMERAS = []
+WYZE_CAMERA_URLS = {}
+for _entry in os.environ.get("WYZE_CAMERAS", "").split(","):
+    _entry = _entry.strip()
+    if not _entry:
+        continue
+    if "=" in _entry:
+        _n, _u = _entry.split("=", 1)
+        _n = _n.strip()
+        WYZE_CAMERAS.append(_n)
+        WYZE_CAMERA_URLS[_n] = _u.strip()
+    else:
+        WYZE_CAMERAS.append(_entry)
+
+
+def wyze_stream_url(stream: str) -> str:
+    """Full RTSP URL for a camera: its own if it has one, else via the bridge."""
+    if stream in WYZE_CAMERA_URLS:
+        return WYZE_CAMERA_URLS[stream]
+    if not WYZE_RTSP_BASE:
+        return ""
+    return f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
 
 _RTSP_URL_RE = re.compile(r"rtsp://\S+")
 
@@ -5707,10 +5734,11 @@ def wyze_snapshot(stream: str, timeout: float | None = None):
     RTSP over TCP because the default UDP transport drops frames on a busy Pi
     and there is only one frame to lose.
     """
-    if not WYZE_RTSP_BASE:
-        print("[wyze] WYZE_RTSP_BASE not set", flush=True)
+    url = wyze_stream_url(stream)
+    if not url:
+        print(f"[wyze] no URL for {stream!r}: set WYZE_RTSP_BASE or "
+              f"a {stream}=rtsp://… entry in WYZE_CAMERAS", flush=True)
         return None
-    url = f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
     out = f"/tmp/zeev_wyze_{stream}.jpg"
     try:
         r = subprocess.run(

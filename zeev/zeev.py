@@ -627,12 +627,33 @@ def extract_quantum_query(text):
     return m.group("idea").strip() if m else None
 
 # Model auto-routing heuristics
+# Routes to the reasoning model. The keyword list alone missed essentially every
+# arithmetic question a person actually asks out loud -- measured 0 of 8 spoken
+# word problems reaching it, six landing on 8B -- because speech rarely contains
+# "calculate" or "theorem". The added branches cover the shapes that do occur:
+# spoken arithmetic, percentages, "how many/much" with a number in it, and
+# elapsed-time questions. Routing costs nothing here: GPT-OSS 120B answered in
+# 0.5s, faster than the 70B it would otherwise fall to.
 _REASONING_RE = re.compile(
-    r"\b(prove|proof|calculate|solve|equation|formula|math|"
-    r"step.by.step|walk me through|think through|deduce|infer|"
+    r"\b(?:prove|proof|calculate|solve|equation|formula|math|"
+    r"step.by.step|walk me through|deduce|infer|"
     r"probability|logic|algorithm|complexity|optimize|"
     r"puzzle|riddle|paradox|theorem|derive|derivation|"
-    r"geometric|algebraic|differential|integral|calculus)\b",
+    r"geometric|algebraic|differential|integral|calculus)\b"
+    # "think through" only matched the bare form; nobody says that. The natural
+    # spoken shapes are "think it through", "work this out", "figure it out".
+    r"|\b(?:think|work|figure|reason)\s+(?:it|this|that)\s+(?:through|out)\b"
+    r"|\b(?:think|reason)\s+through\b"
+    # Arithmetic carrying no keyword at all -- the common case in speech.
+    r"|\d+\s*(?:[-+*/^]|x\b|times|plus|minus|divided\s+by|over)\s*\d+"
+    r"|\b\d+(?:\.\d+)?\s*(?:%|percent)\b"
+    # "how many days until the 25th" reasons; "how many nieces do I have" is
+    # recall, so a digit has to be present for this branch to fire.
+    r"|\bhow\s+(?:many|much)\b[^.?!]{0,40}\d"
+    r"|\bsplit\b[^.?!]{0,30}\bbetween\b"
+    # Elapsed time: "leaves at 3:40, takes 95 minutes, what time does it arrive".
+    r"|\b(?:leaves?|depart\w*|start\w*)\b[^.?!]{0,60}\b(?:what time|when|arrive)"
+    r"|\bwhat time\b[^.?!]{0,60}\b(?:arrive|get there|finish|be done)\b",
     re.IGNORECASE,
 )
 _SMART_RE = re.compile(
@@ -5432,6 +5453,17 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             geo = _reverse_geocode(loc["lat"], loc["lon"])
             loc = {**loc, **{k: v for k, v in geo.items() if v}}
         parts.append(f"\n\n## Current location:\n{gps_summary(loc)}")
+
+    # The reasoning model reaches for LaTeX and markdown unprompted -- a live
+    # "split 175 between 4" came back as "\[ \frac{175}{4} \]", which TTS reads
+    # as "backslash frac". Same shape as the weather units instruction below.
+    if _REASONING_RE.search(user_text):
+        parts.append(
+            "\n\n## Spoken maths: this reply is read aloud. Give the answer in "
+            "plain words with no LaTeX, no \\frac, no markdown tables and no "
+            "asterisks — say \"forty three dollars and seventy five cents\", "
+            "not \"$43.75\" or a fraction. Show at most a couple of short steps."
+        )
 
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:

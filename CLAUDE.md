@@ -99,12 +99,12 @@ Requires `GROQ_API_KEY` and `TAVILY_API_KEY` in `.env` (loaded via plain-text pa
 Single-file app: `zeev/zeev.py`.
 
 **Key non-obvious behaviors**:
-- **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B limit doesn't block 8B calls. Torah/70B/R1 use 1200 max_tokens; 8B uses 600.
+- **`_groq_post`** — per-model 429 cooldown: `_groq_model_rate_limited_until` dict (model_id → epoch, 5-min backoff) so a 70B limit doesn't block 8B calls. Torah/70B/GPT-OSS use 1200 max_tokens; 8B uses 600.
 - **`_groq_post_with_fallback`** — wraps `_groq_post`; on 429/cooldown, retries once via OpenRouter free tier (`_OPENROUTER_FALLBACK_MODEL` maps each Groq model id → its equivalent, default `meta-llama/llama-3.3-70b-instruct:free`). Used by device-mode chat, web `/chat` SSE, thermal SSE, detail prefetch — not vision (no free equivalent) or the 413 trim-retry loop. `_llm_post`'s streaming path has its own longer OpenRouter→Gemini→bosgame chain.
 - **`_bosgame_stream`** — uses `http.client.HTTPSConnection` directly (not `requests`) to avoid urllib3 pool conflicts. Connect timeout 10s; socket timeout extends to 300s after connect for slow CPU inference.
 - **`_llm_post`** — on connection errors, prints `[offline]` and falls back to `_bosgame_stream()`. Returns `(resp, err, provider)`.
 - **`extract_memory`** — prefers `_bosgame_complete` (llama3.2:1b, ~5–10s) over Groq; falls back on error.
-- **`route_model`** — `_REASONING_RE` → DeepSeek R1; `_SMART_RE` → 70B; default → 8B. No extra API call.
+- **`route_model`** — `_REASONING_RE` → GPT-OSS 120B; `_SMART_RE` → 70B; default → 8B. No extra API call. **The gate matters more than the model here**: keyed on written-maths vocabulary, it sent *zero* of eight ordinary spoken word problems to the reasoning model (six went to 8B), because speech rarely says "calculate" or "theorem". It now also matches spoken arithmetic, percentages, "how many/much" *with a digit present* (so "how many nieces do I have" stays recall), and elapsed-time questions. Routing there is free — GPT-OSS answered in 0.4s, faster than the 70B it otherwise fell to. Pinned by `tests/test_model_routing.py`, negatives included.
 - **`zeev_cleanup()`** — kills `_MUSIC_PROC`/`_piper_term_proc`, `pkill -f` for `zeev_music`/`zeev_rec.wav`/`piper --model`/`mpg123`, removes `/tmp/zeev_*`. Registered via `atexit` so it fires on unhandled exceptions too, not just SIGINT/SIGTERM.
 - **`run_web_server`** — `ThreadingHTTPServer`. Endpoints: `/chat` (SSE stream), `/clear`, `/memory`, `/memorize`, `/tts` (POST text → WAV), `/transcribe` (raw audio → transcript), `/thermal` (SSE), `/thermal-status`, `/volume` (GET/POST), `/snap`, `/gps`.
 - **`_build_system_prompt`** — assembles base persona + memory facts + RAG hits + optional calendar + optional Tavily results. `needs_weather(text)` (subset of `needs_search`) appends a units instruction to spell out `°F`→"degrees Fahrenheit" / `mph`→"miles per hour" in full words, since replies are spoken via TTS.
@@ -116,14 +116,14 @@ Single-file app: `zeev/zeev.py`.
 |---|---|---|
 | `1` | `llama-3.1-8b-instant` | Fast — casual chat |
 | `2` | `llama-3.3-70b-versatile` | Smart — code, writing |
-| `3` | `deepseek-r1-distill-llama-70b` | Reasoning — math, logic |
+| `3` | `openai/gpt-oss-120b` | Reasoning — math, logic |
 
 ### Key constants
 
 | Constant | Value |
 |---|---|
 | `PRIOR_TURNS` | 15 turns loaded from DB per session |
-| `max_tokens` | 600 (8B) / 1200 (70B, R1, Torah) |
+| `max_tokens` | 600 (8B) / 1200 (70B, GPT-OSS, Torah) |
 | `temperature` | 0.75 |
 | `VISION_MODELS` | OpenRouter free tier (see below) — **Groq dropped vision** |
 
@@ -133,7 +133,7 @@ Single-file app: `zeev/zeev.py`.
 
 - Needs `OPENROUTER_API_KEY`. It was on the Pi but **missing from the dev checkout**, so the OpenRouter fallback CLAUDE.md documented had never actually run locally.
 - Web `/snap` no longer streams the vision reply — it sends one `token` event. A half-streamed reply from a model that then 429s can't be taken back.
-- Also gone from Groq: **`deepseek-r1-distill-llama-70b`**, the `3` reasoning route in `MODELS`.
+- `deepseek-r1-distill-llama-70b` is also gone from Groq, but `MODELS["3"]` had already been migrated to `openai/gpt-oss-120b` — only these docs were stale, which is exactly how a phantom bug gets reported. Read the table in `zeev.py`, not here, when a model id is in question.
 
 ### Wyze cameras
 
@@ -321,7 +321,7 @@ Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL): `dtoverlay=i2c-gpio,bus=3,i2c_g
   - **Behavior difference**: the cloud path can catch "Miss Minutes, what's the weather" in one window and pass the tail straight through; the local path fires on the phrase alone, so the follow-up is always recorded separately. Speak, pause, then ask.
   - **`_has_speech()`** (`zeev.py`, near `_rms`): webrtcvad at **aggressiveness 3, deliberately not the library default** — measured on this Pi, levels 0–2 passed every synthetic signal except digital silence (which the RMS gate already rejects), making the gate a no-op. Level 3 also rejects pure tones and hiss; broadband noise and mains hum still pass. Fails open when webrtcvad is missing so it can never make the device deaf. Pinned by `tests/test_wake_gate.py`. On Python 3.13 the Pi needs the **`webrtcvad-wheels`** fork — the original imports `pkg_resources`, dropped in setuptools 82.
 - **Wake-word state coupling (bit us once)**: the listener only runs when `_face_state` is `idle`/`ready`. `_busy` is cleared *only* in `_go_idle()`, and the success path calls `_go_ready()` — so before this was fixed, one voice turn locked the wake word out for the rest of the boot. `_idle_sleep_watcher` now also drops a quiet `ready` session back to `idle`. The listener deliberately does **not** gate on `_screen_on[0]`.
-- **429 fallback**: `_handle_transcript` retries 70B/R1 429s with 8B before surfacing an error.
+- **429 fallback**: `_handle_transcript` retries 70B/GPT-OSS 429s with 8B before surfacing an error.
 - **LLM error display**: Whisplay screen shows "Rate limited", "No network", or "LLM err <code>"; full detail in `data/zeev_errors.log`.
 - **`_CAMERA_RE`**: natural-language camera intents → `capture_image()` + Llama 4 Scout vision call (when `CAMERA_AVAILABLE`).
 - **`_VISUAL_TRIGGER_RE`**: visual-effect intents → runs the matching `shapes_test.py` effect (`fire`/`matrix`/`psychedelic`/`liquid`/`tunnel`/`plasma`/`cartoon`) on `board` for 12s; sets `_visual_effect_active[0] = True` first so `_face_loop` skips its own SPI writes (avoids two threads racing on `board.draw_image`).

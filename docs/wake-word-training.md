@@ -269,15 +269,18 @@ feiergente01 are both CPU-only, so Colab it is.
 
 ```bash
 ssh ragnar@ragnarok "mkdir -p ~/oww"
-scp zeev.onnx sarina.onnx ragnar@ragnarok:~/oww/
+scp hey_zeev.onnx hey_sarina.onnx ragnar@ragnarok:~/oww/
 ```
 
 Then in `/home/ragnar/Zeev/.env`:
 
 ```
-OWW_MODEL_PATH=/home/ragnar/oww/zeev.onnx,/home/ragnar/oww/sarina.onnx
-OWW_VOICE_MAP=zeev:daniel,sarina:sarina
+OWW_MODEL_PATH=/home/ragnar/oww/hey_zeev.onnx,/home/ragnar/oww/hey_sarina.onnx
+OWW_VOICE_MAP=hey_zeev:daniel,hey_sarina:sarina
 ```
+
+Verify the copy with `md5sum` on both ends, and leave the previous `.onnx` files
+in `~/oww/` — rollback is then one `.env` edit rather than another training run.
 
 `sudo systemctl restart zeev-device`, then watch it arm:
 
@@ -285,11 +288,18 @@ OWW_VOICE_MAP=zeev:daniel,sarina:sarina
 journalctl -u zeev-device -f | grep '\[wake\]'
 ```
 
-Observed with both custom models loaded (warm restart, not a cold boot):
+Observed with the `hey_*` pair loaded (warm restart, 2026-07-30):
 
 ```
-[wake] openwakeword ready — zeev, sarina in 4.8s, threshold 0.5, avail 140M, swap 22M
+[wake] openwakeword ready — hey_zeev, hey_sarina in 7.8s, threshold 0.5, avail 217M, swap 158M
 ```
+
+**Don't restart into a boot.** Immediately after power-on the load average sits
+near 1.7 and everything wants cold pages off the SD card at once; a restart there
+competes with it and the model load crawls. Waiting for `/proc/loadavg` to fall
+below ~1.0 (about 90s) cost nothing and gave the 7.8s above. The earlier
+`zeev, sarina` pair measured 4.8s on a settled box and 3171s during a cold boot —
+same model, same file, three orders of magnitude apart.
 
 A `model not found` or `init failed` line means the path is wrong or the file
 didn't survive the copy.

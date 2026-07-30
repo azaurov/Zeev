@@ -5667,13 +5667,34 @@ for _entry in os.environ.get("WYZE_CAMERAS", "").split(","):
         WYZE_CAMERAS.append(_entry)
 
 
+# Credentials as plain values, kept OUT of the URL. A camera password is chosen
+# in a phone app and routinely contains %, @, ^, + and =, every one of which
+# means something else in a URL -- and `%` additionally gets eaten by printf on
+# the way into .env. Both happened here: a password reached the file as 32
+# spaces and "0.000000rak4^^+nop3=". Supplying user/pass separately and letting
+# `quote()` do the encoding removes the whole class of error.
+WYZE_RTSP_USER = os.environ.get("WYZE_RTSP_USER", "")
+WYZE_RTSP_PASS = os.environ.get("WYZE_RTSP_PASS", "")
+
+
 def wyze_stream_url(stream: str) -> str:
-    """Full RTSP URL for a camera: its own if it has one, else via the bridge."""
+    """Full RTSP URL for a camera: its own if it has one, else via the bridge.
+
+    If the configured URL carries no credentials and WYZE_RTSP_USER/PASS are
+    set, they are injected and percent-encoded here.
+    """
     if stream in WYZE_CAMERA_URLS:
-        return WYZE_CAMERA_URLS[stream]
-    if not WYZE_RTSP_BASE:
+        url = WYZE_CAMERA_URLS[stream]
+    elif WYZE_RTSP_BASE:
+        url = f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
+    else:
         return ""
-    return f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
+    if WYZE_RTSP_USER and "@" not in url.split("://", 1)[-1].split("/", 1)[0]:
+        scheme, _, rest = url.partition("://")
+        from urllib.parse import quote
+        cred = f"{quote(WYZE_RTSP_USER, safe='')}:{quote(WYZE_RTSP_PASS, safe='')}"
+        url = f"{scheme}://{cred}@{rest}"
+    return url
 
 _RTSP_URL_RE = re.compile(r"rtsp://\S+")
 

@@ -110,3 +110,49 @@ def test_trailing_slash_on_base_does_not_double(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "rtsp://u:p@10.0.0.141:8554/")
     monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
     assert zeev.wyze_stream_url("upstairs") == "rtsp://u:p@10.0.0.141:8554/upstairs"
+
+
+# --- credentials supplied separately ----------------------------------------
+#
+# A camera password is typed into a phone app and routinely contains %, @, ^, +
+# and = -- all meaningful in a URL, and `%` is additionally eaten by printf on
+# the way into .env. Both happened live: a password landed in the file as 32
+# spaces followed by "0.000000rak4^^+nop3=". Taking user/pass as plain values
+# and encoding them here removes the entire class of error.
+
+def test_credentials_are_injected_and_encoded(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {"upstairs": "rtsps://10.0.0.217:322/live"})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "bushido3shep")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "%40Frak4^^+nop3=")
+    url = zeev.wyze_stream_url("upstairs")
+    assert url == "rtsps://bushido3shep:%2540Frak4%5E%5E%2Bnop3%3D@10.0.0.217:322/live"
+    # No raw URL-hostile character may survive in the userinfo. Checked after
+    # stripping the percent-escapes, so the '%' of an escape isn't mistaken for
+    # a literal one -- and note '4' is a legitimate password character here.
+    userinfo = url.split("://", 1)[1].split("@", 1)[0]
+    import re as _re
+    bare = _re.sub(r"%[0-9A-Fa-f]{2}", "", userinfo)
+    for ch in "%@^+=/?#":
+        assert ch not in bare, f"raw {ch!r} left in userinfo {userinfo!r}"
+
+
+def test_existing_credentials_in_url_are_not_doubled(zeev, monkeypatch):
+    """A URL that already carries creds must be left alone."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {"upstairs": "rtsps://a:b@10.0.0.217:322/live"})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "other")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "pw")
+    assert zeev.wyze_stream_url("upstairs") == "rtsps://a:b@10.0.0.217:322/live"
+
+
+def test_no_credentials_configured_leaves_url_bare(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {"upstairs": "rtsps://10.0.0.217:322/live"})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "")
+    assert zeev.wyze_stream_url("upstairs") == "rtsps://10.0.0.217:322/live"
+
+
+def test_credentials_apply_to_bridge_urls_too(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "rtsp://10.0.0.141:8554")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "zeev")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "p@ss")
+    assert zeev.wyze_stream_url("basement-cam") == "rtsp://zeev:p%40ss@10.0.0.141:8554/basement-cam"

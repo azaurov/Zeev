@@ -5871,7 +5871,13 @@ def parse_subjects(spec: str, known_cams=None, default_cams=None):
             continue
         try:
             parts = [p.strip() for p in entry.split(":")]
-            name = parts[0]
+            # `smokey|smoky|smokie` -- Whisper spells a name however it hears
+            # it, and _WYZE_CAM_RE's own comment records it transcribing one
+            # spoken sentence two different ways. A missed alias fails
+            # *silently*: the turn falls through to the LLM, which then says it
+            # cannot see Smokey. First alias is the one Zeev speaks.
+            aliases = [a.strip() for a in parts[0].split("|") if a.strip()]
+            name = aliases[0] if aliases else ""
             kind = parts[1].lower() if len(parts) > 1 else ""
             if not name or not kind:
                 print(f"[subject] ignoring {entry!r}: expected name:kind[:cam|cam]",
@@ -5889,8 +5895,9 @@ def parse_subjects(spec: str, known_cams=None, default_cams=None):
             if not good:
                 print(f"[subject] {name}: no usable cameras, ignoring", flush=True)
                 continue
-            out[name.lower()] = {"name": name, "kind": kind,
-                                 "cams": good[:_SUBJECT_MAX_CAMS]}
+            info = {"name": name, "kind": kind, "cams": good[:_SUBJECT_MAX_CAMS]}
+            for alias in aliases:
+                out[alias.lower()] = info
         except Exception as e:
             print(f"[subject] ignoring {entry!r}: {e}", flush=True)
     return out
@@ -8135,26 +8142,34 @@ def handle_transcript(ctx, transcript):
             if seen is None and desc and best is None:
                 best = (label, desc)
             if i + 1 < len(cams):
+                # Only a clean "no" may be announced as a miss. An inconclusive
+                # read is still the answer if nothing better turns up, and
+                # "not on the basement cam" followed by "on the basement cam I
+                # can see a grey cat" is Zeev contradicting itself out loud.
+                nxt = wyze_cam_label(cams[i + 1])
                 ctx._speak_device(
-                    f"Not on the {label} camera. Checking the "
-                    f"{wyze_cam_label(cams[i + 1])}.", _LAST_VOICE)
+                    f"Not on the {label}. Checking the {nxt}." if seen is False
+                    else f"Checking the {nxt}.", _LAST_VOICE)
+        # Labels already end in "cam" (wyze_cam_label('basement-cam') ->
+        # 'basement cam'), so nothing here appends "camera" -- same reason the
+        # room branch below speaks the bare label.
         if found:
             label, desc = found
-            reply = (f"{name} is on the {label} camera. {desc}" if desc
-                     else f"I can see {name} on the {label} camera.")
+            reply = (f"{name} is on the {label}. {desc}" if desc
+                     else f"I can see {name} on the {label}.")
         elif best:
             label, desc = best
             reply = (f"I'm not sure whether that's {name}. On the {label} "
-                     f"camera I can see: {desc}")
+                     f"I can see: {desc}")
         elif not frames:
             where = " or the ".join(wyze_cam_label(c) for c in cams)
-            reply = (f"I couldn't get a picture from the {where} camera just "
+            reply = (f"I couldn't get a picture from the {where} just "
                      "now — it may be asleep or offline.")
         else:
             where = " or the ".join(wyze_cam_label(c) for c in cams)
             # "I didn't see him", not "he isn't there": a small model missing a
             # dark cat on a dark couch is the wrong-city failure class again.
-            reply = f"I didn't see {name} on the {where} camera."
+            reply = f"I didn't see {name} on the {where}."
         finish_turn(ctx, reply)
         return
     # ─────────────────────────────────────────────────────────────────────

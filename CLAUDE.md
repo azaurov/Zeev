@@ -162,7 +162,9 @@ House cameras reach the same vision path. Wyze exposes **nothing** on the LAN by
 
 ### Named subjects ("check on Smokey")
 
-A pet or person Zeev can be asked about **by name**, sweeping cameras until it finds them. `ZEEV_SUBJECTS=smokey:cat:basement-cam|upstairs` (comma-separated entries, `name:kind[:cam|cam]`, same unquoted shape as `OWW_VOICE_MAP`). Cameras default to those with a direct RTSP URL, capped at `ZEEV_SUBJECT_MAX_CAMS` (3).
+A pet or person Zeev can be asked about **by name**, sweeping cameras until it finds them. `ZEEV_SUBJECTS=smokey|smoky|smokie:cat:basement-cam|upstairs` (comma-separated entries, `name[|alias…]:kind[:cam|cam]`, same unquoted shape as `OWW_VOICE_MAP`). Cameras default to those with a direct RTSP URL, capped at `ZEEV_SUBJECT_MAX_CAMS` (3). **`.env` is not in git**, so this line has to be added on the Pi itself — without it `WYZE_SUBJECTS` is `{}`, the gate never matches, and the turn falls through to the LLM, which confidently says it can't see Smokey.
+
+- **Name aliases exist because Whisper spells names however it hears them** (the same hazard `_WYZE_CAM_RE`'s comment records for room phrasing). A missed alias fails *silently* — first alias is the one Zeev speaks.
 
 - **`kind` is what the vision model is asked about, never the name.** "Is there a cat in this image" is judgeable; "where's Smokey" invites the model to narrate a shadow as a resting cat — it cannot know which cat is Smokey and will not say so. The name is substituted back into Zeev's reply.
 - **The branch sits above the tool branch, so `resolve_subject()` rejects `_TOOL_INTENT_RE` phrasing outright.** "Remind me to check on Smokey at four" is a reminder; without the guard the camera sweep swallows it. Trigger must also appear in the first 60 chars with the name within 40 after it (the `_bt_call_match` shape) — a bare name mid-sentence is far too common.

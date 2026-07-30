@@ -52,6 +52,15 @@ def test_bad_config_skips_rather_than_raises(zeev, spec):
     assert zeev.parse_subjects(spec, CAMS) == {}
 
 
+def test_aliases_cover_whisper_spellings(zeev):
+    """Whisper spells a name however it hears it, and a missed alias fails
+    silently -- the turn falls through to the LLM, which denies seeing him."""
+    subs = zeev.parse_subjects("smokey|smoky|smokie:cat:upstairs", CAMS)
+    assert sorted(subs) == ["smokey", "smokie", "smoky"]
+    assert {s["name"] for s in subs.values()} == {"smokey"}, "one spoken name"
+    assert zeev.resolve_subject("where's Smoky", subs)["name"] == "smokey"
+
+
 def test_multiple_subjects(zeev):
     subs = zeev.parse_subjects("smokey:cat:upstairs,luna:dog:basement-cam", CAMS)
     assert sorted(subs) == ["luna", "smokey"]

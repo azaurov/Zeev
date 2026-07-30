@@ -387,6 +387,38 @@ def test_subject_miss_is_worded_as_not_seen(zeev, ctx, monkeypatch):
     assert "didn't see" in ctx.spoke[-1].lower(), ctx.spoke
 
 
+def test_subject_replies_never_say_cam_camera(zeev, ctx, monkeypatch):
+    """Labels already end in "cam"; appending "camera" is heard, not seen.
+
+    A substring assertion on "basement cam" is satisfied by "basement cam
+    camera", so this needs its own pin.
+    """
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    for vreply in ("FOUND: yes\nA cat on the couch.", "FOUND: no\nEmpty."):
+        monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: (vreply, None))
+        ctx.spoke.clear()
+        zeev.handle_transcript(ctx, "check on Smokey")
+        assert not any("cam camera" in s.lower() for s in ctx.spoke), ctx.spoke
+
+
+def test_inconclusive_read_is_not_announced_as_a_miss(zeev, ctx, monkeypatch):
+    """Saying "not on the basement cam" and then describing the cat on the
+    basement cam is Zeev contradicting itself inside one turn."""
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    def _vision(img, prompt):
+        if img == "img-basement-cam":
+            return ("A grey cat is on the stairs.", None)   # no FOUND line
+        return ("FOUND: no\nEmpty landing.", None)
+    monkeypatch.setattr(zeev, "vision_complete", _vision)
+    zeev.handle_transcript(ctx, "check on Smokey")
+    assert not any("not on the basement" in s.lower() for s in ctx.spoke), ctx.spoke
+    assert "grey cat" in ctx.spoke[-1].lower(), ctx.spoke
+
+
 def test_subject_reports_a_dead_camera_as_such(zeev, ctx, monkeypatch):
     """No frame at all must not be reported as "I didn't see Smokey"."""
     _subject_env(zeev, monkeypatch)

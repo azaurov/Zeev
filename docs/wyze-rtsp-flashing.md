@@ -32,6 +32,41 @@ handshake (cameras report `dtls: 1`, a known open upstream issue). Leo's room
 was confirmed to fail this way too, so flashing is not merely the better path,
 it is the only one that works.
 
+## Outcome: both remaining candidates failed (2026-07-30)
+
+**Leo's room (v2) and Living Room (Pan v1) cannot run this firmware.** Both were
+flashed with the correct image and both **bricked — written, but unbootable** —
+and both were recovered with the stock image below. Do not retry; each attempt
+risks a working camera for a payoff now known to be zero.
+
+The cause is documented by Wyze themselves on their forum: *"Some iterations of
+the V2 lost RTSP compatibility."* Certain production batches physically cannot
+boot it. `4.28.4.49` / `4.29.4.49` are the *improved-compatibility* rebuilds
+released to address exactly this, and they are the last builds that exist — the
+feature was discontinued, so there is nothing newer to try.
+
+What that rules out, so it isn't re-litigated:
+
+- **Not the images.** Contents verified, not just the download path: the v2
+  image carries the string `4.28.4.49` and RTSP code, the Pan image `4.29.4.49`,
+  and the stock images contain no RTSP code at all. CRCs clean on all four.
+- **Not the procedure or the card.** The stock recovery flashed successfully
+  from the same card, same `demo.bin` name, same button sequence.
+- **Not a downgrade block.** A blocked flash boots the old firmware normally; a
+  brick means the image was accepted and written. `wz_mini_hacks` also states
+  these two models downgrade freely, with no version threshold.
+- **A closed port 554 proves nothing.** On RTSP firmware the port stays closed
+  until RTSP is enabled in the app, so a port scan cannot tell "stock" from
+  "RTSP firmware, not yet enabled". The firmware version in the app is the only
+  reliable read.
+
+So the ceiling is **two working cameras** (the v3s), not four. The only
+remaining route for the v2/Pan is replacing the firmware entirely with
+[thingino](https://thingino.com/) — open source, actively maintained, native
+RTSP, supports the Ingenic T20 these use. It means losing the Wyze app, and
+initial flashing often needs UART serial access rather than an SD card. Not
+attempted.
+
 ## Images
 
 All four fetched from Wyze's official CDN and validated as u-boot legacy

@@ -8135,7 +8135,11 @@ def handle_transcript(ctx, transcript):
                 print(f"[subject] vision failed on {stream}: {verr}", flush=True)
                 continue
             seen, desc = parse_subject_sighting(vreply)
-            print(f"[subject] {stream}: found={seen} {desc[:80]!r}", flush=True)
+            # 200, not 80: the first live sweep logged "...and a cat" on a
+            # FOUND: no, which reads exactly like a false negative. The full
+            # line was "a cat tree" -- the truncation, not the model, was the
+            # problem, and it cost a frame grab to disprove.
+            print(f"[subject] {stream}: found={seen} {desc[:200]!r}", flush=True)
             if seen is True:
                 found = (label, desc)
                 break
@@ -8170,6 +8174,9 @@ def handle_transcript(ctx, transcript):
             # "I didn't see him", not "he isn't there": a small model missing a
             # dark cat on a dark couch is the wrong-city failure class again.
             reply = f"I didn't see {name} on the {where}."
+        # Every other branch prints its reply; this one didn't, so the first
+        # live sweep left a journal that showed both verdicts and no answer.
+        print(f"Zeev [subject/{name}]: {reply}\n", flush=True)
         finish_turn(ctx, reply)
         return
     # ─────────────────────────────────────────────────────────────────────

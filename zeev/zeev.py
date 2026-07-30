@@ -1040,7 +1040,11 @@ def _expand_numbers_for_tts(text):
 # processing your question. Please wait." Seen most from the vision models, which
 # get the persona prompt without the conversational context that discourages it.
 _STAGE_TAG_RE = re.compile(r"</?[a-zA-Z][^>]{0,40}>")
-_STAGE_LABEL_RE = re.compile(r"(?m)^\s*(?:Sarina|Zeev)\s*:\s*")
+# The emphasis markers matter: markdown `**Sarina:**` is common from the vision
+# models, and `*` is not stripped until _clean_for_tts runs its markdown pass --
+# which is AFTER this one. Without them the label survives the strip, sheds its
+# asterisks a line later, and gets spoken as "Sarina colon".
+_STAGE_LABEL_RE = re.compile(r"(?m)^\s*[*_]{0,2}\s*(?:Sarina|Zeev)\s*:\s*[*_]{0,2}\s*")
 _STAGE_PAREN_RE = re.compile(
     r"^\s*[\(\[][^)\]]{0,160}?\b(voice|speak\w*|tone|accent|calm|composed|"
     r"professional|narrat\w*)\b[^)\]]{0,160}?[\)\]]\s*", re.IGNORECASE)

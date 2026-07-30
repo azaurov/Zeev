@@ -22,6 +22,15 @@ import pytest
     ("[Sarina, calm tone] The door is closed.", ["calm tone"], "The door is closed."),
     ("Zeev's thoughts are processing your query. Please wait. The room is quiet.",
      ["processing", "Please wait"], "The room is quiet."),
+    # Markdown-bold labels, from the basement camera 2026-07-30. The `*` are not
+    # stripped until _clean_for_tts's markdown pass, which runs AFTER the label
+    # pass -- so the label used to survive, shed its asterisks, and be spoken as
+    # "Sarina colon".
+    ("**Sarina:** The room is heavily cluttered.\n\n"
+     "**Zeev:** Chaos precedes order, Alex.",
+     ["Sarina:", "Zeev:"], "The room is heavily cluttered"),
+    ("*Sarina:* The door is open.", ["Sarina:"], "The door is open."),
+    ("__Zeev:__ It is quiet here.", ["Zeev:"], "It is quiet here."),
 ])
 def test_stage_directions_removed(zeev, raw, must_go, must_stay):
     out = zeev._clean_for_tts(raw)

@@ -7862,7 +7862,12 @@ def handle_transcript(ctx, transcript):
     # ── Wyze house cameras ────────────────────────────────────────────────
     # Before the local-camera branch: naming a room should look at that room,
     # not at whatever the Pi happens to face.
-    if WYZE_CAMERAS and WYZE_RTSP_BASE and (
+    # Gate on WYZE_CAMERAS alone. It used to also require WYZE_RTSP_BASE, which
+    # silently disabled the whole branch once a camera moved to its own URL and
+    # the bridge base was no longer set: "what's going on upstairs" fell through
+    # to the LLM, which cheerfully answered that it cannot see the upstairs.
+    # Whether a given camera is reachable is wyze_stream_url()'s business.
+    if WYZE_CAMERAS and (
             _WYZE_CAM_RE.search(transcript)
             or (_CAMERA_RE.search(transcript) and resolve_wyze_cam(transcript)[0])):
         stream, alts = resolve_wyze_cam(transcript)

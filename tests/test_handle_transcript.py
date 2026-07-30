@@ -220,3 +220,62 @@ def test_llm_failure_surfaces_an_error_state(zeev, ctx, monkeypatch):
     zeev.handle_transcript(ctx, "how are you today")
     assert any(f[0] == "error" for f in ctx.faces), ctx.faces
     assert ctx.states[-1] in ("idle", "ready")
+
+
+# --- Wyze camera branch -----------------------------------------------------
+#
+# The gate used to require WYZE_RTSP_BASE as well as WYZE_CAMERAS, which
+# silently disabled the entire branch the moment a camera moved to its own
+# per-camera URL and the bridge base was no longer set. Live result: "what's
+# going on upstairs" fell through to the LLM, which answered that it has no
+# access to the upstairs -- confident, fluent, and completely wrong. Whether a
+# camera is reachable belongs to wyze_stream_url(), not to the gate.
+
+def _wyze_env(zeev, monkeypatch, base="", urls=None):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["upstairs", "basement-cam"])
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", base)
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        urls if urls is not None else {"upstairs": "rtsp://10.0.0.217:554/stream0"})
+
+
+def test_camera_branch_fires_with_no_bridge_base(zeev, ctx, monkeypatch):
+    """The exact live regression: per-camera URL only, no WYZE_RTSP_BASE."""
+    _wyze_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: ("A quiet hallway.", None))
+    zeev.handle_transcript(ctx, "what's going on upstairs")
+    assert any("quiet hallway" in s.lower() for s in ctx.spoke), ctx.spoke
+
+
+def test_camera_branch_still_fires_via_bridge_base(zeev, ctx, monkeypatch):
+    _wyze_env(zeev, monkeypatch, base="rtsp://10.0.0.141:8554", urls={})
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: ("Boxes and a boiler.", None))
+    zeev.handle_transcript(ctx, "check the basement cam")
+    assert any("boiler" in s.lower() for s in ctx.spoke), ctx.spoke
+
+
+def test_unnamed_camera_asks_which(zeev, ctx, monkeypatch):
+    _wyze_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda *a, **k: pytest.fail("must not grab before asking"))
+    zeev.handle_transcript(ctx, "check the camera")
+    assert any("which camera" in s.lower() for s in ctx.spoke), ctx.spoke
+
+
+def test_no_cameras_configured_falls_through_to_llm(zeev, ctx, monkeypatch):
+    """With nothing configured the branch must not swallow the turn."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", [])
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda *a, **k: pytest.fail("no cameras: must not grab"))
+    called = {}
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: called.setdefault("yes", True) and (None, "stop", None))
+    try:
+        zeev.handle_transcript(ctx, "what's going on upstairs")
+    except Exception:
+        pass
+    assert called.get("yes"), "should have reached the LLM path"

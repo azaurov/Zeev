@@ -1034,8 +1034,44 @@ def _expand_numbers_for_tts(text):
     return text
 
 
+# Models narrate the performance instead of just performing it, and every one of
+# these was read aloud verbatim on the device: "<voice>Sarina: ...</voice>",
+# "(Sarina speaks in a composed, professional female voice.)" and "Zeev is
+# processing your question. Please wait." Seen most from the vision models, which
+# get the persona prompt without the conversational context that discourages it.
+_STAGE_TAG_RE = re.compile(r"</?[a-zA-Z][^>]{0,40}>")
+_STAGE_LABEL_RE = re.compile(r"(?m)^\s*(?:Sarina|Zeev)\s*:\s*")
+_STAGE_PAREN_RE = re.compile(
+    r"^\s*[\(\[][^)\]]{0,160}?\b(voice|speak\w*|tone|accent|calm|composed|"
+    r"professional|narrat\w*)\b[^)\]]{0,160}?[\)\]]\s*", re.IGNORECASE)
+_STAGE_FILLER_RE = re.compile(
+    r"(?i)\b(?:Zeev|Sarina)(?:'s thoughts)?\s+(?:is|are)\s+"
+    r"(?:processing|thinking about|considering)[^.!?]*[.!?]\s*"
+    r"(?:Please wait\.?\s*)?")
+
+
+def _strip_stage_directions(text):
+    """Remove narration *about* the reply so only the reply is spoken."""
+    text = _STAGE_TAG_RE.sub(" ", text)
+    text = _STAGE_FILLER_RE.sub("", text)
+    # Only leading parentheticals: a mid-sentence aside is usually real content.
+    prev = None
+    while prev != text:
+        prev = text
+        text = _STAGE_PAREN_RE.sub("", text)
+    # Looped: removing one label can pull the next to the front of the string,
+    # and stripping the filler sentence eats the newline that made the second
+    # label line-initial in the first place.
+    prev = None
+    while prev != text:
+        prev = text
+        text = _STAGE_LABEL_RE.sub("", text.lstrip())
+    return text.strip()
+
+
 def _clean_for_tts(text, lang=None):
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = _strip_stage_directions(text)
     text = re.sub(r"[*_`#~]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if lang in (None, "en"):
@@ -5594,9 +5630,25 @@ def capture_image(width=1280, height=720):
         return None
 
 
+# Vision models do not decline to read text -- they emit something of the right
+# shape. Observed live 2026-07-30 on a house-camera frame: the model read the
+# large timestamp overlay exactly right, then reported a t-shirt as saying "THE
+# WORLD IS NOT YOUR PERSONAL KID" when it actually read "I WANT MY MTV". Small,
+# curved, fabric-warped text is where this happens, and the invented version is
+# spoken aloud as fact -- the same failure as naming the wrong city or the wrong
+# room. Everything else in that description was accurate, which is what makes it
+# dangerous: there is no cue that one clause is fabricated.
+_VISION_HONESTY = (
+    "\n\nImportant: describe only what you can actually make out. If text in the "
+    "image is small, angled, blurred or on fabric, do not guess at it — say the "
+    "writing isn't legible. Do not invent brands, logos, names or numbers. It is "
+    "always better to say you cannot tell than to state something plausible."
+)
+
+
 def _build_vision_msgs(image_b64, question=""):
     """Build the multimodal messages list for a vision API call."""
-    q = question or "What do you see in this image? Describe it concisely."
+    q = (question or "What do you see in this image? Describe it concisely.") + _VISION_HONESTY
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {

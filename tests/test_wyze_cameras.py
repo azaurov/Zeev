@@ -67,6 +67,12 @@ def test_scrub_removes_rtsp_credentials(zeev):
     assert "DESCRIBE failed: 401" in out, "must keep the diagnostic part"
 
 
+def test_scrub_covers_rtsps_too(zeev):
+    """The secure scheme carries the same password."""
+    out = zeev._scrub_rtsp("Error opening rtsps://zeev:sup3rSecret@10.0.0.217:322/live")
+    assert "sup3rSecret" not in out
+
+
 def test_scrub_handles_empty(zeev):
     assert zeev._scrub_rtsp("") == ""
     assert zeev._scrub_rtsp(None) == ""
@@ -156,6 +162,44 @@ def test_credentials_apply_to_bridge_urls_too(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "zeev")
     monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "p@ss")
     assert zeev.wyze_stream_url("basement-cam") == "rtsp://zeev:p%40ss@10.0.0.141:8554/basement-cam"
+
+
+# --- per-camera credentials -------------------------------------------------
+#
+# Each flashed camera's user/pass is typed into the phone app separately, so
+# there is no reason two cameras would share a pair. A single global pair
+# silently 401s every camera but the one it was set for.
+
+def test_per_camera_credentials_override_the_shared_pair(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        {"basement-cam": "rtsp://10.0.0.90:554/stream0",
+                         "upstairs": "rtsp://10.0.0.217:554/stream0"})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "shared")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "sharedpw")
+    monkeypatch.setenv("WYZE_RTSP_USER_BASEMENT_CAM", "cellar")
+    monkeypatch.setenv("WYZE_RTSP_PASS_BASEMENT_CAM", "p@ss word")
+    assert zeev.wyze_stream_url("basement-cam") == \
+        "rtsp://cellar:p%40ss%20word@10.0.0.90:554/stream0"
+    # the camera without its own pair still uses the shared one
+    assert zeev.wyze_stream_url("upstairs") == \
+        "rtsp://shared:sharedpw@10.0.0.217:554/stream0"
+
+
+def test_env_suffix_normalises_the_stream_name(zeev):
+    assert zeev._wyze_env_suffix("basement-cam") == "BASEMENT_CAM"
+    assert zeev._wyze_env_suffix("front yard 2") == "FRONT_YARD_2"
+    assert zeev._wyze_env_suffix("upstairs") == "UPSTAIRS"
+
+
+def test_per_camera_user_without_password_does_not_fall_back(zeev, monkeypatch):
+    """A camera with a user set and no password must not borrow the shared
+    password -- that silently sends the wrong secret to the wrong camera."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {"cam": "rtsp://10.0.0.9/stream0"})
+    monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "shared")
+    monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "sharedpw")
+    monkeypatch.setenv("WYZE_RTSP_USER_CAM", "own")
+    monkeypatch.delenv("WYZE_RTSP_PASS_CAM", raising=False)
+    assert zeev.wyze_credentials("cam") == ("own", "")
 
 
 # --- the voice gate ---------------------------------------------------------

@@ -5734,11 +5734,31 @@ WYZE_RTSP_USER = os.environ.get("WYZE_RTSP_USER", "")
 WYZE_RTSP_PASS = os.environ.get("WYZE_RTSP_PASS", "")
 
 
+def _wyze_env_suffix(stream: str) -> str:
+    """`basement-cam` -> `BASEMENT_CAM`, so it can name an env var."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", stream).strip("_").upper()
+
+
+def wyze_credentials(stream: str):
+    """(user, pass) for one camera: its own if set, else the shared pair.
+
+    Each camera flashed with the RTSP firmware gets its credentials typed into
+    the phone app separately, so there is no reason they would match across
+    cameras -- and a single shared pair silently 401s the odd one out.
+    WYZE_RTSP_USER_<NAME>/WYZE_RTSP_PASS_<NAME> override per camera.
+    """
+    sfx = _wyze_env_suffix(stream)
+    user = os.environ.get(f"WYZE_RTSP_USER_{sfx}", "")
+    if user:
+        return user, os.environ.get(f"WYZE_RTSP_PASS_{sfx}", "")
+    return WYZE_RTSP_USER, WYZE_RTSP_PASS
+
+
 def wyze_stream_url(stream: str) -> str:
     """Full RTSP URL for a camera: its own if it has one, else via the bridge.
 
-    If the configured URL carries no credentials and WYZE_RTSP_USER/PASS are
-    set, they are injected and percent-encoded here.
+    If the configured URL carries no credentials, the camera's credentials are
+    injected and percent-encoded here.
     """
     if stream in WYZE_CAMERA_URLS:
         url = WYZE_CAMERA_URLS[stream]
@@ -5746,14 +5766,17 @@ def wyze_stream_url(stream: str) -> str:
         url = f"{WYZE_RTSP_BASE.rstrip('/')}/{stream}"
     else:
         return ""
-    if WYZE_RTSP_USER and "@" not in url.split("://", 1)[-1].split("/", 1)[0]:
+    user, password = wyze_credentials(stream)
+    if user and "@" not in url.split("://", 1)[-1].split("/", 1)[0]:
         scheme, _, rest = url.partition("://")
         from urllib.parse import quote
-        cred = f"{quote(WYZE_RTSP_USER, safe='')}:{quote(WYZE_RTSP_PASS, safe='')}"
+        cred = f"{quote(user, safe='')}:{quote(password, safe='')}"
         url = f"{scheme}://{cred}@{rest}"
     return url
 
-_RTSP_URL_RE = re.compile(r"rtsp://\S+")
+# rtsps:// too -- the secure scheme carries the same password, and a regex that
+# only knew rtsp:// would pass the credential straight through to the log.
+_RTSP_URL_RE = re.compile(r"rtsps?://\S+")
 
 
 def _scrub_rtsp(text: str) -> str:

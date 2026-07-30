@@ -154,6 +154,21 @@ Verified live: *"put dinner with Maria on my calendar Thursday at 7"* → `creat
 
 Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) → IP fallback (`ip-api.com`). `gps_locate()` cached 30 min. `_reverse_geocode` via Nominatim/OSM. `/gps` terminal command; `GET /gps` web endpoint.
 
+**Three things had to be true before triangulation worked at all** (all found live 2026-07-30; before them every fix silently fell through to IP — 25 km, naming Braintree/Brockton for a device in Canton):
+
+- **`GOOGLE_GEOLOC_KEY` must be in the *Pi's* `.env`.** It was only in the dev checkout, so the Google branch never ran. beacondb is not a substitute — it answered `"fallback":"ipf"` for these APs, i.e. no coverage, which `_wifi_geolocate` correctly rejects.
+- **`nmcli dev wifi list` reports NetworkManager's *cached* scan.** Nothing asked for a fresh one, and on an idle Pi the cache held **one** AP against a two-AP minimum. An explicit `nmcli dev wifi rescan` takes it to 7. Rescan is privileged and the service runs as `ragnar`, so it needs `/etc/polkit-1/rules.d/50-zeev-wifi-scan.rules` (on the Pi, outside the repo; scoped to `org.freedesktop.NetworkManager.wifi.scan` only). Without the grant the cached list is still used, so it degrades rather than breaking.
+- **`signalStrength` is dBm, not nmcli's percent.** Passing the percentage through is silently accepted and just makes the fix worse: same 7 APs measured **869 m with percent, 11 m with dBm** (`_nm_percent_to_dbm`, NM's own `2*(dBm+100)` inverted).
+
+Result end-to-end: `[gps] fix: Canton, Massachusetts, United States (±11m via wifi+google)`.
+
+**Ambient awareness**: `_build_system_prompt` always appends `## Right now: <local time>` and `## Approximate location: <City, Region, Country>`. Before this the model saw location only when `needs_gps` matched — so it was blind to it on every other turn, and weather answers were location-aware only by accident, via a memorised fact naming the town (which goes stale on travel).
+
+- The location block is **coarse on purpose** — no lat/lon, no accuracy — because it goes to Groq and OpenRouter on *every* turn; `gps_summary()` with coordinates stays behind `needs_gps`. `ZEEV_AMBIENT_LOCATION=0` disables it.
+- Above `_AMBIENT_CITY_MAX_ACC` (5 km) it reports **region only**: an IP fix names the wrong town and the model repeats a wrong city as fact.
+- The read path (`gps_cached()`) is **cache-only and never scans** — a cold `gps_locate()` is ~1.7s with the rescan, which must not sit in a turn. `_gps_refresh_loop` warms it every 20 min, deliberately **under** the 30-min TTL, or a cache-only reader keeps finding it expired. It also reverse-geocodes in the background, since a WiFi fix carries no place name and the block is nothing but place names.
+- **The wall clock was missing from every prompt except the tool prompt.** With no clock the model confabulates instead of declining: observed 2026-07-29 21:02–21:04 answering "8:45 AM", then "2:45 PM" (inventing a calendar reading to justify it) while the Pi read 21:03 EDT. `_now_str()` uses `.astimezone()` — `datetime.now()` is naive, so `%Z` formats as empty and the zone vanishes while the string still looks fine.
+
 ### User memory
 
 `facts` table in `zeev.db`, injected under `## What I know about Alex:`. `extract_memory()` runs on `quit`/`/memorize`. 429 returns `None` — shows a warning instead of fake success. `/forget-fact N` to remove.

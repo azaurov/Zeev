@@ -156,3 +156,48 @@ def test_credentials_apply_to_bridge_urls_too(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "WYZE_RTSP_USER", "zeev")
     monkeypatch.setattr(zeev, "WYZE_RTSP_PASS", "p@ss")
     assert zeev.wyze_stream_url("basement-cam") == "rtsp://zeev:p%40ss@10.0.0.141:8554/basement-cam"
+
+
+# --- the voice gate ---------------------------------------------------------
+#
+# Contractions are not reliable: Whisper transcribed the same spoken question as
+# "What's going on upstairs?" once and "what is going on upstairs" the next
+# time, and only the first matched -- so the second silently reached the LLM,
+# which answered that it cannot see upstairs. Both directions are pinned here
+# because over-firing hijacks ordinary chat into "Which camera?".
+
+CAMS3 = ["upstairs", "basement-cam", "front-yard"]
+
+
+def _fires(zeev, text):
+    return bool(zeev._WYZE_CAM_RE.search(text)) or (
+        bool(zeev._CAMERA_RE.search(text)) and bool(zeev.resolve_wyze_cam(text, CAMS3)[0]))
+
+
+@pytest.mark.parametrize("text", [
+    "What's going on upstairs?",
+    "what is going on upstairs",      # the live miss
+    "whats happening upstairs",
+    "check upstairs",
+    "look at the upstairs camera",
+    "what do you see upstairs",       # reaches it via _CAMERA_RE + a name match
+    "is anyone upstairs",
+    "who is at the front yard",
+    "show me the basement cam",
+])
+def test_camera_question_fires_gate(zeev, text):
+    assert _fires(zeev, text), f"{text!r} should reach the camera branch"
+
+
+@pytest.mark.parametrize("text", [
+    "what is going on with the weather",
+    "how are you doing",
+    "tell me a joke",
+    "what time is it",
+    "remind me to call Dave at 4",
+    "play some jazz",
+    "what is on my calendar",
+    "who is Rambam",
+])
+def test_ordinary_chat_does_not_fire_gate(zeev, text):
+    assert not _fires(zeev, text), f"{text!r} must not be treated as a camera request"

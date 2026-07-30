@@ -455,7 +455,12 @@ _CAMERA_RE = re.compile(
 # the local camera keeps its own phrasing, and checked first so naming a room
 # routes to that room rather than to whatever the Pi is pointed at.
 _WYZE_CAM_RE = re.compile(
-    r"\b(check|look at|look in|show me|peek at|pull up|what'?s (happening|going on|up))\b"
+    # Contractions are not reliable: Whisper transcribed the same spoken question
+    # as "What's going on upstairs?" once and "what is going on upstairs" the
+    # next time, and only the first form matched -- so both are spelled out.
+    r"\b(check|look at|look in|show me|peek at|pull up|"
+    r"what(?:'?s| is) (?:happening|going on|up)|"
+    r"who(?:'?s| is)|is (?:anyone|anybody|someone|somebody))\b"
     r".{0,30}\b(cam|camera|room|yard|basement|upstairs|downstairs|doorbell|door|garage)\b"
     r"|\b(cam|camera)s?\b.{0,20}\b(see|show|view|feed)\b"
     r"|\b(who|what|anyone|anybody|something)\b.{0,25}\b(at|in|on) the\b"

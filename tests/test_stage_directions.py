@@ -31,6 +31,7 @@ import pytest
      ["Sarina:", "Zeev:"], "The room is heavily cluttered"),
     ("*Sarina:* The door is open.", ["Sarina:"], "The door is open."),
     ("__Zeev:__ It is quiet here.", ["Zeev:"], "It is quiet here."),
+    ("***Sarina:*** Nothing is moving.", ["Sarina:"], "Nothing is moving."),
 ])
 def test_stage_directions_removed(zeev, raw, must_go, must_stay):
     out = zeev._clean_for_tts(raw)

@@ -179,6 +179,40 @@ for _pair in os.environ.get("OWW_VOICE_MAP", "").split(","):
 # leaves it None and falls back to inferring the voice from the transcript.
 _WAKE_VOICE = [None]
 OWW_THRESHOLD  = float(os.environ.get("OWW_THRESHOLD", "0.5"))
+# Per-model overrides, "stem:0.75,stem:0.55". OWW_THRESHOLD alone is global, so
+# two models of unequal quality cannot both be tuned: raising it to quiet a
+# trigger-happy phrase makes the other one deaf. Anything not listed here keeps
+# the global value.
+OWW_THRESHOLDS = {}
+for _pair in os.environ.get("OWW_THRESHOLDS", "").split(","):
+    if ":" in _pair:
+        _k, _v = _pair.split(":", 1)
+        try:
+            OWW_THRESHOLDS[_k.strip()] = float(_v)
+        except ValueError:
+            print(f"[wake] bad OWW_THRESHOLDS entry {_pair!r}, ignoring", flush=True)
+
+
+def oww_threshold(name):
+    """Score a model must clear to fire. Falls back to the global threshold."""
+    return OWW_THRESHOLDS.get(name, OWW_THRESHOLD)
+
+
+def oww_best(scores):
+    """Pick the model that fired, as ``(name, score)``; ``("", 0.0)`` if none.
+
+    Each model is tested against its own threshold *before* the max is taken.
+    Taking the loudest first and thresholding after would let a model with a
+    high threshold mask a quieter one that legitimately fired -- the exact case
+    per-model thresholds exist for.
+    """
+    best_name, best = "", 0.0
+    for name, score in (scores or {}).items():
+        if score >= oww_threshold(name) and score > best:
+            best_name, best = name, score
+    return best_name, best
+
+
 OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 # Quiet period after a turn ends before the mic re-arms. The speaker is inches
 # from the mic with no echo cancellation, so without this the tail of Zeev's
@@ -9133,12 +9167,9 @@ def run_device_mode():
                 continue
 
             # Which model fired matters now, not just how strongly.
-            best_name, score = "", 0.0
-            for _name, _s in (scores or {}).items():
-                if _s > score:
-                    best_name, score = _name, _s
+            best_name, score = oww_best(scores)
             now = time.time()
-            if score < OWW_THRESHOLD or (now - last_trigger) < OWW_COOLDOWN:
+            if not best_name or (now - last_trigger) < OWW_COOLDOWN:
                 continue
             last_trigger = now
 
@@ -9266,7 +9297,13 @@ def run_device_mode():
                     from openwakeword.model import Model as _OwwModel
                     t0 = time.time()
                     model = _OwwModel(wakeword_model_paths=paths)
-                    names = ", ".join(Path(p).stem for p in paths)
+                    # Annotate any stem whose threshold is overridden, so a
+                    # typo'd OWW_THRESHOLDS stem shows up here as a missing
+                    # annotation rather than as a phrase that quietly kept the
+                    # global value.
+                    names = ", ".join(
+                        s + (f"@{oww_threshold(s):.2f}" if s in OWW_THRESHOLDS else "")
+                        for s in (Path(p).stem for p in paths))
                     # Memory is logged with the load time because a slow load
                     # here means swap thrash, not a slow model — 4.7s settled
                     # vs 3171s at boot, with no way to tell them apart after

@@ -227,10 +227,48 @@ Note also that both files are byte-for-byte the same **size** (790,682) — same
 classifier-head architecture, different weights. Size is not a way to tell them
 apart; use `md5sum` after the copy.
 
-**`OWW_THRESHOLD` is global.** There is no per-model threshold, so a phrase
-that turns out trigger-happy cannot be tuned in isolation — raising the
-threshold for one model makes the other deaf. If one of two models is hot, the
-fix is a longer phrase or a retrain, not a knob.
+**`OWW_THRESHOLD` is global; `OWW_THRESHOLDS` overrides it per model.**
+
+```
+OWW_THRESHOLDS=sarina:0.80,zeev:0.55
+```
+
+Stems not listed keep the global value, and the ready line annotates the ones
+that are (`zeev, sarina@0.80`) — a typo'd stem shows up there as a *missing*
+annotation rather than as a phrase that quietly kept the global. Thresholding
+happens **per model before the max is taken**, so raising one model's bar can't
+mask a quieter model that legitimately fired. Pinned by `tests/test_wake_gate.py`.
+
+This exists because a single global number made two models of unequal quality
+mutually exclusive to tune. Don't reach for it first, though — see below for why
+it usually isn't the fix.
+
+### A threshold cannot separate overlapping distributions
+
+Measured live over eight hours of ordinary household conversation
+(2026-07-29, `sarina` + `zeev` loaded, 13 triggers):
+
+| | scores |
+|---|---|
+| `sarina` real wakes | 0.58, 0.60, 0.74, 0.80, 0.90, 0.93, 0.96, 0.98 |
+| `sarina` false wakes | 0.52, 0.59, 0.64, 0.73 |
+| `zeev` false wakes | 0.51 |
+| `zeev` real wakes | none in the window |
+
+**The ranges overlap** (real 0.58–0.98 against false 0.51–0.73), so no cut
+exists. It is tempting to read the two lowest reals as false wakes that happened
+to capture intentional speech — that yields a tidy break at 0.73/0.74 — but both
+fired 4–6 s after the previous reply finished, well past `OWW_SETTLE`, with
+distinct scores (the stale-buffer signature is *identical* scores), and one of
+them was "That's not right" seconds after Zeev gave the wrong time. That is a
+person addressing the device. Take the plain reading.
+
+Note also that **~0.7 false wakes/hour on fluent human speech is a phrase-length
+problem, not a tuning problem** — upstream targets 0.2 fp/hr. Three syllables
+turned out not to be enough against real conversation, so the fix is the `Hey`
+prefix from §1: retrain as `['hey sarina']`. No noise guard can help here
+either; all four false transcripts were fluent multi-word speech and sail
+through the `\w{2,}` check by construction.
 
 ## 4. Tune
 

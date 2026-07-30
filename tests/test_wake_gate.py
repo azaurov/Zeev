@@ -104,3 +104,48 @@ def test_fails_open_on_malformed_frames(zeev):
     """Odd rates make webrtcvad raise; that must pass audio, not drop it."""
     _requires_vad(zeev)
     assert zeev._has_speech(_wav(_silence(), rate=44100), rate=44100) is True
+
+
+# --- per-model thresholds ---------------------------------------------------
+#
+# OWW_THRESHOLD is global, which made two models of unequal quality mutually
+# exclusive to tune: measured live on 2026-07-29, sarina's real wakes spanned
+# 0.58-0.98 and its false wakes 0.51-0.73 (overlapping, so no global cut helps),
+# while zeev fired once in eight hours and that was a false 0.51. Any bump for
+# one made the other deaf. These pin the override and the masking rule.
+
+@pytest.fixture
+def _thresholds(zeev):
+    saved = dict(zeev.OWW_THRESHOLDS)
+    yield zeev.OWW_THRESHOLDS
+    zeev.OWW_THRESHOLDS.clear()
+    zeev.OWW_THRESHOLDS.update(saved)
+
+
+def test_unlisted_model_keeps_global_threshold(zeev, _thresholds):
+    _thresholds["sarina"] = 0.8
+    assert zeev.oww_threshold("zeev") == zeev.OWW_THRESHOLD
+    assert zeev.oww_threshold("sarina") == 0.8
+
+
+def test_override_gates_a_score_the_global_would_pass(zeev, _thresholds):
+    _thresholds["sarina"] = 0.8
+    # 0.73 was a real observed false wake; it clears the 0.5 global.
+    assert zeev.oww_best({"sarina": 0.73}) == ("", 0.0)
+    assert zeev.oww_best({"sarina": 0.81})[0] == "sarina"
+
+
+def test_raised_model_does_not_mask_a_quieter_one(zeev, _thresholds):
+    """The whole point: thresholding must happen before the max, not after."""
+    _thresholds["sarina"] = 0.9
+    # sarina is louder but below its own bar; zeev cleared the global 0.5.
+    assert zeev.oww_best({"sarina": 0.85, "zeev": 0.60}) == ("zeev", 0.60)
+
+
+def test_loudest_qualifying_model_wins(zeev, _thresholds):
+    assert zeev.oww_best({"sarina": 0.71, "zeev": 0.93}) == ("zeev", 0.93)
+
+
+def test_no_scores_never_fires(zeev):
+    assert zeev.oww_best({}) == ("", 0.0)
+    assert zeev.oww_best(None) == ("", 0.0)

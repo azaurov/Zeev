@@ -604,3 +604,66 @@ def test_sweep_announces_before_the_slow_part(zeev, ctx, monkeypatch):
     monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("An empty room.", None))
     zeev.handle_transcript(ctx, "check both cameras")
     assert "let me check both cameras" in ctx.spoke[0].lower(), ctx.spoke
+
+
+def test_mangled_trigger_still_reaches_the_camera_branch(zeev, ctx, monkeypatch):
+    """Whisper mangles the verb, not the noun.
+
+    Live 2026-07-30 it heard "check all cameras" as "checko cameras". No verb
+    survived, the turn reached the LLM, and the 8B repeated the *previous*
+    turn's genuine camera description as a current observation -- accurate
+    enough to pass for working, which is what makes it dangerous.
+    """
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "CAMERA_AVAILABLE", False)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("A room.", None))
+    for text in ["checko cameras", "cameras", "the cameras"]:
+        ctx.spoke.clear()
+        zeev.handle_transcript(ctx, text)   # _no_llm fails the test if it falls through
+        assert ctx.spoke, text
+
+
+def test_camera_noun_in_a_reminder_still_goes_to_the_tool_branch(zeev, ctx, monkeypatch):
+    """"remind me to buy a camera" is a reminder -- the same guard
+    resolve_subject uses, for the same reason."""
+    _sweep_env(zeev, monkeypatch)
+    monkeypatch.setattr(zeev, "CAMERA_AVAILABLE", False)
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda *a, **k: pytest.fail("reminder must not grab a frame"))
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: pytest.fail("reminder must not call vision"))
+    monkeypatch.setattr(zeev, "_groq_post", lambda *a, **k: (None, "stop here"))
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback", lambda *a, **k: (None, "stop here"))
+    zeev.handle_transcript(ctx, "remind me to buy a camera tomorrow")
+
+
+def test_single_camera_reply_keeps_the_stripped_text(zeev, ctx, monkeypatch):
+    """The stripped value used to be computed and thrown away -- used only as an
+    emptiness test -- so a partial stage direction was stored verbatim. Live row
+    1906: "(Sarina's voice, composed and professional): I see a bedroom...".
+    That then sits in the session and in RAG as though it were an observation.
+    """
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "img")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: (
+        "(Sarina's voice, composed and professional): I see a bedroom.", None))
+    zeev.handle_transcript(ctx, "check the bedroom cam")
+    stored = ctx.session[-1]["content"]
+    assert "sarina" not in stored.lower(), stored
+    assert "I see a bedroom." in stored
+
+
+def test_all_stage_direction_reply_falls_back(zeev, ctx, monkeypatch):
+    """Stripping a reply that is *only* stage direction leaves nothing, and an
+    empty reply is spoken as silence."""
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "img")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda img, p: ("(Sarina's voice delivers Zeev's words.)", None))
+    zeev.handle_transcript(ctx, "check the bedroom cam")
+    stored = ctx.session[-1]["content"]
+    assert "couldn't make anything out" in stored.lower(), stored

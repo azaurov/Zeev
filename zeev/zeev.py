@@ -4072,17 +4072,33 @@ def get_weekly_parsha():
 
 
 def _parse_torah_ref(ref):
-    """Parse 'Numbers 16:1-18:32' → ('Numbers', [16, 17, 18])."""
-    m = re.match(r"([A-Za-z ]+?)\s+(\d+):\d+-(?:[A-Za-z ]+\s+)?(\d+):\d+", ref.strip())
+    """Parse 'Numbers 16:1-18:32' → ('Numbers', [16, 17, 18], 1, 32).
+
+    The verse bounds are returned, not discarded. torah.db stores one row per
+    *chapter* with no verse markers, so the text cannot be trimmed to them --
+    but a portion that starts mid-chapter (Eikev is Deut 7:12-11:25) otherwise
+    hands the model chapter 7 from verse 1 and tells it to read from the top,
+    which recites eleven verses of the *previous* parsha under this parsha's
+    name. The caller needs the numbers to say where the portion really begins.
+    """
+    m = re.match(r"([A-Za-z ]+?)\s+(\d+):(\d+)-(?:[A-Za-z ]+\s+)?(\d+):(\d+)", ref.strip())
     if not m:
-        return None, []
+        return None, [], 0, 0
     book = m.group(1).strip()
-    return book, list(range(int(m.group(2)), int(m.group(3)) + 1))
+    first_ch, first_v, last_ch, last_v = (int(m.group(i)) for i in (2, 3, 4, 5))
+    return book, list(range(first_ch, last_ch + 1)), first_v, last_v
 
 
 def get_parsha_text(parsha_info, max_chars=7000):
-    """Fetch chapter texts for a parsha from torah.db. Returns full text string."""
-    book, chapters = _parse_torah_ref(parsha_info.get("torah", ""))
+    """Fetch chapter texts for a parsha from torah.db. Returns full text string.
+
+    Each chapter is labelled, and the first and last carry the portion's real
+    verse bounds. torah.db has chapter granularity only -- no verse markers to
+    cut on -- so the boundary is stated rather than trimmed. Silently handing
+    over whole chapters is what made a request for Eikev open with Deut 7:1,
+    eleven verses inside Va'etchanan.
+    """
+    book, chapters, first_v, last_v = _parse_torah_ref(parsha_info.get("torah", ""))
     if not book or not chapters:
         return ""
     try:
@@ -4094,13 +4110,20 @@ def get_parsha_text(parsha_info, max_chars=7000):
             row = con.execute("SELECT en FROM passages WHERE ref=?", (f"{book} {ch}",)).fetchone()
             if row:
                 chunk = row[0]
-                if total + len(chunk) > max_chars:
-                    remaining = max_chars - total
+                head = f"[{book} {ch}"
+                if ch == chapters[0] and first_v > 1:
+                    head += f" — the portion begins at verse {first_v}; "
+                    head += "everything before it belongs to the previous portion"
+                elif ch == chapters[-1]:
+                    head += f" — the portion ends at verse {last_v}"
+                head += "]\n"
+                if total + len(head) + len(chunk) > max_chars:
+                    remaining = max_chars - total - len(head)
                     if remaining > 300:
-                        texts.append(chunk[:remaining] + "…")
+                        texts.append(head + chunk[:remaining] + "…")
                     break
-                texts.append(chunk)
-                total += len(chunk)
+                texts.append(head + chunk)
+                total += len(head) + len(chunk)
         con.close()
         return "\n\n".join(texts)
     except Exception as e:
@@ -5491,7 +5514,12 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 parts.append(
                     f"\n\n## {parsha['title']} — Torah Reading ({parsha['torah']}):\n{ptext}"
                     "\n\n## Instruction: The user wants to hear the Torah portion read aloud."
-                    " Read the text above from the beginning. Do not summarize — recite the actual verses."
+                    " Do not summarize — recite the actual verses."
+                    f" The portion is {parsha['torah']}. The text above is supplied"
+                    " whole chapters, so begin at that reference's first verse and not"
+                    " at the start of the chapter — the bracketed note on each chapter"
+                    " says where the portion begins and ends. Verses outside the"
+                    " reference belong to the neighbouring portions; do not read them."
                 )
     elif needs_torah(user_text):
         torah_hits = torah_search(user_text)
@@ -5562,8 +5590,11 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "is not in that list, and do NOT report where a pet or person is. "
             "Earlier replies in this conversation that named cameras were "
             "asking which one to check — they are not evidence that you can "
-            "see. Say plainly that you couldn't get a look just now, and ask "
-            "which camera to check if it is unclear."
+            "see. Any camera description that appears earlier in this "
+            "conversation or under 'Relevant past exchanges' is a record of "
+            "the PAST; repeating it as what a camera shows now is wrong even "
+            "if the room has not changed. Say plainly that you couldn't get a "
+            "look just now, and ask which camera to check if it is unclear."
         )
 
     if needs_search(user_text) and TAVILY_API_KEY:
@@ -8311,11 +8342,21 @@ def handle_transcript(ctx, transcript):
     # "Which camera?" instead of a photo. Nothing observes that today -- the
     # board has no camera -- which is exactly why it would surprise someone
     # later.
+    # The fourth arm exists because Whisper mangles the trigger, not the noun.
+    # Live 2026-07-30 it heard "check all cameras" as "checko cameras": no verb
+    # survived, so the turn reached the LLM, which repeated the *previous*
+    # turn's genuine camera description as a current observation -- accurate
+    # enough to pass for working. A camera noun with no Pi camera attached is
+    # a camera request on this device, so it routes here and ends in a frame or
+    # a question. _TOOL_INTENT_RE is excluded for the same reason
+    # resolve_subject excludes it: "remind me to buy a camera" is a reminder.
     if WYZE_CAMERAS and (
             _WYZE_CAM_RE.search(transcript)
             or (_CAMERA_RE.search(transcript)
                 and (resolve_wyze_cam(transcript)[0]
-                     or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))):
+                     or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))
+            or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE
+                and not _TOOL_INTENT_RE.search(transcript))):
         stream, alts = resolve_wyze_cam(transcript)
         # "check all cameras" is a sweep, not a room, and resolve_wyze_cam has
         # no way to say so -- it returns a single stream, so the phrase used to
@@ -8434,9 +8475,16 @@ def handle_transcript(ctx, transcript):
         # "(Sarina's voice, calm and professional, delivers Zeev's words.)" and
         # nothing else. Stripping that correctly leaves an empty string, and an
         # empty reply is spoken as silence, which reads as a broken device.
-        if not _strip_stage_directions(reply):
-            reply = (f"I looked at the {wyze_cam_label(stream)}, but I couldn't "
-                     "make anything out clearly.")
+        #
+        # The stripped value is what gets *kept*. It used to be computed and
+        # thrown away -- used only as an emptiness test -- so a partial stage
+        # direction survived into finish_turn and was stored verbatim: row 1906
+        # in the live DB reads "(Sarina's voice, composed and professional): I
+        # see a bedroom...". That then sits in the session and in RAG as though
+        # it were an observation, which is how the next turn repeated it.
+        clean = _strip_stage_directions(reply).strip()
+        reply = clean or (f"I looked at the {wyze_cam_label(stream)}, but I couldn't "
+                          "make anything out clearly.")
         finish_turn(ctx, reply)
         return
     # ─────────────────────────────────────────────────────────────────────

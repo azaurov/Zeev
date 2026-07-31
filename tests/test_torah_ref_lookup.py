@@ -45,6 +45,15 @@ def torah_db(tmp_path, zeev, monkeypatch):
          "Blessed are You who separates between the holy and the profane."),
         ("Tanakh", "Genesis 1",
          "In the beginning God created the heaven and the earth."),
+        # Yihyu L'ratzon. Sefaria has no English for the Shabbat rows, so their
+        # `en` column carries the pointed HEBREW while the Weekday row carries
+        # the English -- reproduced here because the alias probes both to give
+        # the model the real gloss AND the real Hebrew.
+        ("Siddur", "Siddur Ashkenaz, Weekday, Shacharit, Amidah, Concluding Passage",
+         "May the words of my mouth and the thoughts of my heart be acceptable "
+         "before You, Adonoy, my Rock and my Redeemer."),
+        ("Siddur", "Siddur Ashkenaz, Shabbat, Shacharit, Amidah, Concluding Passage",
+         "יִהְיוּ לְרָצון אִמְרֵי פִי וְהֶגְיון לִבִּי לְפָנֶיךָ. ה' צוּרִי וְגואֲלִי"),
     ]
     con.executemany(
         "INSERT INTO passages (source, ref, en, he) VALUES (?, ?, ?, '')", rows)
@@ -95,3 +104,51 @@ def test_generic_words_do_not_hijack_the_lookup(zeev, torah_db):
     match huge swathes of the siddur and would crowd out the real hit."""
     for w in ("prayer", "blessing", "hebrew", "say", "recite"):
         assert w in zeev._TORAH_REF_SKIP, w
+
+
+# ---------------------------------------------------------------------------
+# Alias: "the angelic prayer" -> Yihyu L'ratzon
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("query", [
+    "help me with the angelic prayer",
+    "say the angelic prayer in Hebrew",
+    "recite yihyu l'ratzon",
+    "what is Yihyu Lratzon",
+])
+def test_angelic_prayer_resolves_to_yihyu_lratzon(zeev, torah_db, query):
+    """Alex's name for the meditation closing the Amidah (Psalms 19:15).
+
+    Confirmed with him 2026-07-31; the other candidate was Shalom Aleichem,
+    which greets the ministering angels and is findable by its own name.
+    """
+    hits = zeev.torah_search(query)
+    refs = [r for r, _ in hits]
+    assert any("Amidah, Concluding Passage" in r for r in refs), refs
+
+
+def test_alias_supplies_both_english_and_pointed_hebrew(zeev, torah_db):
+    """Probing only the Weekday row leaves the model inventing the Hebrew,
+    which is the exact failure the alias exists to stop."""
+    bodies = [en for _, en in zeev.torah_search("say the angelic prayer in Hebrew")]
+    assert any("May the words of my mouth" in b for b in bodies), bodies
+    assert any("יִהְיוּ לְרָצון" in b for b in bodies), bodies
+
+
+def test_alias_hit_returns_alone(zeev, torah_db):
+    """An alias names the exact passage, so nothing is topped up behind it.
+
+    Live against the real DB this pulled in Zohar Shemot 45, which merely
+    shares vocabulary -- and unrelated context is what the model paraphrases
+    when it drifts. The exclusivity has to survive BOTH _torah_ref_lookup and
+    torah_search's own FTS top-up; fixing only the former left it in.
+    """
+    hits = zeev.torah_search("help me with the angelic prayer")
+    assert all("Amidah, Concluding Passage" in r for r, _ in hits), hits
+
+
+def test_alias_does_not_fire_on_ordinary_speech(zeev, torah_db):
+    """The gate is what keeps "an angelic voice" out; this pins that the alias
+    itself needs the prayer sense too, not merely the word."""
+    assert not zeev._YIHYU_ALIAS_RE.search("she has an angelic voice")
+    assert not zeev._ANGEL_PRAYER_RE.search("she has an angelic voice")

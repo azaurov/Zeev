@@ -4263,6 +4263,28 @@ _TORAH_REF_SKIP = {
 }
 
 
+# Names Alex uses that are not the passage's name in Sefaria, mapped to `ref`
+# substrings. Checked before bigrams: an alias is a stated intent, and letting
+# the generic lookup guess from the words instead is how "angelic prayer"
+# reached the 8B unsourced in the first place.
+_YIHYU_ALIAS_RE = re.compile(r"\byihyu\b|\bl'?ratzon\b|\bangelic\s+prayer\b", re.I)
+_TORAH_REF_ALIASES = [
+    # "The angelic prayer" is Alex's name for Yihyu L'ratzon (Psalms 19:15),
+    # the meditation closing the Amidah. Confirmed with him 2026-07-31 -- the
+    # other candidate was Shalom Aleichem, which greets the ministering angels
+    # and is findable by its own name anyway.
+    #
+    # BOTH refs are probed on purpose. Sefaria has no English for the Shabbat
+    # rows, so their `en` column holds the pointed HEBREW, while the Weekday
+    # row holds the English. Together they give the model the real gloss and
+    # the real Hebrew; the Weekday row alone leaves it inventing the Hebrew,
+    # which is the exact failure this alias exists to stop.
+    ((_ANGEL_PRAYER_RE, _YIHYU_ALIAS_RE),
+     ["Weekday, Shacharit, Amidah, Concluding Passage",
+      "Shabbat, Shacharit, Amidah, Concluding Passage"]),
+]
+
+
 def _torah_ref_lookup(con, query, k):
     """Find passages by REFERENCE name rather than body text.
 
@@ -4296,15 +4318,28 @@ def _torah_ref_lookup(con, query, k):
                + " OR ".join(["ref LIKE ?"] * len(cands)) + " LIMIT ?")
         return con.execute(sql, [f"%{c}%" for c in cands] + [k]).fetchall()
 
+    aliases = []
+    for rxs, refs in _TORAH_REF_ALIASES:
+        if any(rx.search(query) for rx in rxs):
+            aliases.extend(refs)
+
     rows, seen = [], set()
-    for tier in (bigrams, singles):
+    for tier in (aliases, bigrams, singles):
         for ref, en in probe(tier):
             if ref not in seen:
                 seen.add(ref)
                 rows.append((ref, en))
+        # An alias that hit wins OUTRIGHT, even short of k -- hence the flag,
+        # which torah_search needs too: returning early from here alone still
+        # left it topping the result up from FTS. It names the exact passage,
+        # so anything added behind it merely shares vocabulary; "angelic
+        # prayer" pulled in Zohar Shemot 45 that way, and unrelated context is
+        # what the model paraphrases when it drifts.
+        if rows and tier is aliases:
+            return rows[:k], True
         if len(rows) >= k:
             break
-    return rows[:k]
+    return rows[:k], False
 
 
 def torah_search(query, k=3):
@@ -4316,8 +4351,8 @@ def torah_search(query, k=3):
         con = _sqlite3.connect(f"file:{TORAH_DB}?mode=ro", uri=True)
         # Reference-name hits lead: naming a prayer is a far stronger signal
         # than an OR of its words, which retrieves whatever shares vocabulary.
-        ref_rows = _torah_ref_lookup(con, query, k)
-        if len(ref_rows) >= k:
+        ref_rows, exclusive = _torah_ref_lookup(con, query, k)
+        if exclusive or len(ref_rows) >= k:
             con.close()
             return ref_rows
         words = re.findall(r"\b\w{3,}\b", query.lower())

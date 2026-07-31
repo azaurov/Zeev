@@ -4091,10 +4091,34 @@ _TORAH_RE = re.compile(
     r"apocrypha|deuterocanonical|"
     r"ben.sira|sirach|ecclesiasticus|tobit|judith|maccabees|maccabean|"
     r"wisdom.of.solomon|baruch|manasseh|"
-    r"siddur|haggadah|haggada|machzor|piyyut|liturgy|"
+    r"siddur|haggadah|haggada|machzor|piyyut|liturgy|liturgical|"
     r"shacharit|mincha|maariv|musaf|neilah|"
     r"amidah|shmoneh.esrei|shemoneh.esreh|aleinu|kaddish|kedushah|"
     r"modeh.ani|ashrei|hallel|adon.olam|yigdal|birkat.hamazon|bentching|"
+    # ── Named prayers ───────────────────────────────────────────────────
+    # Added 2026-07-31 after "help me with the angelic prayer" reached the 8B
+    # with no RAG and no routing, which invented both an English text and a
+    # Hebrew one ("Tefillat HaShalom", not a prayer). Matching here routes to
+    # 70B and pulls the real text when the DB has it.
+    #
+    # GROUNDED -- these retrieve from data/torah.db (Siddur Ashkenaz, weekday):
+    r"asher.yatzar|elokai.neshama|elohai.neshama|ma.tovu|matovu|"
+    r"netilat.yadayim|barukh.she.amar|baruch.she.amar|yishtabach|"
+    r"pesukei.dezimra|pesukei.d.zimra|az.yashir|korbanot|akedah|akeidah|"
+    r"avinu.malkeinu|avinu.malken|tachanun|nishmat|"
+    # NOT grounded -- the imported Siddur is WEEKDAY Ashkenaz only, so Shabbat,
+    # festival and life-cycle liturgy is absent and these reach 70B unsourced.
+    # Still better than the 8B answering cold, but only import_sefaria.py can
+    # actually ground them. Verified absent 2026-07-31, do not assume otherwise.
+    r"shehecheyanu|havdalah|lecha.dodi|l.cha.dodi|kol.nidre|kol.nidrei|"
+    r"unetaneh.tokef|un.taneh.tokef|tefillat.haderech|mi.shebeirach|"
+    r"mi.sheberach|el.maleh.rachamim|yizkor|hashkiveinu|hamapil|"
+    r"ana.bekoach|ana.b.koach|elohai.netzor|yihyu.l.ratzon|yihyu|"
+    r"selichot|slichot|viduy|vidui|birkat.kohanim|priestly.blessing|"
+    r"kiddush.levana|birkat.halevana|shalom.aleichem|"
+    r"malachei.hasharet|ministering.angels|"
+    r"tefillah|tefilla|tefillot|berakhah|brachah|bracha|brachot|"
+    r"daven|davening|"
     r"seder|maggid|dayenu|afikomen|maror|matzah|matza|"
     r"shema|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
     r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat"
@@ -4103,8 +4127,21 @@ _TORAH_RE = re.compile(
 )
 
 
+# "the angelic prayer" is not a standard liturgical name -- it is what Alex
+# called it. Bare "angelic" cannot go in _TORAH_RE's flat alternation because
+# it is ordinary English ("she has an angelic voice"), so it needs a prayer
+# word nearby. Kept separate rather than widening the alternation, which has no
+# way to express proximity.
+_ANGEL_PRAYER_RE = re.compile(
+    r"\bangel(ic|s)?\b[^.?!]{0,30}\b(prayer|blessing|pray|recite|siddur|hebrew)\b"
+    r"|\b(prayer|blessing|recite|siddur)\b[^.?!]{0,30}\bangel(ic|s)?\b",
+    re.IGNORECASE,
+)
+
+
 def needs_torah(text):
-    return TORAH_DB.exists() and bool(_TORAH_RE.search(text))
+    return TORAH_DB.exists() and bool(
+        _TORAH_RE.search(text) or _ANGEL_PRAYER_RE.search(text))
 
 
 _PARSHA_READING_RE = re.compile(

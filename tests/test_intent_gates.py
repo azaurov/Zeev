@@ -330,3 +330,56 @@ def test_gates_never_raise_on_junk(zeev, junk):
     zeev.lang_switch_intent(junk)
     zeev._bt_call_match(junk)
     zeev.route_model(junk)
+
+
+# ---------------------------------------------------------------------------
+# Named liturgical prayers  (_TORAH_RE / _ANGEL_PRAYER_RE)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    # Grounded: these retrieve from data/torah.db (Siddur Ashkenaz, weekday).
+    "what is Avinu Malkeinu",
+    "teach me Ma Tovu",
+    "asher yatzar",
+    "what is tachanun",
+    # NOT grounded: the imported Siddur is weekday-only, so Shabbat, festival
+    # and life-cycle liturgy is absent. Matching still routes to 70B instead of
+    # letting the 8B answer cold, which is the point.
+    "the Shehecheyanu blessing",
+    "what's Lecha Dodi",
+    "recite Ana Bekoach",
+    "kol nidre on yom kippur",
+    "mi shebeirach for healing",
+    "tefillat haderech before a trip",
+    "the priestly blessing",
+    "how do I daven mincha",
+])
+def test_named_prayers_reach_the_torah_path(zeev, text):
+    """Live 2026-07-31: "help me with the angelic prayer" matched nothing, so
+    it reached the 8B with no RAG and no routing and invented both an English
+    text and a Hebrew one, naming a prayer ("Tefillat HaShalom") that does not
+    exist.
+    """
+    assert zeev._TORAH_RE.search(text) or zeev._ANGEL_PRAYER_RE.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "help me with the angelic prayer",
+    "say the angelic prayer in Hebrew",
+    "what is the prayer about angels",
+])
+def test_angelic_prayer_needs_a_prayer_word_nearby(zeev, text):
+    """Not a standard liturgical name -- it is what Alex called it."""
+    assert zeev._ANGEL_PRAYER_RE.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "she has an angelic voice",
+    "my daughter looks like an angel",
+    "call my angel investor about the deal",
+])
+def test_bare_angelic_is_ordinary_english(zeev, text):
+    """Why "angelic" is NOT in _TORAH_RE's flat alternation: that alternation
+    has no way to express proximity, and the bare word is common speech."""
+    assert not zeev._ANGEL_PRAYER_RE.search(text), text
+    assert not zeev._TORAH_RE.search(text), text

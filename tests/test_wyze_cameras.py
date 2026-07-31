@@ -214,8 +214,11 @@ CAMS3 = ["upstairs", "basement-cam", "front-yard"]
 
 
 def _fires(zeev, text):
+    """Mirrors the branch condition in handle_transcript."""
     return bool(zeev._WYZE_CAM_RE.search(text)) or (
-        bool(zeev._CAMERA_RE.search(text)) and bool(zeev.resolve_wyze_cam(text, CAMS3)[0]))
+        bool(zeev._CAMERA_RE.search(text))
+        and (bool(zeev.resolve_wyze_cam(text, CAMS3)[0])
+             or bool(zeev._CAM_NOUN_RE.search(text))))
 
 
 @pytest.mark.parametrize("text", [
@@ -228,6 +231,14 @@ def _fires(zeev, text):
     "is anyone upstairs",
     "who is at the front yard",
     "show me the basement cam",
+    # Plurals, all live misses on 2026-07-30. \bcam\b and \bcamera\b do not
+    # match "cameras", so these three reached neither camera branch and the 8B
+    # answered them by describing feeds that do not exist.
+    "check all cameras",
+    "What do you see in the two cameras?",
+    "What do you see in upstairs cameras?",
+    "check both cams",
+    "show me the camera feeds",
 ])
 def test_camera_question_fires_gate(zeev, text):
     assert _fires(zeev, text), f"{text!r} should reach the camera branch"
@@ -245,3 +256,52 @@ def test_camera_question_fires_gate(zeev, text):
 ])
 def test_ordinary_chat_does_not_fire_gate(zeev, text):
     assert not _fires(zeev, text), f"{text!r} must not be treated as a camera request"
+
+
+# --- the capability guard ---------------------------------------------------
+#
+# The gate is an allowlist over unbounded phrasing, so a camera question will
+# always be able to miss it and land in ordinary chat. Left unguarded the 8B
+# does not decline -- it invents. Observed live 2026-07-30: a "living room cam"
+# and an "upstairs hallway cam", neither of which exists, with the cat placed on
+# a windowsill grooming himself. The prompt must say plainly that no image is
+# present, and must name the cameras that do exist so an invented one has
+# something to contradict it.
+
+@pytest.mark.parametrize("text", [
+    "check all cameras",
+    "what do you see in the two cameras?",
+    "what's going on upstairs",
+    "show me the camera feeds",
+    "what do you see",
+])
+def test_camera_question_gets_capability_guard(zeev, monkeypatch, text):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    p = zeev._build_system_prompt(text)
+    assert "## Cameras:" in p, f"no capability guard for {text!r}"
+    assert "NOT been given any camera image" in p
+    # The real names must be present: an unbounded "do not invent" is weaker
+    # than a list the model can check itself against.
+    assert "smokeys cam" in p and "bedroom cam" in p
+
+
+def test_capability_guard_names_only_real_cameras(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    p = zeev._build_system_prompt("check all cameras")
+    for invented in ("living room cam", "upstairs hallway", "hallway cam"):
+        assert invented not in p, f"prompt suggests a nonexistent {invented!r}"
+
+
+def test_capability_guard_absent_from_ordinary_turns(zeev, monkeypatch):
+    """It costs tokens on every turn it appears on; only camera turns pay."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    for text in ["tell me a joke", "what time is it", "play some jazz"]:
+        assert "## Cameras:" not in zeev._build_system_prompt(text), text
+
+
+def test_capability_guard_survives_no_cameras_configured(zeev, monkeypatch):
+    """WYZE_CAMERAS empty is exactly when the model has least to go on."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", [])
+    p = zeev._build_system_prompt("what do you see in the cameras")
+    assert "## Cameras:" in p
+    assert "No cameras are configured." in p

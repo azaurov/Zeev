@@ -461,10 +461,26 @@ _WYZE_CAM_RE = re.compile(
     r"\b(check|look at|look in|show me|peek at|pull up|"
     r"what(?:'?s| is) (?:happening|going on|up)|"
     r"who(?:'?s| is)|is (?:anyone|anybody|someone|somebody))\b"
-    r".{0,30}\b(cam|camera|room|yard|basement|upstairs|downstairs|doorbell|door|garage)\b"
+    # Plurals are not optional. "check all cameras" matched *nothing* here --
+    # \bcam\b and \bcamera\b both fail on "cameras" -- so it fell through to
+    # the LLM, which invented a report on two cameras that do not exist
+    # (found live 2026-07-30). Every room noun takes the same treatment.
+    r".{0,30}\b(cams?|cameras?|feeds?|rooms?|yards?|basement|upstairs|downstairs|"
+    r"doorbell|doors?|garage)\b"
     r"|\b(cam|camera)s?\b.{0,20}\b(see|show|view|feed)\b"
     r"|\b(who|what|anyone|anybody|something)\b.{0,25}\b(at|in|on) the\b"
     r".{0,20}\b(door|porch|driveway|yard|basement|kitchen|living room|garage)\b",
+    re.IGNORECASE,
+)
+# A bare mention of a camera/feed, with no intent verb. Used for two things the
+# gates above cannot do on their own:
+#   - "what do you see in the two cameras" hits _CAMERA_RE, not _WYZE_CAM_RE,
+#     and names no resolvable room -- so it used to reach neither branch and
+#     land in ordinary chat.
+#   - it marks a turn as camera-shaped for the capability note in
+#     _build_system_prompt, so the LLM fallthrough declines instead of inventing.
+_CAM_NOUN_RE = re.compile(
+    r"\b(cams?|cameras?|feeds?|webcams?|security cam\w*|surveillance)\b",
     re.IGNORECASE,
 )
 _VISUAL_TRIGGER_RE = re.compile(
@@ -5510,6 +5526,37 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "not \"$43.75\" or a fraction. Show at most a couple of short steps."
         )
 
+    # Camera capability guard. If this function is running for a camera-shaped
+    # question, the camera branches have already declined -- so there is no
+    # image in this prompt and there never will be one on this turn. Left to
+    # itself the 8B invents a full report rather than saying so: observed live
+    # 2026-07-30 describing a "living room cam" and an "upstairs hallway cam",
+    # neither of which exists, and placing the cat on a windowsill.
+    #
+    # The gate is an allowlist over unbounded phrasing, so this fallthrough is
+    # permanent by construction and needs its own guard rather than a wider
+    # regex. It is made worse by priming: the "Which camera? I can check
+    # bedroom cam, smokeys cam" reply stays in the session, and the next turn
+    # reads it as proof that feeds are available.
+    if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
+            or _CAMERA_RE.search(user_text)):
+        if WYZE_CAMERAS:
+            cam_names = ", ".join(wyze_cam_label(c) for c in sorted(WYZE_CAMERAS)[:8])
+            have = f"The only cameras that exist are: {cam_names}."
+        else:
+            have = "No cameras are configured."
+        parts.append(
+            "\n\n## Cameras: you have NOT been given any camera image on this "
+            f"turn. {have} You cannot see through any of them right now, and "
+            "you have no live feed, no video and no snapshot in front of you. "
+            "Do NOT describe what a camera shows, do NOT invent a camera that "
+            "is not in that list, and do NOT report where a pet or person is. "
+            "Earlier replies in this conversation that named cameras were "
+            "asking which one to check — they are not evidence that you can "
+            "see. Say plainly that you couldn't get a look just now, and ask "
+            "which camera to check if it is unclear."
+        )
+
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
             on_search(user_text)
@@ -8189,9 +8236,17 @@ def handle_transcript(ctx, transcript):
     # the bridge base was no longer set: "what's going on upstairs" fell through
     # to the LLM, which cheerfully answered that it cannot see the upstairs.
     # Whether a given camera is reachable is wyze_stream_url()'s business.
+    # The third arm catches "what do you see in the two cameras": _CAMERA_RE
+    # matches but no room resolves, so before this it reached neither camera
+    # branch (the Pi's own eye needs CAMERA_AVAILABLE, false on this board) and
+    # became an ordinary chat turn -- which the 8B answered by describing two
+    # imaginary feeds. Naming a camera at all now always ends in a real frame
+    # or a question, never in a guess.
     if WYZE_CAMERAS and (
             _WYZE_CAM_RE.search(transcript)
-            or (_CAMERA_RE.search(transcript) and resolve_wyze_cam(transcript)[0])):
+            or (_CAMERA_RE.search(transcript)
+                and (resolve_wyze_cam(transcript)[0]
+                     or _CAM_NOUN_RE.search(transcript)))):
         stream, alts = resolve_wyze_cam(transcript)
         if not stream:
             # Ask instead of picking one. A confidently described wrong room is

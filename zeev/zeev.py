@@ -5538,8 +5538,17 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     # regex. It is made worse by priming: the "Which camera? I can check
     # bedroom cam, smokeys cam" reply stays in the session, and the next turn
     # reads it as proof that feeds are available.
+    # A bare subject name counts too. "Where is Smokey" matches none of the
+    # camera regexes, and if it also misses _SUBJECT_TRIGGER_RE it reaches the
+    # LLM with nothing to stop it -- which is how "Smokey is now sitting on a
+    # windowsill, looking out the window" was produced. Guarding is cheap here
+    # because it only adds prompt text; it never redirects the turn.
+    _subj_named = any(
+        re.search(rf"\b{re.escape(k)}\b", user_text, re.IGNORECASE)
+        for k in WYZE_SUBJECTS
+    ) if WYZE_SUBJECTS else False
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
-            or _CAMERA_RE.search(user_text)):
+            or _CAMERA_RE.search(user_text) or _subj_named):
         if WYZE_CAMERAS:
             cam_names = ", ".join(wyze_cam_label(c) for c in sorted(WYZE_CAMERAS)[:8])
             have = f"The only cameras that exist are: {cam_names}."
@@ -8242,11 +8251,18 @@ def handle_transcript(ctx, transcript):
     # became an ordinary chat turn -- which the 8B answered by describing two
     # imaginary feeds. Naming a camera at all now always ends in a real frame
     # or a question, never in a guess.
+    #
+    # It is gated on `not CAMERA_AVAILABLE` because this branch sits above the
+    # Pi's own camera: with a camera attached, "take a picture with the camera"
+    # says "camera" without naming a room, and would otherwise be answered with
+    # "Which camera?" instead of a photo. Nothing observes that today -- the
+    # board has no camera -- which is exactly why it would surprise someone
+    # later.
     if WYZE_CAMERAS and (
             _WYZE_CAM_RE.search(transcript)
             or (_CAMERA_RE.search(transcript)
                 and (resolve_wyze_cam(transcript)[0]
-                     or _CAM_NOUN_RE.search(transcript)))):
+                     or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))):
         stream, alts = resolve_wyze_cam(transcript)
         if not stream:
             # Ask instead of picking one. A confidently described wrong room is

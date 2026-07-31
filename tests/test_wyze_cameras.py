@@ -305,3 +305,60 @@ def test_capability_guard_survives_no_cameras_configured(zeev, monkeypatch):
     p = zeev._build_system_prompt("what do you see in the cameras")
     assert "## Cameras:" in p
     assert "No cameras are configured." in p
+
+
+def test_pi_camera_phrasing_is_not_hijacked_when_a_camera_exists(zeev, monkeypatch):
+    """The Wyze branch sits above the Pi's own eye, so it must yield to it.
+
+    "take a picture with the camera" says "camera" without naming a room. With
+    a camera attached that has to take a photo, not answer "Which camera?".
+    Nothing observes this today (CAMERA_AVAILABLE is False on this board),
+    which is exactly why it would surprise someone later.
+    """
+    monkeypatch.setattr(zeev, "CAMERA_AVAILABLE", True)
+    for text in ["take a picture with the camera",
+                 "what do you see on the camera",
+                 "snap a photo with your camera"]:
+        assert not _fires_with_pi_cam(zeev, text, True), text
+    # ...but a named room still goes to that room, camera attached or not.
+    assert _fires_with_pi_cam(zeev, "check the basement cam", True)
+
+
+def _fires_with_pi_cam(zeev, text, cam_available):
+    return bool(zeev._WYZE_CAM_RE.search(text)) or (
+        bool(zeev._CAMERA_RE.search(text))
+        and (bool(zeev.resolve_wyze_cam(text, CAMS3)[0])
+             or (bool(zeev._CAM_NOUN_RE.search(text)) and not cam_available)))
+
+
+def test_bare_subject_name_gets_the_guard(zeev, monkeypatch):
+    """"Where is Smokey" matches no camera regex at all.
+
+    If it also misses _SUBJECT_TRIGGER_RE it reaches the LLM unguarded, which
+    is how "Smokey is now sitting on a windowsill" was produced live.
+    """
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {
+        "smokey": {"name": "Smokey", "kind": "cat", "cams": ["smokeys-cam"]},
+        "smoky":  {"name": "Smokey", "kind": "cat", "cams": ["smokeys-cam"]},
+    })
+    for text in ["where is Smokey", "is Smoky ok", "Smokey?"]:
+        p = zeev._build_system_prompt(text)
+        assert "## Cameras:" in p, f"no guard for {text!r}"
+        assert "do NOT report where a pet or person is" in p
+
+
+def test_subject_guard_needs_a_configured_subject(zeev, monkeypatch):
+    """No ZEEV_SUBJECTS means no name to match; must not crash or over-fire."""
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {})
+    assert "## Cameras:" not in zeev._build_system_prompt("where is Smokey")
+
+
+def test_guard_never_leaks_stream_urls(zeev, monkeypatch):
+    """WYZE_CAMERAS holds bare names, but the guard is one parse change away
+    from putting RTSP URLs and LAN IPs into a prompt sent to Groq/OpenRouter --
+    the exact class _scrub_rtsp exists to prevent."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    p = zeev._build_system_prompt("check all cameras")
+    assert "rtsp" not in p.lower()
+    assert "10.0.0." not in p

@@ -362,3 +362,96 @@ def test_guard_never_leaks_stream_urls(zeev, monkeypatch):
     p = zeev._build_system_prompt("check all cameras")
     assert "rtsp" not in p.lower()
     assert "10.0.0." not in p
+
+
+# --- the multi-camera sweep -------------------------------------------------
+#
+# "check all cameras" is not a room, and resolve_wyze_cam cannot express it --
+# it returns a single stream, so the phrase landed on the "Which camera?" ask.
+# Both directions matter: a bare "all" or "both" is far too common in speech to
+# be allowed to start a ~50s two-camera sweep.
+
+SWEEP_CAMS = ["smokeys-cam", "bedroom-cam"]
+
+
+@pytest.fixture
+def sweep_env(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", SWEEP_CAMS)
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        {c: f"rtsp://10.0.0.1/{c}" for c in SWEEP_CAMS})
+    return zeev
+
+
+@pytest.mark.parametrize("text", [
+    "check all cameras",
+    "check all the cameras",
+    "check both cams",
+    "show me every camera",
+    "what do you see on all of the cameras",
+    "pull up both cameras",
+    "check all my camera feeds",
+])
+def test_sweep_phrases_return_every_camera(sweep_env, text):
+    assert sweep_env.resolve_wyze_sweep(text) == sorted(SWEEP_CAMS), text
+
+
+@pytest.mark.parametrize("text", [
+    "check the basement cam",
+    "what's going on upstairs",
+    "is that all",
+    "both of them are fine",
+    "I ate all the leftovers",
+    "tell me everything",
+    "every day this week",
+])
+def test_non_sweep_phrases_return_nothing(sweep_env, text):
+    assert sweep_env.resolve_wyze_sweep(text) == [], text
+
+
+def test_named_room_beats_the_sweep(sweep_env):
+    """"check all the cameras in the bedroom" is a question about the bedroom.
+
+    The branch only consults resolve_wyze_sweep when resolve_wyze_cam found
+    nothing, so this pins the precedence the branch relies on.
+    """
+    stream, _ = sweep_env.resolve_wyze_cam("check all the cameras in the bedroom cam",
+                                           SWEEP_CAMS)
+    assert stream == "bedroom-cam"
+
+
+def test_sweep_pool_skips_bridge_only_cameras(zeev, monkeypatch):
+    """Six of eight never answer; each dead one costs WYZE_SNAP_TIMEOUT."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS",
+                        ["smokeys-cam", "bedroom-cam", "backyard", "secret"])
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        {"smokeys-cam": "rtsp://x", "bedroom-cam": "rtsp://y"})
+    assert zeev.resolve_wyze_sweep("check all cameras") == ["bedroom-cam", "smokeys-cam"]
+
+
+def test_sweep_falls_back_when_nothing_has_a_direct_url(zeev, monkeypatch):
+    """A pure-bridge setup must degrade to slow, not to empty."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["backyard", "doorbell-cam"])
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
+    assert zeev.resolve_wyze_sweep("check all cameras") == ["backyard", "doorbell-cam"]
+
+
+def test_sweep_is_capped(zeev, monkeypatch):
+    """One vision call per camera at ~21-25s each on the free tier."""
+    cams = [f"cam{i}" for i in range(8)]
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", cams)
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {c: "rtsp://x" for c in cams})
+    assert len(zeev.resolve_wyze_sweep("check all cameras")) == zeev._SWEEP_MAX_CAMS
+
+
+def test_sweep_with_no_cameras_configured(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", [])
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS", {})
+    assert zeev.resolve_wyze_sweep("check all cameras") == []
+
+
+def test_sweep_prompt_demands_brevity(zeev):
+    """Every camera's answer is spoken in one reply; two paragraphs is a minute."""
+    p = zeev.sweep_vision_prompt("bedroom cam")
+    assert "bedroom cam" in p
+    assert "one or two short sentences" in p
+    assert "stage direction" in p

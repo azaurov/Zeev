@@ -501,3 +501,106 @@ def test_all_stage_direction_reply_still_says_something(zeev, ctx, monkeypatch):
     spoken = " ".join(ctx.spoke)
     assert zeev._clean_for_tts(spoken).strip(), f"turn spoke silence: {ctx.spoke}"
     assert "couldn't make anything out" in spoken.lower(), ctx.spoke
+
+
+# --- Multi-camera sweep ("check all cameras") --------------------------------
+#
+# Before this the phrase reached the "Which camera?" ask -- honest, but not the
+# question. These pin the whole branch, not just the regex: that it grabs every
+# camera, speaks each one's answer, and never overstates a dead one.
+
+def _sweep_env(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    monkeypatch.setattr(zeev, "WYZE_RTSP_BASE", "")
+    monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
+                        {"smokeys-cam": "rtsp://10.0.0.217:554/stream0",
+                         "bedroom-cam": "rtsp://10.0.0.84:554/stream0"})
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {})
+
+
+def test_sweep_looks_at_every_camera_and_reports_both(zeev, ctx, monkeypatch):
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    looked = []
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda s, **k: looked.append(s) or f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda img, p: (f"A tidy room seen from {img}.", None))
+    zeev.handle_transcript(ctx, "check all cameras")
+    assert sorted(looked) == ["bedroom-cam", "smokeys-cam"], looked
+    reply = ctx.spoke[-1].lower()
+    assert "bedroom cam" in reply and "smokeys cam" in reply, ctx.spoke
+    assert "which camera" not in reply, "sweep must not fall back to the ask path"
+
+
+def test_sweep_does_not_ask_which_camera(zeev, ctx, monkeypatch):
+    """The regression this feature replaces."""
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("An empty room.", None))
+    for text in ["check all cameras", "check both cams", "what do you see on all the cameras"]:
+        ctx.spoke.clear()
+        zeev.handle_transcript(ctx, text)
+        assert "which camera" not in ctx.spoke[-1].lower(), (text, ctx.spoke)
+
+
+def test_sweep_names_a_camera_it_could_not_reach(zeev, ctx, monkeypatch):
+    """Silently dropping a dead camera reads as a full report of the house."""
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda s, **k: None if s == "bedroom-cam" else f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("A cat on the sill.", None))
+    zeev.handle_transcript(ctx, "check all cameras")
+    reply = ctx.spoke[-1].lower()
+    assert "cat on the sill" in reply
+    assert "bedroom cam" in reply and "couldn't get a picture" in reply, ctx.spoke
+
+
+def test_sweep_with_no_frames_at_all_says_so(zeev, ctx, monkeypatch):
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: None)
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: pytest.fail("no frame: must not call vision"))
+    zeev.handle_transcript(ctx, "check all cameras")
+    reply = ctx.spoke[-1].lower()
+    assert "couldn't get a picture" in reply and "asleep or offline" in reply, ctx.spoke
+
+
+def test_sweep_drops_an_all_stage_direction_reply(zeev, ctx, monkeypatch):
+    """A vision reply can be entirely stage direction; stripped it is empty,
+    which would be spoken as silence in the middle of a multi-camera answer."""
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda img, p: (("(Sarina's calm voice)", None)
+                                        if "bedroom" in img else ("A lamp is on.", None)))
+    zeev.handle_transcript(ctx, "check all cameras")
+    reply = ctx.spoke[-1].lower()
+    assert "lamp is on" in reply
+    assert "sarina" not in reply, ctx.spoke
+    assert "bedroom cam" in reply and "couldn't get a picture" in reply
+
+
+def test_named_room_still_beats_a_sweep_phrase(zeev, ctx, monkeypatch):
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    looked = []
+    monkeypatch.setattr(zeev, "wyze_snapshot",
+                        lambda s, **k: looked.append(s) or f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("An empty room.", None))
+    zeev.handle_transcript(ctx, "check all the cameras in the bedroom cam")
+    assert looked == ["bedroom-cam"], looked
+
+
+def test_sweep_announces_before_the_slow_part(zeev, ctx, monkeypatch):
+    """~50s of silence for two cameras reads as a dead device."""
+    _sweep_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete", lambda img, p: ("An empty room.", None))
+    zeev.handle_transcript(ctx, "check both cameras")
+    assert "let me check both cameras" in ctx.spoke[0].lower(), ctx.spoke

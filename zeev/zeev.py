@@ -5907,6 +5907,59 @@ def resolve_wyze_cam(text: str, cams: list[str] | None = None):
 _SUBJECT_MAX_CAMS = int(os.environ.get("ZEEV_SUBJECT_MAX_CAMS", "3"))
 
 
+def sweepable_cams(cams=None):
+    """Cameras worth pointing a sweep at: those with a direct RTSP URL.
+
+    Six of the eight here never answer -- the bridge times out on the TUTK
+    handshake for every un-flashed camera -- so sweeping all of WYZE_CAMERAS
+    would spend WYZE_SNAP_TIMEOUT on each dead one before saying anything.
+    Falls back to the full list when nothing has a direct URL, so a pure-bridge
+    setup degrades to slow rather than to empty.
+    """
+    known = list(WYZE_CAMERAS if cams is None else cams)
+    return [c for c in known if c in WYZE_CAMERA_URLS] or known
+
+
+# "check all cameras" is a *sweep*, not a room. resolve_wyze_cam returns a
+# single stream and cannot express it, so before this the phrase reached the
+# "Which camera?" ask path -- an honest answer, but not the one asked for.
+# The quantifier must sit right against the camera noun: a bare "all" or
+# "both" is far too common in ordinary speech.
+_ALL_CAMS_RE = re.compile(
+    r"\b(all|both|every|each|any)\b(\s+(of\s+)?(the|my|your)?)?\s*"
+    r"\b(cams?|cameras?|feeds?)\b"
+    r"|\b(cams?|cameras?|feeds?)\b\s*\b(all|both)\b",
+    re.IGNORECASE,
+)
+# A sweep costs one vision call per camera (~21-25s each on the free tier), so
+# it is capped for the same reason the subject sweep is.
+_SWEEP_MAX_CAMS = int(os.environ.get("ZEEV_SWEEP_MAX_CAMS", "3"))
+
+
+def resolve_wyze_sweep(text: str, cams=None):
+    """Cameras to sweep for `text`, or [] when it isn't a sweep request.
+
+    Naming a room wins: "check all the cameras in the basement" is a question
+    about the basement, and resolve_wyze_cam already answers it.
+    """
+    if not text or not _ALL_CAMS_RE.search(text):
+        return []
+    pool = sweepable_cams(cams)
+    if not pool:
+        return []
+    return sorted(pool)[:_SWEEP_MAX_CAMS]
+
+
+def sweep_vision_prompt(cam_label: str) -> str:
+    """Brevity is the point: a sweep speaks every camera's answer in one reply,
+    so two paragraphs become a minute of talking."""
+    return (
+        f"This is the {cam_label} security camera. Describe what you see in "
+        f"one or two short sentences — the room, and anything or anyone in it. "
+        f"Do not add any preamble, stage direction or speaker label."
+    )
+
+
 def parse_subjects(spec: str, known_cams=None, default_cams=None):
     """Parse ZEEV_SUBJECTS into {key: {name, kind, cams}}.
 
@@ -5919,7 +5972,7 @@ def parse_subjects(spec: str, known_cams=None, default_cams=None):
     """
     known = list(WYZE_CAMERAS if known_cams is None else known_cams)
     if default_cams is None:
-        default_cams = [c for c in known if c in WYZE_CAMERA_URLS] or known
+        default_cams = sweepable_cams(known)
     out = {}
     for entry in (spec or "").split(","):
         entry = entry.strip()
@@ -8264,6 +8317,73 @@ def handle_transcript(ctx, transcript):
                 and (resolve_wyze_cam(transcript)[0]
                      or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))):
         stream, alts = resolve_wyze_cam(transcript)
+        # "check all cameras" is a sweep, not a room, and resolve_wyze_cam has
+        # no way to say so -- it returns a single stream, so the phrase used to
+        # land on the ask path below. Naming a room still wins: "check all the
+        # cameras in the basement" is a question about the basement.
+        sweep = [] if stream else resolve_wyze_sweep(transcript)
+        if sweep:
+            print(f"[wyze] sweeping {', '.join(sweep)}", flush=True)
+            ctx._set_face("thinking", "cameras…")
+
+            def _grab(s):
+                box = []
+                th = threading.Thread(
+                    target=lambda: box.append(wyze_snapshot(s)), daemon=True)
+                th.start()
+                return th, box
+
+            # Same overlap as the subject sweep: a grab is 4-8s against ~21-25s
+            # of free-tier vision, so the next frame is pulled *under* the
+            # current vision call rather than after it. First grab runs under
+            # the announcement.
+            pending = {sweep[0]: _grab(sweep[0])}
+            howmany = "both cameras" if len(sweep) == 2 else f"all {len(sweep)} cameras"
+            ctx._speak_device(f"Let me check {howmany}.", _LAST_VOICE)
+            seen_parts, missing = [], []
+            for i, s in enumerate(sweep):
+                th, box = pending.get(s) or _grab(s)
+                th.join(WYZE_SNAP_TIMEOUT + 5)
+                img = box[0] if box else None
+                if i + 1 < len(sweep) and sweep[i + 1] not in pending:
+                    pending[sweep[i + 1]] = _grab(sweep[i + 1])
+                label = wyze_cam_label(s)
+                if not img:
+                    print(f"[wyze] no frame from {s}", flush=True)
+                    missing.append(label)
+                    continue
+                vreply, verr = vision_complete(img, sweep_vision_prompt(label))
+                if not vreply:
+                    print(f"[wyze] vision failed on {s}: {verr}", flush=True)
+                    missing.append(label)
+                    continue
+                # A vision reply can be *entirely* stage direction; stripping it
+                # correctly leaves an empty string, which would be spoken as
+                # silence in the middle of a multi-camera answer.
+                clean = _strip_stage_directions(vreply).strip()
+                print(f"[wyze] {s}: {clean[:200]!r}", flush=True)
+                if not clean:
+                    missing.append(label)
+                    continue
+                seen_parts.append((label, clean))
+                if i + 1 < len(sweep):
+                    ctx._speak_device(
+                        f"Checking the {wyze_cam_label(sweep[i + 1])}.", _LAST_VOICE)
+            if seen_parts:
+                reply = " ".join(f"On the {lb}: {d}" for lb, d in seen_parts)
+                if missing:
+                    # Naming what was NOT seen matters as much as what was: a
+                    # sweep that silently drops a dead camera reads as a full
+                    # report of the house.
+                    reply += (" I couldn't get a picture from the "
+                              + " or the ".join(missing) + ".")
+            else:
+                where = " or the ".join(missing) or "cameras"
+                reply = (f"I couldn't get a picture from the {where} just "
+                         "now — they may be asleep or offline.")
+            print(f"Zeev [wyze/sweep]: {reply}\n", flush=True)
+            finish_turn(ctx, reply)
+            return
         if not stream:
             # Ask instead of picking one. A confidently described wrong room is
             # worse than a one-line question.

@@ -4250,6 +4250,63 @@ def get_parsha_text(parsha_info, max_chars=7000):
         return ""
 
 
+_TORAH_REF_SKIP = {
+    "the", "and", "for", "what", "does", "how", "who", "was", "are", "this",
+    "that", "with", "from", "have", "recite", "tell", "read", "say", "help",
+    "prayer", "prayers", "blessing", "hebrew", "please", "about", "can", "you",
+    "need", "some", "want", "know", "your", "his", "her", "its", "our",
+    # Short function words -- only reachable because the tokenizer takes 2-char
+    # words (for "Ma Tovu"), and a bigram like "is ma" would match nothing
+    # useful while crowding out the real one.
+    "is", "it", "me", "in", "of", "to", "do", "my", "on", "at", "an", "or",
+    "be", "as", "so", "we", "us", "am", "if", "by", "up",
+}
+
+
+def _torah_ref_lookup(con, query, k):
+    """Find passages by REFERENCE name rather than body text.
+
+    The FTS5 table declares `ref` UNINDEXED -- only `en` is searchable -- so a
+    prayer whose name never appears inside its own English translation is
+    invisible to MATCH however it is spelled. That is most of the siddur: Ma
+    Tovu, Asher Yatzar and Shalom Aleichem are all present in data/torah.db and
+    all unreachable without this. Shalom Aleichem is the one that prompted it --
+    the Friday-night hymn greeting the ministering angels, i.e. the "angelic
+    prayer", sitting in the DB while the 8B invented one instead.
+
+    Bigrams first because prayer names are overwhelmingly two words and a
+    single one is far too loose ("shabbat" would drag in 205 rows); bare words
+    are tried only when long enough to be a name in their own right.
+    """
+    # Two chars, not three: "Ma Tovu" is a real prayer name and a 3-char floor
+    # drops "ma" entirely, leaving one word and therefore no bigram at all.
+    # _TORAH_REF_SKIP carries the short function words that admits.
+    words = [w for w in re.findall(r"[a-z']{2,}", query.lower())
+             if w not in _TORAH_REF_SKIP]
+    bigrams = [f"{a} {b}" for a, b in zip(words, words[1:])][:6]
+    singles = [w for w in words if len(w) >= 7][:6]
+
+    def probe(cands):
+        if not cands:
+            return []
+        # One OR'd scan per tier rather than one per candidate: each LIKE
+        # '%x%' is a full scan of ~20k rows, and eight of them measured 923ms
+        # on the Pi Zero. Two tiers keep bigram precedence at 2 scans.
+        sql = ("SELECT ref, en FROM passages WHERE "
+               + " OR ".join(["ref LIKE ?"] * len(cands)) + " LIMIT ?")
+        return con.execute(sql, [f"%{c}%" for c in cands] + [k]).fetchall()
+
+    rows, seen = [], set()
+    for tier in (bigrams, singles):
+        for ref, en in probe(tier):
+            if ref not in seen:
+                seen.add(ref)
+                rows.append((ref, en))
+        if len(rows) >= k:
+            break
+    return rows[:k]
+
+
 def torah_search(query, k=3):
     """Return up to k (ref, en_text) pairs from the local Torah FTS5 database."""
     if not TORAH_DB.exists():
@@ -4257,6 +4314,12 @@ def torah_search(query, k=3):
     try:
         import sqlite3 as _sqlite3
         con = _sqlite3.connect(f"file:{TORAH_DB}?mode=ro", uri=True)
+        # Reference-name hits lead: naming a prayer is a far stronger signal
+        # than an OR of its words, which retrieves whatever shares vocabulary.
+        ref_rows = _torah_ref_lookup(con, query, k)
+        if len(ref_rows) >= k:
+            con.close()
+            return ref_rows
         words = re.findall(r"\b\w{3,}\b", query.lower())
         # FTS5 query: OR over content words, skip common stop words
         skip = {"the", "and", "for", "what", "does", "how", "who", "was",
@@ -4264,14 +4327,16 @@ def torah_search(query, k=3):
                 "recite", "tell", "week", "today", "week's", "read", "say", "portion"}
         fts_words = [w for w in words if w not in skip][:12]
         if not fts_words:
-            return []
+            con.close()
+            return ref_rows
         fts_q = " OR ".join(fts_words)
         rows = con.execute(
             "SELECT ref, en FROM passages WHERE passages MATCH ? ORDER BY rank LIMIT ?",
-            (fts_q, k),
+            (fts_q, k - len(ref_rows)),
         ).fetchall()
         con.close()
-        return rows
+        seen = {r for r, _ in ref_rows}
+        return ref_rows + [(r, e) for r, e in rows if r not in seen]
     except Exception as e:
         print(f"[db] torah_search failed: {e}", flush=True)
         return []

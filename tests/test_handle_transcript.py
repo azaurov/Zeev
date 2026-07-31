@@ -767,3 +767,45 @@ def test_goodnight_household_reaches_the_spoken_reply(zeev, ctx, monkeypatch):
     for who in zeev._GOODNIGHT_HOUSEHOLD:
         assert who in spoken, (who, spoken)
     assert who in ctx.session[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Token budget vs script cost
+# ---------------------------------------------------------------------------
+
+def _capture_tok_limit(zeev, monkeypatch, ctx, transcript):
+    """Drive one LLM turn and return the max_tokens it asked for."""
+    seen = {}
+
+    def fake_post(msgs, model, stream=True, max_tokens=400, **kw):
+        seen["max_tokens"] = max_tokens
+        return None, "offline"          # short-circuit before any streaming
+
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback", fake_post)
+    monkeypatch.setattr(zeev, "_groq_post", fake_post)
+    monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
+    zeev.handle_transcript(ctx, transcript)
+    return seen.get("max_tokens")
+
+
+def test_hebrew_content_gets_a_bigger_token_budget(zeev, monkeypatch, ctx):
+    """Live 2026-07-31: the Hebrew line stopped mid-phrase with an unclosed
+    quote, which sounds exactly like TTS being cut off and is not.
+
+    Device mode caps replies at 160 tokens because they are spoken aloud, but
+    that is tuned for English. A token is not a unit of content: pointed Hebrew
+    costs several tokens per character, so the same sentence blows the budget.
+    """
+    tok = _capture_tok_limit(
+        zeev, monkeypatch, ctx,
+        "help me with the angelic prayer, say it in Hebrew")
+    assert tok is not None, "never reached the LLM"
+    assert tok >= 500, f"Hebrew recitation got only {tok} tokens"
+
+
+def test_ordinary_english_stays_terse(zeev, monkeypatch, ctx):
+    """The bigger budget must not leak into normal chat — every reply here is
+    spoken, and 500 tokens of speech is well over a minute of talking."""
+    tok = _capture_tok_limit(zeev, monkeypatch, ctx, "what's the weather like")
+    assert tok is not None, "never reached the LLM"
+    assert tok <= 200, f"ordinary chat inflated to {tok} tokens"

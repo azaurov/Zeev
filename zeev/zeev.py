@@ -8830,6 +8830,15 @@ def handle_transcript(ctx, transcript):
         tok_limit = 160
     else:
         tok_limit = 160
+    # Device-mode limits are deliberately far tighter than web/terminal (160 vs
+    # 600) because every reply is spoken aloud. But they are tuned for English,
+    # and a token is not a unit of *content*: pointed Hebrew costs several
+    # tokens per character, so the same sentence can be 4-5x the budget. Live
+    # 2026-07-31, "say the angelic prayer in Hebrew" returned the English gloss
+    # plus a Hebrew line that stopped mid-phrase with an unclosed quote -- which
+    # sounds exactly like the TTS being cut off, and is not.
+    if _HE_CONTENT_RE.search(transcript) or FORCED_LANG in ("he", "ru"):
+        tok_limit = max(tok_limit, 500)
     resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
     print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 

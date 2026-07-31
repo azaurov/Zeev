@@ -88,10 +88,20 @@ func Record(dev string, maxSeconds float64, vad bool, rate int, silenceRMS float
 	n := 0
 	tmp := make([]byte, 4096)
 
+	// Log the threshold BEFORE recording. Whether it is calibrated against the
+	// speaker's actual level is the one thing that decides between "cuts on
+	// time", "never cuts" and "cuts while they are still talking", and without
+	// this line a capture that simply runs to the ceiling logs nothing at all.
+	if vad {
+		log.Printf("record: start max=%.0fs silence_rms=%.0f", maxSeconds, silenceRMS)
+	}
+
 	started := time.Now()
+	peakRMS := 0.0
 	deadline := started.Add(time.Duration(maxSeconds*1.5) * time.Second)
 	speechEnd := time.Time{}
 	speechSeen := false
+	relaxed := false
 
 	// 0.1s of audio in bytes (for VAD chunk size).
 	vadChunkBytes := int(float64(rate) * 0.1 * 2)
@@ -113,6 +123,9 @@ func Record(dev string, maxSeconds float64, vad bool, rate int, silenceRMS float
 					chunkStart = 0
 				}
 				rms := rmsInt16(buf[chunkStart:chunkEnd])
+				if rms > peakRMS {
+					peakRMS = rms
+				}
 				if rms >= silenceRMS {
 					speechEnd = time.Now()
 					speechSeen = true
@@ -123,9 +136,27 @@ func Record(dev string, maxSeconds float64, vad bool, rate int, silenceRMS float
 						break
 					}
 				} else if time.Since(started) > noSpeechLimit {
-					log.Printf("record: no speech within %s, stopping (rms %.0f < %.0f)",
-						noSpeechLimit, rms, silenceRMS)
-					break
+					// Nothing has cleared the threshold yet. Two very different
+					// causes, and guessing wrong truncates the user mid-word:
+					// either the room really is empty, or the threshold was
+					// calibrated above this speaker's level. peakRMS separates
+					// them. If there is clearly audio here, distrust the
+					// threshold rather than the speaker -- relax once to half
+					// the observed peak and keep recording. A genuinely silent
+					// room has no peak to relax to and still stops on time.
+					if !relaxed && peakRMS >= defaultSilenceRMS*2 {
+						relaxed = true
+						was := silenceRMS
+						silenceRMS = math.Max(defaultSilenceRMS, peakRMS*0.5)
+						speechEnd = time.Now()
+						speechSeen = true
+						log.Printf("record: no speech at threshold %.0f but peak was %.0f "+
+							"— relaxing to %.0f and continuing", was, peakRMS, silenceRMS)
+					} else {
+						log.Printf("record: no speech within %s, stopping (peak %.0f < %.0f)",
+							noSpeechLimit, peakRMS, silenceRMS)
+						break
+					}
 				}
 			}
 		}
@@ -136,6 +167,16 @@ func Record(dev string, maxSeconds float64, vad bool, rate int, silenceRMS float
 
 	cmd.Process.Kill()
 	cmd.Wait()
+
+	// peak vs silence_rms is the whole diagnosis. peak below the threshold means
+	// the threshold is calibrated above this speaker and the capture was cut
+	// short; a full-length capture with peak far above it means the opposite --
+	// the threshold is under the room floor and VAD never fired.
+	if vad {
+		secs := float64(n) / float64(rate*bytesPerSample)
+		log.Printf("record: done %.1fs of %.0fs max, peak_rms=%.0f silence_rms=%.0f speech=%v",
+			secs, maxSeconds, peakRMS, silenceRMS, speechSeen)
+	}
 
 	pcm := buf[:n]
 	return makeWAV(pcm, rate), nil

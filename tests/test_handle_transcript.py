@@ -667,3 +667,103 @@ def test_all_stage_direction_reply_falls_back(zeev, ctx, monkeypatch):
     zeev.handle_transcript(ctx, "check the bedroom cam")
     stored = ctx.session[-1]["content"]
     assert "couldn't make anything out" in stored.lower(), stored
+
+
+# --- Goodnight (two voices) --------------------------------------------------
+#
+# The only branch that answers in two voices: Zeev (daniel) then Sarina. Every
+# other reply is spoken by finish_turn in a single voice, which is why this one
+# needs finish_turn(speak=False) -- the tail still records the text.
+
+def _voices(ctx):
+    """Re-wire _speak_device to capture (text, voice) pairs."""
+    said = []
+    ctx._speak_device = lambda text, voice="sarina": said.append((text, voice))
+    return said
+
+
+def test_goodnight_answers_in_both_voices(zeev, ctx, monkeypatch):
+    _no_llm(monkeypatch, zeev)
+    said = _voices(ctx)
+    zeev.handle_transcript(ctx, "goodnight")
+    assert [v for _, v in said] == ["daniel", "sarina"], said
+    assert all(t.strip() for t, _ in said), "neither line may be empty"
+
+
+def test_goodnight_records_both_lines_once(zeev, ctx, monkeypatch):
+    """speak=False must not cost the history: both lines belong in the record,
+    and the tail must not speak them a third time in one voice."""
+    _no_llm(monkeypatch, zeev)
+    said = _voices(ctx)
+    zeev.handle_transcript(ctx, "goodnight")
+    assert len(said) == 2, said
+    stored = ctx.session[-1]["content"]
+    for text, _ in said:
+        assert text in stored, stored
+    assert [m["role"] for m in ctx.session] == ["user", "assistant"]
+
+
+def test_goodnight_ignores_the_wake_voice(zeev, ctx, monkeypatch):
+    """Both answer whichever one was woken -- that is the point of the branch."""
+    _no_llm(monkeypatch, zeev)
+    said = _voices(ctx)
+    zeev._WAKE_VOICE[0] = "daniel"
+    try:
+        zeev.handle_transcript(ctx, "goodnight")
+        assert [v for _, v in said] == ["daniel", "sarina"], said
+    finally:
+        zeev._WAKE_VOICE[0] = None
+
+
+@pytest.mark.parametrize("text", [
+    "goodnight", "good night", "Goodnight Zeev", "night night",
+    "sweet dreams", "I'm going to bed", "heading to sleep",
+    "turning in for the night", "time for bed", "calling it a night",
+])
+def test_goodnight_phrasings(zeev, ctx, monkeypatch, text):
+    _no_llm(monkeypatch, zeev)
+    said = _voices(ctx)
+    zeev.handle_transcript(ctx, text)
+    assert len(said) == 2, (text, said)
+
+
+@pytest.mark.parametrize("text", [
+    "remind me to say goodnight at nine",          # a reminder, not a sign-off
+    "what's a good night light for a kid's room",  # not a sign-off either
+    "tell me about sleep apnea",
+])
+def test_goodnight_does_not_over_fire(zeev, text):
+    """The gate reads only the first 40 chars and excludes tool phrasing, the
+    same shape resolve_subject uses for exactly this reason."""
+    head = text[:40]
+    fires = bool(zeev._GOODNIGHT_RE.search(head)) and not bool(
+        zeev._TOOL_INTENT_RE.search(text))
+    assert not fires, text
+
+
+def test_goodnight_always_names_the_household(zeev, ctx, monkeypatch):
+    """Every pair must name everyone. A random choice that sometimes dropped
+    someone would make the wish intermittent, which reads worse than not having
+    it -- so this checks the table, not one sampled reply."""
+    for zeev_line, sarina_line in zeev._GOODNIGHT_LINES:
+        both = f"{zeev_line} {sarina_line}"
+        for who in zeev._GOODNIGHT_HOUSEHOLD:
+            assert who in both, f"{who} missing from {both!r}"
+
+
+def test_both_voices_wish_alex_goodnight(zeev):
+    """Being wished goodnight only by whichever voice speaks first is not being
+    wished goodnight by both."""
+    for zeev_line, sarina_line in zeev._GOODNIGHT_LINES:
+        assert "Alex" in zeev_line, zeev_line
+        assert "Alex" in sarina_line, sarina_line
+
+
+def test_goodnight_household_reaches_the_spoken_reply(zeev, ctx, monkeypatch):
+    _no_llm(monkeypatch, zeev)
+    said = _voices(ctx)
+    zeev.handle_transcript(ctx, "goodnight")
+    spoken = " ".join(t for t, _ in said)
+    for who in zeev._GOODNIGHT_HOUSEHOLD:
+        assert who in spoken, (who, spoken)
+    assert who in ctx.session[-1]["content"]

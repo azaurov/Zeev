@@ -442,6 +442,44 @@ _VOLUME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Goodnight ───────────────────────────────────────────────────────────────
+# Both personas answer, in turn: Zeev (daniel) then Sarina (af_heart). Every
+# other branch speaks in one voice, so this is the only place the reply tail
+# cannot do the speaking -- hence finish_turn's `speak` flag.
+#
+# Gated to the first 40 characters so it stays a sign-off rather than firing on
+# "goodnight" anywhere in a sentence, and _TOOL_INTENT_RE is excluded for the
+# same reason resolve_subject excludes it: "remind me to say goodnight at nine"
+# is a reminder.
+_GOODNIGHT_RE = re.compile(
+    r"\b(good ?night|night[ -]night|nighty[ -]?night|sweet dreams|sleep well|"
+    r"(i'?m |im )?(going|off|heading) to (bed|sleep)|"
+    r"turning in( for the night)?|time for bed|calling it a night)\b"
+    # "a good night light for the kid's room" and "did you have a good night's
+    # sleep" both contain the phrase and neither is a sign-off.
+    r"(?!\s*(light|lamp|bulb|'?s\b))",
+    re.IGNORECASE,
+)
+# The household Zeev says goodnight to. Every pair below names all three: a
+# random choice that sometimes drops them would make the wish intermittent,
+# which reads worse than not having it.
+_GOODNIGHT_HOUSEHOLD = ("Alex", "Maria", "Leo", "Smokey")
+# Paired so the two voices answer each other instead of both saying the same
+# thing. Kept short: this is the last thing heard, not a monologue. Both voices
+# name Alex -- being wished goodnight only by the voice that happens to speak
+# first is not being wished goodnight by both.
+_GOODNIGHT_LINES = [
+    ("Goodnight, Alex. Rest easy.",
+     "Goodnight, Alex. And to Maria and Leo too — and Smokey, wherever he's curled up."),
+    ("Goodnight, Alex. The day's done — let it go.",
+     "Goodnight, Alex. Goodnight, Maria. Goodnight, Leo. Goodnight, Smokey."),
+    ("Sleep well, Alex. Say goodnight to Maria and Leo for me.",
+     "Goodnight, Alex. And goodnight to Smokey. I'll be here in the morning."),
+    ("Goodnight, Alex. You've earned the rest.",
+     "Goodnight to you, Alex — and to Maria, to Leo, and to Smokey. "
+     "Everything can wait until morning."),
+]
+
 _CAMERA_RE = re.compile(
     r"\bwhat (do you see|can you see|are you seeing|do you look at)\b"
     r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
@@ -7918,13 +7956,19 @@ class _DeviceCtx:
     )
 
 
-def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None):
+def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None,
+                speak=True):
     """Record `reply`, speak it, and return the device to ready/idle.
 
     Every intent branch hand-rolled this tail. They are NOT all identical --
     some show the speaking face, some set the LED, some do neither -- so the
     flags preserve each caller's existing behavior rather than normalizing
     it. Only the boilerplate is shared.
+
+    `speak=False` records and settles without speaking, for a branch that has
+    already said its piece. The goodnight branch needs it: it answers in two
+    voices, so a single-voice tail cannot deliver the reply, but the full text
+    of both lines still belongs in the history.
 
     `user_text` is only passed by branches that return *before* the central
     user-turn record (see the `ctx.session.append` for "user" further down);
@@ -7942,7 +7986,8 @@ def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None):
         ctx._set_face("speaking", reply)
     # Default to whoever this turn addressed, so wake-word voice routing applies
     # to the early-returning branches too, not just LLM replies.
-    ctx._speak_device(reply, voice or _LAST_VOICE)
+    if speak:
+        ctx._speak_device(reply, voice or _LAST_VOICE)
     ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
 
 def handle_transcript(ctx, transcript):
@@ -7994,6 +8039,27 @@ def handle_transcript(ctx, transcript):
         reply = _LANG_SWITCH_CONFIRM[lang_code]
         print(f"Zeev [lang]: {reply}")
         finish_turn(ctx, reply, user_text=transcript)
+        return
+
+    # ── Goodnight ────────────────────────────────────────────────────────
+    # Answered by both voices in turn, Zeev then Sarina. Placed high so no
+    # later gate can swallow a sign-off, but below the language switch: a
+    # goodnight is not worth overriding an explicit "speak Russian".
+    if (_GOODNIGHT_RE.search(transcript[:40])
+            and not _TOOL_INTENT_RE.search(transcript)):
+        zeev_line, sarina_line = random.choice(_GOODNIGHT_LINES)
+        print(f"Zeev [goodnight]: {zeev_line} / {sarina_line}", flush=True)
+        ctx._set_face("speaking", zeev_line)
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        # Voices are named explicitly rather than taken from _LAST_VOICE: the
+        # point of this branch is that both answer, whichever one was woken.
+        ctx._speak_device(zeev_line, "daniel")
+        ctx._set_face("speaking", sarina_line)
+        ctx._speak_device(sarina_line, "sarina")
+        # Both lines are recorded, but the tail must not re-speak them in a
+        # single voice -- hence speak=False.
+        finish_turn(ctx, f"{zeev_line} {sarina_line}", user_text=transcript,
+                    face=False, led=False, speak=False)
         return
 
     # ── Adult jokes ──────────────────────────────────────────────────────

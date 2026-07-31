@@ -23,6 +23,12 @@ type Request struct {
 	Block      bool    `json:"block,omitempty"`
 	Rate       int     `json:"rate,omitempty"` // target sample rate for speak_sco
 	Voice      string  `json:"voice,omitempty"` // Kokoro voice override, e.g. "bf_emma"
+	// SilenceRMS is the int16 RMS below which a frame counts as silence for
+	// `record` VAD. Supplied by the caller because the wake listener already
+	// tracks a rolling median of this room's noise floor; the daemon cannot
+	// measure it itself, since the mic only opens once the user is already
+	// mid-utterance. 0 → fall back to the built-in default.
+	SilenceRMS float64 `json:"silence_rms,omitempty"`
 }
 
 // Response is sent back from Go → Python for each request.

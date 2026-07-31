@@ -241,10 +241,18 @@ class AudioClient:
         """Stop any in-progress music playback."""
         self._call_safe({}, cmd="stop")
 
-    def record(self, max_seconds: float = 8.0, vad: bool = True, rate: int = 0) -> bytes:
-        """Record audio; returns WAV bytes. rate=0 → 16000 Hz."""
+    def record(self, max_seconds: float = 8.0, vad: bool = True, rate: int = 0,
+               silence_rms: float = 0.0) -> bytes:
+        """Record audio; returns WAV bytes. rate=0 → 16000 Hz.
+
+        max_seconds is a ceiling, not a duration: with VAD the daemon returns as
+        soon as the speaker stops. silence_rms is this room's measured noise
+        floor (0 → daemon default); the daemon cannot measure it itself because
+        the mic only opens once the user is already talking.
+        """
         r = self._call_safe({"wav_b64": ""}, _timeout=max_seconds + 15,
-                            cmd="record", max_seconds=max_seconds, vad=vad, rate=rate)
+                            cmd="record", max_seconds=max_seconds, vad=vad, rate=rate,
+                            silence_rms=silence_rms)
         b64 = r.get("wav_b64", "")
         if not b64:
             return b""

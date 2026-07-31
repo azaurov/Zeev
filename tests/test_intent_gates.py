@@ -94,6 +94,70 @@ def test_lang_switch_ignores_incidental_mention(zeev):
     assert zeev.lang_switch_intent("I have a Russian friend from work") is None
 
 
+@pytest.mark.parametrize("text", [
+    "Yes, that was the tefillin angelic prayer, the one you just recited. "
+    "I need help with that. Can you also say it in Hebrew?",
+    "Can you also say it in Hebrew?",
+    "say it in Hebrew",
+    "can you say the prayer in Hebrew",
+    "say that again in Russian",
+    "read this in Spanish",
+])
+def test_lang_switch_ignores_translation_requests(zeev, text):
+    """Live 2026-07-31: 'Can you also say it in Hebrew?' answered with
+    'switching to Hebrew' and never recited the prayer.
+
+    An object between the verb and the language name ("it", "the prayer") means
+    render THAT in the language -- a content request, not a mode change. The
+    trigger sat at the end of the utterance, so this was never a truncation
+    bug even though the 8s record cap was broken at the same time.
+    """
+    assert zeev.lang_switch_intent(text) is None, text
+
+
+@pytest.mark.parametrize("text", [
+    "say it in English",
+    "say that in English",
+    "answer in English",
+])
+def test_lang_switch_english_is_the_escape_hatch(zeev, text):
+    """English is exempt from the object guard on purpose.
+
+    FORCED_LANG is sticky. Reading "say it in English" as a content request
+    would leave a user stuck in Hebrew with no spoken way back, so English
+    over-triggers toward the default state by design.
+    """
+    assert zeev.lang_switch_intent(text) == "en", text
+
+
+@pytest.mark.parametrize("text", [
+    "talk to me in Spanish",
+    "speak to me in Hebrew",
+    "answer in Russian from now on",
+    "switch to Hebrew",
+    "reply in Spanish please",
+])
+def test_lang_switch_still_matches_real_switches(zeev, text):
+    """The object guard must not eat indirect objects ("to me") or adverbials."""
+    assert zeev.lang_switch_intent(text) is not None, text
+
+
+@pytest.mark.parametrize("text", [
+    "Can you also say it in Hebrew?",
+    "recite the prayer in Hebrew",
+    "read that in Hebrew",
+])
+def test_hebrew_content_requests_get_the_script_instruction(zeev, text):
+    """Falling through the switch gate is only half the fix.
+
+    The turn now reaches the LLM with lang='en', so _HE_CONTENT_RE is what
+    tells it to answer in Hebrew script; _speak_device then picks Hebrew TTS
+    off the script itself. Without this the reply comes back transliterated
+    and is spoken as English.
+    """
+    assert zeev._HE_CONTENT_RE.search(text), text
+
+
 # ---------------------------------------------------------------------------
 # Bluetooth intents  (extract_bt_intent)
 # ---------------------------------------------------------------------------

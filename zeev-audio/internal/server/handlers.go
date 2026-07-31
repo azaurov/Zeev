@@ -230,7 +230,7 @@ func (s *Server) handle(req proto.Request) proto.Response {
 				dev = "plughw:wm8960soundcard,0" // recording uses hw directly (dmix is playback-only)
 			}
 		}
-		wav, err := record.Record(dev, req.MaxSeconds, req.VAD, req.Rate)
+		wav, err := record.Record(dev, req.MaxSeconds, req.VAD, req.Rate, req.SilenceRMS)
 		if err != nil {
 			base.Error = err.Error()
 		} else {
@@ -271,7 +271,10 @@ func (s *Server) handle(req proto.Request) proto.Response {
 		if maxSeconds <= 0 {
 			maxSeconds = 8
 		}
-		wav, err := record.Record(req.Dev, maxSeconds, req.VAD, scoRate)
+		// Deliberately NOT req.SilenceRMS: that figure is the room's noise floor
+		// as heard by the WM8960 mic, and this reads an 8kHz SCO call stream —
+		// a different signal with a different floor. Keep the built-in default.
+		wav, err := record.Record(req.Dev, maxSeconds, req.VAD, scoRate, 0)
 		if err != nil {
 			base.Error = err.Error()
 		} else {

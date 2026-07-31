@@ -234,6 +234,20 @@ OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of in
 # window by itself (5/5 throughout).
 OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "20"))     # ~1.6s replayed
 
+# Rolling median RMS of the room, published by _wake_listener and consumed by
+# _record_utterance as the VAD silence threshold. [0.0] means "not measured
+# yet" and the recorder falls back to the daemon default.
+_WAKE_NOISE_MED = [0.0]
+# Ceiling for a wake-word follow-up recording. This is a CEILING, not a target:
+# a working VAD ends an ordinary question in ~2-4s. It was effectively 8s and
+# fixed, because the VAD threshold sat below the room floor and never fired, so
+# anything longer than 8s was cut mid-word.
+WAKE_RECORD_MAX = float(os.environ.get("ZEEV_RECORD_MAX", "20"))
+# Multiplier applied to the measured room median to get the silence threshold.
+# Speech runs well above the floor; the margin keeps room tone from reading as
+# speech and holding the recording open to the ceiling.
+RECORD_SILENCE_MULT = float(os.environ.get("ZEEV_RECORD_SILENCE_MULT", "1.8"))
+
 # Speak device-mode replies sentence-by-sentence as the LLM generates them,
 # instead of waiting for the whole completion. Set STREAM_TTS=0 to fall back to
 # the buffered path without a redeploy.
@@ -931,7 +945,20 @@ _LANG_WORD_TO_CODE = {
 # those items instead of English transliteration.
 _HE_CONTENT_RE = re.compile(
     r"\bhebrew\b[^.?!]{0,25}\b(alphabet|letters?|words?|phrases?|pronunciation|vocabulary)\b"
-    r"|\b(pronounce|spell)\b[^.?!]{0,20}\bhebrew\b",
+    r"|\b(pronounce|spell)\b[^.?!]{0,20}\bhebrew\b"
+    # "say it in Hebrew" / "recite the prayer in Hebrew". These now fall through
+    # to the LLM instead of flipping FORCED_LANG (see _LANG_OBJECT_RE), so this
+    # is what tells the model to answer in Hebrew script for this turn only.
+    # _speak_device then picks Hebrew TTS off the script itself.
+    r"|\b(say|recite|read|translate|repeat|sing)\b[^.?!]{0,30}\bin\s+hebrew\b",
+    re.IGNORECASE,
+)
+
+# Direct objects that turn a language request into a content request. Matched
+# only in the span BETWEEN the trigger verb and the language name.
+_LANG_OBJECT_RE = re.compile(
+    r"\b(it|that|this|these|those|them|something|anything|"
+    r"the|a|an|my|your|his|her|its|our|their)\b",
     re.IGNORECASE,
 )
 
@@ -959,7 +986,24 @@ def lang_switch_intent(text):
                 text[m.end(3):], re.IGNORECASE):
         return None
     word = re.sub(r"[\s\-]+", "-", m.group(3).lower())
-    return _LANG_WORD_TO_CODE.get(word)
+    code = _LANG_WORD_TO_CODE.get(word)
+    # An object between the verb and the language name means the user is asking
+    # for a THING to be rendered in that language, not for the conversation to
+    # change language: "say it in Hebrew", "say the prayer in Hebrew". Live
+    # 2026-07-31, "Can you also say it in Hebrew?" was answered with
+    # "switching to Hebrew" and the prayer was never recited -- an intent gate
+    # swallowing a content request, the same failure class as the camera gates.
+    # "to me"/"to us" are indirect objects and must still switch, so the list is
+    # pronouns and determiners only, never a bare preposition.
+    #
+    # English is deliberately exempt. It is the escape hatch: FORCED_LANG is
+    # sticky, so reading "say it in English" as a content request would leave a
+    # user stuck in Hebrew with no way back. Over-triggering toward English
+    # returns the device to its default state; over-triggering toward any other
+    # language traps it. The asymmetry is the point.
+    if code != "en" and _LANG_OBJECT_RE.search(text[m.end(1):m.start(3)]):
+        return None
+    return code
 
 
 def detect_lang(text):
@@ -7842,9 +7886,18 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
 
 def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
                       silence_threshold=None, silence_run=8):
-    """Record until silence or max_seconds elapsed. Returns WAV bytes or None."""
+    """Record until silence or max_seconds elapsed. Returns WAV bytes or None.
+
+    max_seconds is a ceiling. The daemon returns as soon as the speaker stops,
+    so raising it costs nothing on ordinary turns and only buys room for a long
+    one -- provided the VAD threshold is above the room floor, which is what
+    _WAKE_NOISE_MED supplies.
+    """
     if _audio and _audio.available:
-        wav = _audio.record(max_seconds=max_seconds, vad=True)
+        med = _WAKE_NOISE_MED[0]
+        silence_rms = med * RECORD_SILENCE_MULT if med > 0 else 0.0
+        wav = _audio.record(max_seconds=max_seconds, vad=True,
+                            silence_rms=silence_rms)
         return wav if wav else None
 
     # Python fallback: 0.25s chunk loop with energy-based VAD
@@ -10109,7 +10162,7 @@ def run_device_mode():
 
         _set_face("listening")
         board.set_rgb(*_LED_RECORDING)
-        follow_wav = _record_utterance(_MIC_DEV)
+        follow_wav = _record_utterance(_MIC_DEV, max_seconds=WAKE_RECORD_MAX)
         if not follow_wav:
             _go_idle()
             return False
@@ -10225,6 +10278,11 @@ def run_device_mode():
                 if len(levels) == levels.maxlen and seen % 40 == 0:
                     med = sorted(levels)[len(levels) // 2]
                     gate = max(med * OWW_ENERGY_MULT, OWW_ENERGY_MIN)
+                    # Publish the floor for _record_utterance. This listener is
+                    # the only thing that hears the room while nothing is being
+                    # said -- once a turn starts the mic is already carrying
+                    # speech, so the recorder can never measure this itself.
+                    _WAKE_NOISE_MED[0] = med
                 if hold > 0:
                     hold -= 1
                 elif rms >= gate:

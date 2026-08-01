@@ -989,6 +989,84 @@ _piper_term_lock = threading.Lock()
 _HE_RE = re.compile(r"[֐-׿]")
 # Cyrillic block: U+0400–U+04FF
 _RU_RE = re.compile(r"[Ѐ-ӿ]")
+
+# Minimum letters for a script run to earn its own TTS call. Below this it is
+# folded into its neighbour: a stray Hebrew letter inside an English sentence
+# is not worth an engine switch, and the pause between calls is audible.
+_SCRIPT_RUN_MIN = 2
+
+
+def _script_of(ch):
+    """'he', 'ru', 'en', or None for script-neutral.
+
+    Latin letters must be 'en' rather than neutral. Treating them as neutral
+    made them attach to whatever run was open, so English following a Hebrew
+    quote was swallowed into the Hebrew run and only the FIRST run was ever
+    tagged English -- the exact bug this splitter exists to fix, reproduced
+    one layer down.
+
+    Neutral is only whitespace, digits and punctuation: those genuinely belong
+    with the run in progress, so quote marks around a Hebrew phrase stay with
+    it instead of becoming their own fragment.
+    """
+    if _HE_RE.match(ch):
+        return "he"
+    if _RU_RE.match(ch):
+        return "ru"
+    if ch.isalpha():
+        return "en"        # also the fallback for scripts we have no voice for
+    return None
+
+
+def split_by_script(text):
+    """Split mixed text into ``[(lang, chunk), ...]`` runs of one script each.
+
+    A reply that quotes Hebrew inside an English sentence used to be spoken
+    ENTIRELY in Hebrew: _speak_device picks one language for the whole string,
+    and the Hebrew-script check wins, so the English half was read by a Hebrew
+    voice. Live 2026-07-31 that was most of a prayer answer.
+
+    Script-neutral characters (spaces, punctuation, digits, Latin) attach to
+    the run in progress, so quote marks and commas around a Hebrew phrase stay
+    with it rather than becoming their own fragment.
+    """
+    text = text or ""
+    if not text:
+        return []
+    runs = []                       # [[lang, chars]]
+    for ch in text:
+        s = _script_of(ch)
+        if not runs:
+            runs.append([s or "en", [ch]])
+            continue
+        cur = runs[-1]
+        if s is None or s == cur[0]:
+            cur[1].append(ch)
+        elif cur[0] == "en" and not "".join(cur[1]).strip():
+            # Leading whitespace-only run: adopt the incoming script instead of
+            # emitting an empty English chunk before it.
+            cur[0] = s
+            cur[1].append(ch)
+        else:
+            runs.append([s, [ch]])
+
+    # Fold runs too small to be worth an engine switch into their neighbour.
+    out = []
+    for lang, chars in runs:
+        chunk = "".join(chars)
+        letters = sum(1 for c in chunk if c.isalpha())
+        if out and letters < _SCRIPT_RUN_MIN:
+            out[-1] = (out[-1][0], out[-1][1] + chunk)
+        else:
+            out.append((lang, chunk))
+    # Merge neighbours that ended up with the same language after folding.
+    merged = []
+    for lang, chunk in out:
+        if merged and merged[-1][0] == lang:
+            merged[-1] = (lang, merged[-1][1] + chunk)
+        else:
+            merged.append((lang, chunk))
+    return [(l, c) for l, c in merged if c.strip()]
 # Spanish markers: ñ, ¿, ¡, or common accented vowels
 _ES_RE = re.compile(r"[ñÑ¿¡áéíóúüÁÉÍÓÚÜ]")
 
@@ -10140,6 +10218,20 @@ def run_device_mode():
 
     def _speak_device(text, voice="sarina"):
         nonlocal _tts_p1, _tts_p2, _piper_dev_proc
+        # Mixed-script replies are spoken one run at a time. Everything below
+        # picks a SINGLE language for the whole string and the Hebrew check
+        # wins, so "…starts with 'Hear, O Israel' in English, and 'שמע ישראל'
+        # in Hebrew" was read end-to-end by a Hebrew voice. Recursing means each
+        # segment reaches the normal single-language path unchanged; a
+        # single-script reply yields one run and behaves exactly as before.
+        if not FORCED_LANG:
+            _runs = split_by_script(text)
+            if len(_runs) > 1:
+                for _i, (_lang, _chunk) in enumerate(_runs):
+                    if _speak_cancel.is_set():
+                        break
+                    _speak_device(_chunk, voice)
+                return
         bt_verify_connected()
         lang = detect_lang(text)
         if lang == "ru" and not _RU_RE.search(text):
@@ -11119,7 +11211,19 @@ def run_device_mode():
         _keepalive_stop.set()
         zeev_cleanup()
         board.cleanup()
-        sys.exit(0)
+        # os._exit, NOT sys.exit. sys.exit unwinds into full interpreter
+        # finalization, where onnxruntime's C++ statics are torn down badly
+        # enough to call std::terminate -- "terminate called without an active
+        # exception" -> SIGABRT. Cleanup has already run by this point so
+        # nothing was actually lost, but the service then exited 134 on EVERY
+        # ordinary stop and systemd recorded "Failed with result 'signal'",
+        # which makes a genuine crash indistinguishable from a clean shutdown
+        # and would mislead anyone reading `systemctl status` after an
+        # incident. os._exit skips atexit (zeev_cleanup already ran above) and
+        # skips stdio flushing, hence the explicit flush.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)

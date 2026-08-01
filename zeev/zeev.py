@@ -8527,17 +8527,47 @@ def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None,
     # to the early-returning branches too, not just LLM replies.
     if speak:
         ctx._speak_device(reply, voice or _LAST_VOICE)
+        # Branch replies ask questions too -- "Which camera? I can check
+        # bedroom cam, smokeys cam" is the same dead-mic annoyance as the LLM
+        # path had. Gated on `speak` because a branch that already said its
+        # piece (goodnight) has not just uttered this text.
+        if _followup_turn(ctx, reply, _TURN_DEPTH[0]):
+            return
     ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
 
 _QUESTION_TAIL_RE = re.compile(r"\?\s*$")
+# Depth of the turn currently being handled. A module cell rather than a
+# parameter because finish_turn has 25 call sites and threading it through all
+# of them just to reach _followup_turn would be a large diff for no benefit.
+# Safe because device turns are serialised by ctx._busy -- only one runs at a
+# time. Without it, a branch reply would call _followup_turn at depth 0 every
+# time and the chain cap could never be reached.
+_TURN_DEPTH = [0]
 # A model that ends every reply with a question would otherwise hold the mic in
 # a loop the user cannot walk away from.
 _FOLLOWUP_MAX_DEPTH = 2
 
 
+_QUESTION_TAIL_MAX = 80
+
+
 def _reply_invites_an_answer(text):
-    """True when the spoken reply ends in a question."""
-    return bool(_QUESTION_TAIL_RE.search((text or "").strip()))
+    """True when the reply is essentially asking the user something.
+
+    NOT simply `endswith("?")`: the branch replies this exists for put the
+    question first and trail an offer after it -- "Which camera? I can check
+    bedroom cam, smokeys cam" ends on a list. A tail-only test missed exactly
+    the case it was written for.
+
+    So: a question mark with little after it. A long passage that merely
+    contains a rhetorical question mid-way is not an invitation, which is why
+    the tail is bounded rather than ignored.
+    """
+    t = (text or "").strip()
+    if "?" not in t:
+        return False
+    tail = t[t.rfind("?") + 1:].strip()
+    return len(tail) <= _QUESTION_TAIL_MAX
 
 
 def _followup_turn(ctx, spoken, depth):
@@ -8575,6 +8605,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     `_depth` bounds follow-up chaining (see _followup_turn); callers outside
     this module never pass it.
     """
+    _TURN_DEPTH[0] = _depth
     # session lives on ctx
     global _LAST_VOICE
     t0 = time.perf_counter()

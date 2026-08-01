@@ -938,3 +938,69 @@ def test_reply_invites_an_answer(zeev):
     assert zeev._reply_invites_an_answer("Shall we practice together?  ")
     assert not zeev._reply_invites_an_answer("The siddur is the prayer book.")
     assert not zeev._reply_invites_an_answer("")
+
+
+def test_question_followed_by_an_offer_still_invites(zeev):
+    """The branch replies this exists for put the question FIRST and trail an
+    offer after it, so a tail-only endswith("?") test missed the exact case it
+    was written for."""
+    assert zeev._reply_invites_an_answer(
+        "Which camera? I can check bedroom cam, smokeys cam")
+    assert zeev._reply_invites_an_answer("Want to hear more? I have plenty.")
+
+
+def test_rhetorical_question_mid_passage_does_not_invite(zeev):
+    """A long answer that merely contains a question mark is not an
+    invitation -- otherwise the mic opens after ordinary exposition."""
+    assert not zeev._reply_invites_an_answer(
+        "Why do we say it at night? Because the rabbis taught that sleep is "
+        "one sixtieth of death, and the verses are a protection recited before "
+        "sleeping, which is why the service closes with them and not earlier.")
+
+
+# ---------------------------------------------------------------------------
+# finish_turn branches ask questions too
+# ---------------------------------------------------------------------------
+
+def test_branch_question_opens_the_mic(zeev, monkeypatch, ctx):
+    """"Which camera? I can check bedroom cam, smokeys cam" is the same
+    dead-mic annoyance the LLM path had -- every early-returning branch goes
+    through finish_turn, which never armed the listener."""
+    monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: (_FakeResp("The bedroom cam shows a bed."), None))
+    monkeypatch.setattr(zeev, "_groq_post",
+                        lambda *a, **k: (_FakeResp("The bedroom cam shows a bed."), None))
+    ctx._followup_listen = lambda: "the bedroom one"
+    zeev._TURN_DEPTH[0] = 0
+    zeev.finish_turn(ctx, "Which camera? I can check bedroom cam, smokeys cam.")
+    users = [m["content"] for m in ctx.session if m["role"] == "user"]
+    assert "the bedroom one" in users, users
+
+
+def test_branch_statement_does_not_open_the_mic(zeev, ctx):
+    called = []
+    ctx._followup_listen = lambda: called.append(1) or "should not be heard"
+    zeev._TURN_DEPTH[0] = 0
+    zeev.finish_turn(ctx, "Playing that now.")
+    assert not called, "listened after a branch statement"
+
+
+def test_unspoken_branch_reply_does_not_open_the_mic(zeev, ctx):
+    """speak=False means the branch already said its piece (goodnight speaks in
+    two voices itself), so finish_turn has not just uttered this text."""
+    called = []
+    ctx._followup_listen = lambda: called.append(1) or "x"
+    zeev._TURN_DEPTH[0] = 0
+    zeev.finish_turn(ctx, "Shall we?", speak=False)
+    assert not called, "listened after a reply it never spoke"
+
+
+def test_branch_followup_respects_the_depth_cap(zeev, ctx):
+    """At the cap the mic must stay shut, or a branch that always ends in a
+    question loops forever at depth 0."""
+    called = []
+    ctx._followup_listen = lambda: called.append(1) or "again?"
+    zeev._TURN_DEPTH[0] = zeev._FOLLOWUP_MAX_DEPTH
+    zeev.finish_turn(ctx, "Shall we keep going?")
+    assert not called, "listened past the depth cap"

@@ -6654,8 +6654,11 @@ def subject_vision_prompt(kind: str, cam_label: str) -> str:
 _SUBJECT_FOUND_RE = re.compile(r"^[^\w]*found\s*[:\-]?\s*(yes|no)\b", re.I | re.M)
 
 
-def parse_subject_sighting(reply: str):
+def parse_subject_sighting(reply: str, kind: str = ""):
     """``(found, description)`` where `found` is True, False or None.
+
+    `kind` (the thing asked about, e.g. "cat") downgrades a self-contradictory
+    "no" to uncertain -- see below.
 
     None means the model ignored the format -- routine on the free tier, and
     CLAUDE.md already records a vision reply that was *entirely* stage
@@ -6681,7 +6684,23 @@ def parse_subject_sighting(reply: str):
     desc = _strip_stage_directions(desc)
     if not m:
         return None, desc
-    return m.group(1).lower() == "yes", desc
+    found = m.group(1).lower() == "yes"
+    # A "no" whose own description names the thing being looked for is not a
+    # miss, it is a contradiction. Live 2026-07-30, smokeys-cam returned
+    # FOUND: no alongside "a cluttered bedroom containing a bed, bookshelves,
+    # a window, and a cat" -- 79 chars, so unlike the "cat tree" case this was
+    # not log truncation. Zeev reported a confident "I didn't see Smokey".
+    #
+    # Downgraded to None rather than flipped to True: the model is demonstrably
+    # unreliable on this frame, so the honest output is the uncertain wording
+    # that quotes what it saw and lets Alex judge. Same reasoning as the
+    # three-state verdict itself -- never overclaim in either direction.
+    if found is False and kind:
+        if re.search(rf"\b{re.escape(kind)}s?\b", desc, re.IGNORECASE):
+            print(f"[subject] verdict 'no' contradicts its own description "
+                  f"(mentions {kind!r}) — treating as uncertain", flush=True)
+            return None, desc
+    return found, desc
 
 
 def wyze_snapshot(stream: str, timeout: float | None = None):
@@ -8959,7 +8978,7 @@ def handle_transcript(ctx, transcript, _depth=0):
             if not vreply:
                 print(f"[subject] vision failed on {stream}: {verr}", flush=True)
                 continue
-            seen, desc = parse_subject_sighting(vreply)
+            seen, desc = parse_subject_sighting(vreply, kind)
             # 200, not 80: the first live sweep logged "...and a cat" on a
             # FOUND: no, which reads exactly like a false negative. The full
             # line was "a cat tree" -- the truncation, not the model, was the

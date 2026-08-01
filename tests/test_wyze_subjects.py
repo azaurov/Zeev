@@ -197,3 +197,52 @@ def test_unparseable_still_returns_none(zeev):
     assert seen is None
     assert "cluttered room" in desc
     assert not desc.lower().startswith("sarina"), desc
+
+
+# ---------------------------------------------------------------------------
+# A "no" that contradicts its own description
+# ---------------------------------------------------------------------------
+
+def test_no_verdict_mentioning_the_subject_is_uncertain(zeev):
+    """Live 2026-07-30, smokeys-cam returned FOUND: no alongside "...a window,
+    and a cat" -- 79 chars, so unlike the "cat tree" case in CLAUDE.md this was
+    not log truncation. Zeev reported a confident "I didn't see Smokey".
+
+    Downgraded to uncertain rather than flipped to yes: the model is
+    demonstrably unreliable on that frame, so the honest output quotes what it
+    saw and lets Alex judge.
+    """
+    seen, desc = zeev.parse_subject_sighting(
+        "FOUND: no. I can see a cluttered bedroom containing a bed, "
+        "bookshelves, a window, and a cat", kind="cat")
+    assert seen is None, seen
+    assert "cat" in desc
+
+
+def test_plain_no_stays_no(zeev):
+    """The guard must not turn every miss into a maybe -- "I didn't see him" is
+    the right answer when the description really has no cat in it."""
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: no. I see a bed with rumpled grey bedding, a fan and a "
+        "bookshelf.", kind="cat")
+    assert seen is False, seen
+
+
+def test_yes_is_unaffected(zeev):
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: yes. A grey cat is asleep on the chair.", kind="cat")
+    assert seen is True
+
+
+def test_guard_is_word_bounded(zeev):
+    """"cat" must not match inside "cluttered"/"catalogue" -- a substring hit
+    would make every miss uncertain and the branch would stop ever saying no."""
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: no. A cluttered room with a catalogue on the table.", kind="cat")
+    assert seen is False, seen
+
+
+def test_no_kind_keeps_old_behaviour(zeev):
+    """Callers that pass no kind (and the existing tests) are unchanged."""
+    seen, _ = zeev.parse_subject_sighting("FOUND: no. I see a cat.")
+    assert seen is False

@@ -829,7 +829,7 @@ class _FakeResp:
         return {"choices": [{"message": {"content": self._text}}]}
 
 
-def _run_llm_turn(zeev, monkeypatch, ctx, reply_text, streamed=False):
+def _run_llm_turn(zeev, monkeypatch, ctx, reply_text, streamed=False, followup=""):
     """Drive one LLM turn with a canned reply. streamed=True makes
     _stream_speak return the text, mimicking STREAM_TTS=1 in production."""
     monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
@@ -840,7 +840,7 @@ def _run_llm_turn(zeev, monkeypatch, ctx, reply_text, streamed=False):
     if streamed:
         ctx._stream_speak = lambda *a, **k: (
             ctx.spoke.append(reply_text) or reply_text)
-    ctx._followup_listen = lambda: ""
+    ctx._followup_listen = lambda: followup
     zeev.handle_transcript(ctx, "tell me about the siddur")
     return ctx
 
@@ -883,3 +883,58 @@ def test_model_supplied_offer_is_not_duplicated(zeev, monkeypatch, ctx):
                   "The siddur is the Jewish prayer book. Want to hear more?")
     spoken = " ".join(ctx.spoke)
     assert spoken.lower().count("want to hear more") == 1, ctx.spoke
+
+
+# ---------------------------------------------------------------------------
+# Answering a question Zeev asked, without a wake word
+# ---------------------------------------------------------------------------
+
+def test_any_question_opens_the_mic(zeev, monkeypatch, ctx):
+    """Live 2026-08-01: Sarina ended with "Would you like to practice reciting
+    it together?" and closed the mic, so Alex had to wake the device to answer
+    a question it had just asked.
+
+    Only "Want to hear more?" armed the listener, because it was the sole
+    caller of the pending-detail machinery.
+    """
+    _run_llm_turn(zeev, monkeypatch, ctx,
+                  "Shall we practice it together?",
+                  followup="yes let's practice")
+    # The answer came back through as a second turn rather than being dropped.
+    users = [m["content"] for m in ctx.session if m["role"] == "user"]
+    assert "yes let's practice" in users, users
+
+
+def test_statement_does_not_open_the_mic(zeev, monkeypatch, ctx):
+    """A reply that asked nothing must not sit there recording the room."""
+    called = []
+    _run_llm_turn(zeev, monkeypatch, ctx, "The siddur is the prayer book.",
+                  followup="this should never be heard")
+    ctx._followup_listen = lambda: called.append(1) or ""
+    assert not any(m["content"] == "this should never be heard"
+                   for m in ctx.session), ctx.session
+
+
+def test_followup_noise_is_not_a_turn(zeev, monkeypatch, ctx):
+    """A spurious recording transcribes as confident nonsense; without the
+    \\w{2,} guard it becomes a real LLM turn and keeps the loop fed."""
+    _run_llm_turn(zeev, monkeypatch, ctx, "Shall we practice it together?",
+                  followup="A")
+    users = [m["content"] for m in ctx.session if m["role"] == "user"]
+    assert "A" not in users, users
+
+
+def test_followup_chain_is_depth_capped(zeev, monkeypatch, ctx):
+    """A model that ends every reply with a question would otherwise hold the
+    mic in a loop the user cannot walk away from."""
+    _run_llm_turn(zeev, monkeypatch, ctx, "Shall we keep going?",
+                  followup="and then what happens")
+    users = [m["content"] for m in ctx.session if m["role"] == "user"]
+    assert users.count("and then what happens") <= zeev._FOLLOWUP_MAX_DEPTH, users
+
+
+def test_reply_invites_an_answer(zeev):
+    assert zeev._reply_invites_an_answer("Want to hear more?")
+    assert zeev._reply_invites_an_answer("Shall we practice together?  ")
+    assert not zeev._reply_invites_an_answer("The siddur is the prayer book.")
+    assert not zeev._reply_invites_an_answer("")

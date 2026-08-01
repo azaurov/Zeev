@@ -8529,8 +8529,52 @@ def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None,
         ctx._speak_device(reply, voice or _LAST_VOICE)
     ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
 
-def handle_transcript(ctx, transcript):
-    """Run LLM on transcript and speak the reply. Caller must set THINKING state first."""
+_QUESTION_TAIL_RE = re.compile(r"\?\s*$")
+# A model that ends every reply with a question would otherwise hold the mic in
+# a loop the user cannot walk away from.
+_FOLLOWUP_MAX_DEPTH = 2
+
+
+def _reply_invites_an_answer(text):
+    """True when the spoken reply ends in a question."""
+    return bool(_QUESTION_TAIL_RE.search((text or "").strip()))
+
+
+def _followup_turn(ctx, spoken, depth):
+    """Open the mic when Zeev's reply ended in a question; run the answer as
+    the next turn. Returns True if it handled one.
+
+    Only "Want to hear more?" used to arm the listener, because it was the sole
+    caller of the pending-detail machinery. Every OTHER question Zeev asked --
+    "Would you like to practice reciting it together?" -- left the mic shut and
+    forced a wake word to answer a question the device had just asked.
+    Reported live 2026-08-01.
+    """
+    if depth >= _FOLLOWUP_MAX_DEPTH:
+        return False
+    if not _reply_invites_an_answer(spoken):
+        return False
+    if not getattr(ctx, "_followup_listen", None) or ctx._speak_cancel.is_set():
+        return False
+    answer = ctx._followup_listen()
+    # Same noise guard the wake path uses: a spurious recording comes back as
+    # confident nonsense ("A A", "Thank you.") and would otherwise become a
+    # real LLM turn and keep the loop fed.
+    if not answer or not re.search(r"\w{2,}", answer):
+        return False
+    ctx._pending_detail[0] = None
+    ctx._pending_detail_source[0] = None
+    ctx._pending_detail_ready.clear()
+    handle_transcript(ctx, answer, _depth=depth + 1)
+    return True
+
+
+def handle_transcript(ctx, transcript, _depth=0):
+    """Run LLM on transcript and speak the reply. Caller must set THINKING state first.
+
+    `_depth` bounds follow-up chaining (see _followup_turn); callers outside
+    this module never pass it.
+    """
     # session lives on ctx
     global _LAST_VOICE
     t0 = time.perf_counter()
@@ -8643,6 +8687,11 @@ def handle_transcript(ctx, transcript):
             print(f"[+{time.perf_counter()-t0:.1f}s] Speaking (detail)…", flush=True)
             ctx._progressive_speak(detail, voice=_LAST_VOICE)
             print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
+            # The detail itself routinely ends with a question ("Would you like
+            # to practice reciting it together?") and this branch returned
+            # without ever opening the mic.
+            if _followup_turn(ctx, detail, _depth):
+                return
             ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
             return
         # prefetch failed, timed out, or came back empty — re-run the
@@ -9524,18 +9573,21 @@ def handle_transcript(ctx, transcript):
     # by now, so an affirmative plays back immediately.
     if (ctx._pending_detail_source[0]
             and getattr(ctx, "_followup_listen", None)
-            and not ctx._speak_cancel.is_set()):
+            and not ctx._speak_cancel.is_set()
+            and _depth < _FOLLOWUP_MAX_DEPTH):
         answer = ctx._followup_listen()
         if answer and ctx._MORE_YES_RE.search(answer):
             # Re-enter with the answer. The pending-detail branch at the top
-            # delivers it and clears the pending state, so this cannot recurse
-            # further than one level.
-            return handle_transcript(ctx, answer)
+            # delivers it and clears the pending state.
+            return handle_transcript(ctx, answer, _depth=_depth + 1)
         if answer:
             print("[followup] not an affirmative — dropping pending detail", flush=True)
         ctx._pending_detail[0] = None
         ctx._pending_detail_source[0] = None
         ctx._pending_detail_ready.clear()
+    elif _followup_turn(ctx, speak_text, _depth):
+        # Any other question Zeev asked -- the answer becomes the next turn.
+        return
 
     ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
 

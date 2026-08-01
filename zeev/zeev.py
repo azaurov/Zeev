@@ -5543,13 +5543,32 @@ def gcal_reminder_text(event, category, lead_min, start_ts, all_day):
     summary = _gcal_clean_summary(event.get("summary"))
     when = _dt.datetime.fromtimestamp(start_ts)
     clock = when.strftime("%-I:%M %p") if when.minute else when.strftime("%-I %p")
-    if category == "birthday":
+    # Only an ALL-DAY birthday is "today"/"tomorrow". A birthday party with a
+    # real start time is somewhere to be at an hour, and saying "is today"
+    # throws away the one detail that matters.
+    if category == "birthday" and all_day:
         return f"{summary} is {'tomorrow' if lead_min else 'today'}."
     if lead_min == 1440:
         return f"{summary}, tomorrow at {clock}."
     if all_day:
         return f"{summary}, today."
     return f"{summary} {_gcal_lead_phrase(lead_min)}, at {clock}."
+
+
+def _gcal_due_for_lead(start_ts, lead, now):
+    """When a given lead should announce, or None if it should be skipped.
+
+    Discovered late, the lead has already passed. Announcing at the next poll
+    still helps if the event is close, but replaying every passed lead of every
+    event found on a cold start would be a monologue -- so only genuinely
+    imminent ones are pulled forward.
+    """
+    due = start_ts - lead * 60
+    if due > now:
+        return due
+    if lead == 0 or start_ts - now > max(lead * 60, 3600) * 2:
+        return None
+    return now
 
 
 def gcal_reminder_plan(event, now, routine_titles=None):
@@ -5563,21 +5582,130 @@ def gcal_reminder_plan(event, now, routine_titles=None):
     eid = event.get("id")
     if not eid:
         return []
+    leads = _GCAL_LEADS.get(category, (30,))
+    if category == "birthday" and not all_day:
+        # A timed birthday event is a party, not a date in the diary: the
+        # all-day leads include 0, which for a timed event would announce it as
+        # it starts, phrased "in 0 minutes".
+        leads = _GCAL_LEADS["appointment"]
     out = []
-    for lead in _GCAL_LEADS.get(category, (30,)):
-        due = start_ts - lead * 60
-        if due <= now:
-            # Discovered late -- the lead has already passed. Announcing at the
-            # next poll still helps if the event is close, but replaying every
-            # lead of every event found on a cold start would be a monologue,
-            # so only the ones genuinely imminent are pulled forward.
-            if lead == 0 or start_ts - now > max(lead * 60, 3600) * 2:
-                continue
-            due = now
+    for lead in leads:
+        due = _gcal_due_for_lead(start_ts, lead, now)
+        if due is None:
+            continue
         out.append((f"{eid}:{lead}",
                     due,
                     gcal_reminder_text(event, category, lead, start_ts, all_day),
                     start_ts))
+    return out
+
+
+_GCAL_BDAY_OF_RE = re.compile(r"^(.*?)'?s\s+(?:birthday|b-?day|anniversary)\s*$",
+                              re.IGNORECASE)
+_GCAL_COUNT_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six",
+                     7: "Seven", 8: "Eight", 9: "Nine"}
+
+
+def _gcal_birthday_name(summary):
+    """"Karen Halpert's Birthday" -> "Karen Halpert". Returns None if the title
+    isn't of that shape ("Happy birthday!", "Mail out bday"), which is the
+    signal not to phrase the group as a list of people."""
+    m = _GCAL_BDAY_OF_RE.match(_gcal_clean_summary(summary))
+    return m.group(1).strip() if m and m.group(1).strip() else None
+
+
+def _gcal_join(items):
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _gcal_birthday_phrase(summaries, when):
+    if len(summaries) == 1:
+        return f"{_gcal_clean_summary(summaries[0])} is {when}."
+    names = [_gcal_birthday_name(s) for s in summaries]
+    if all(names):
+        count = _GCAL_COUNT_WORDS.get(len(names), str(len(names)))
+        return f"{count} birthdays {when}: {_gcal_join(names)}."
+    # Mixed or oddly-titled entries ("Happy birthday!", "Mail out bday"): list
+    # them as written rather than claiming a count of "birthdays" that might
+    # include an anniversary.
+    return f"{when.capitalize()}: {_gcal_join([_gcal_clean_summary(s) for s in summaries])}."
+
+
+def gcal_birthday_text(today, tomorrow):
+    """One sentence for every birthday announced at the same moment.
+
+    An imported birthday calendar clusters hard -- on the real 'Bdays' import
+    four people share 2026-08-15, and with 154 birthdays a year the day-ahead
+    warning for one day lands at the same 9 AM as the day-of for another. Four
+    consecutive "X's Birthday is today" is a machine reading a list; two
+    reminders in the same breath is worse.
+    """
+    parts = []
+    if today:
+        parts.append(_gcal_birthday_phrase(today, "today"))
+    if tomorrow:
+        if today:
+            names = [_gcal_birthday_name(s) or _gcal_clean_summary(s) for s in tomorrow]
+            parts.append(f"And tomorrow: {_gcal_join(names)}.")
+        else:
+            parts.append(_gcal_birthday_phrase(tomorrow, "tomorrow"))
+    return " ".join(parts)
+
+
+def gcal_plan_all(events, now, routine_titles=None):
+    """Plan every reminder for one fetch, merging same-day birthdays. Pure.
+
+    Timed birthday events ("Robyn's Birthday Brunch, 11 AM") deliberately stay
+    on the per-event path: they have a real time worth announcing, which merging
+    into the 9 AM group would throw away.
+    """
+    import datetime as _dt
+    out, groups = [], {}
+    for e in events:
+        if (gcal_event_category(e, routine_titles) == "birthday"
+                and "dateTime" not in e.get("start", {})):
+            start_ts, _ = gcal_event_start(e)
+            if start_ts is not None and start_ts > now:
+                day = _dt.datetime.fromtimestamp(start_ts).date().isoformat()
+                groups.setdefault((day, start_ts), []).append(e)
+            continue
+        out.extend(gcal_reminder_plan(e, now, routine_titles))
+
+    # Bucket by the moment of announcement, not by the day being announced: the
+    # day-ahead warning for one date and the day-of for another land on the same
+    # 9 AM, and two reminders in the same breath is the thing being avoided.
+    buckets = {}
+    for (day, start_ts), evs in groups.items():
+        for lead in _GCAL_LEADS["birthday"]:
+            due = _gcal_due_for_lead(start_ts, lead, now)
+            if due is None:
+                continue
+            # Bucket and key on the SCHEDULED time, never the clamped due. A
+            # pulled-forward reminder has due == now, so keying on it mints a
+            # new key every scan: the old row is pruned, a fresh one created and
+            # announced, every 30 minutes for the rest of the day. The per-event
+            # path is immune because its key is (event id, lead); this one had
+            # to be given the same stability.
+            sched = round(start_ts - lead * 60)
+            b = buckets.setdefault(sched, {"today": [], "tomorrow": [], "ids": [],
+                                           "start": start_ts, "due": due})
+            b["tomorrow" if lead else "today"].extend(evs)
+            b["ids"].extend(e.get("id", "") for e in evs)
+            b["start"] = min(b["start"], start_ts)
+            b["due"] = min(b["due"], due)
+
+    for sched, b in buckets.items():
+        for slot in ("today", "tomorrow"):
+            b[slot].sort(key=lambda e: e.get("id", ""))
+        # The digest makes membership part of the key, so adding or removing a
+        # birthday changes the key: the old bucket is pruned and the new one
+        # created, rather than a stale "Four birthdays" surviving as three.
+        digest = hashlib.sha1("|".join(sorted(b["ids"])).encode()).hexdigest()[:8]
+        text = gcal_birthday_text([e.get("summary", "") for e in b["today"]],
+                                  [e.get("summary", "") for e in b["tomorrow"]])
+        out.append((f"bday:{sched}:{digest}", float(b["due"]), text, b["start"]))
     return out
 
 
@@ -5672,9 +5800,8 @@ def gcal_scan_once(now=None):
     routine = gcal_routine_titles(events)
 
     planned = {}
-    for e in events:
-        for key, due, text, start_ts in gcal_reminder_plan(e, now, routine):
-            planned[key] = (due, text, start_ts)
+    for key, due, text, start_ts in gcal_plan_all(events, now, routine):
+        planned[key] = (due, text, start_ts)
 
     created = rescheduled = pruned = 0
     with _db_lock:

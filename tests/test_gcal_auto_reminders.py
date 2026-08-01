@@ -338,3 +338,104 @@ def test_text_composes_with_the_spoken_prefix(zeev):
         spoken = f"Reminder: {text}"
         assert "::" not in spoken
         assert spoken.count(":") == spoken.count(" PM") + spoken.count(" AM") + 1, spoken
+
+
+# --- imported birthday calendars ------------------------------------------
+#
+# The "Bdays" import is 154 birthdays a year on 119 days: 92 days with one, 21
+# with two, 4 with three, 2 with four. So clustering is the normal case, not an
+# edge case, and with a birthday most days the day-ahead warning for one date
+# lands on the same 9 AM as the day-of for another.
+
+def _bday(name, date_str, eid=None):
+    return _allday(f"{name}'s Birthday", date_str, id=eid or name,
+                   recurringEventId=f"r-{name}")
+
+
+def _plan_texts(zeev, events, now=None):
+    now = now or time.time()
+    return {t for _, _, t, _ in zeev.gcal_plan_all(events, now, set())}
+
+
+def test_same_day_birthdays_become_one_sentence(zeev):
+    """Four consecutive "X's Birthday is today" is a machine reading a list."""
+    day = (dt.date.today() + dt.timedelta(days=5)).isoformat()
+    events = [_bday(n, day) for n in ("Karen Halpert", "Deblyn Palella",
+                                      "Eric Greene", "Amanda Smith")]
+    texts = _plan_texts(zeev, events)
+    assert len(texts) == 2, "one for the day before, one for the day itself"
+    today = next(t for t in texts if "today" in t)
+    assert today.startswith("Four birthdays today:")
+    assert all(n in today for n in ("Karen Halpert", "Deblyn Palella",
+                                    "Eric Greene", "Amanda Smith"))
+    assert today.count(" and ") == 1, "one conjunction before the last name"
+    assert "Birthday" not in today, "names are listed, not four repeated titles"
+
+
+def test_today_and_tomorrow_merge_into_one_breath(zeev):
+    """With a birthday most days these two collide at the same 9 AM."""
+    d5 = (dt.date.today() + dt.timedelta(days=5)).isoformat()
+    d6 = (dt.date.today() + dt.timedelta(days=6)).isoformat()
+    texts = _plan_texts(zeev, [_bday("Ols Beqari", d5), _bday("Rachel Zaurov", d6)])
+    merged = [t for t in texts if "today" in t and "tomorrow" in t]
+    assert len(merged) == 1, texts
+    assert merged[0] == "Ols Beqari's Birthday is today. And tomorrow: Rachel Zaurov."
+
+
+def test_single_birthday_keeps_its_plain_phrasing(zeev):
+    day = (dt.date.today() + dt.timedelta(days=5)).isoformat()
+    texts = _plan_texts(zeev, [_bday("Samantha Cohn", day)])
+    assert "Samantha Cohn's Birthday is today." in texts
+
+
+def test_oddly_titled_entries_are_not_counted_as_people(zeev):
+    """"Happy birthday!" has no name to extract, so the group must not claim
+    "Two birthdays" and then read out a title as if it were a person."""
+    day = (dt.date.today() + dt.timedelta(days=5)).isoformat()
+    events = [_bday("Eli", day), _allday("Happy birthday!", day, id="h",
+                                         eventType="birthday")]
+    today = next(t for t in _plan_texts(zeev, events) if "oday" in t)
+    assert not today.startswith("Two birthdays")
+    assert "Happy birthday" in today
+
+
+def test_timed_birthday_event_keeps_its_clock(zeev):
+    """"Robyn's Birthday Brunch" at 11 AM is a real appointment -- merging it
+    into the 9 AM group would throw the time away."""
+    start = dt.datetime.now().astimezone() + dt.timedelta(days=3)
+    start = start.replace(hour=11, minute=0)
+    texts = _plan_texts(zeev, [_timed("Robyn's Birthday Brunch!", start, id="rb")])
+    assert any("11 AM" in t for t in texts), texts
+
+
+def test_group_membership_is_in_the_key(zeev):
+    """Remove one of four and the stale "Four birthdays" must not survive."""
+    day = (dt.date.today() + dt.timedelta(days=5)).isoformat()
+    four = [_bday(n, day) for n in ("A", "B", "C", "D")]
+    keys4 = {k for k, _, _, _ in zeev.gcal_plan_all(four, time.time(), set())}
+    keys3 = {k for k, _, _, _ in zeev.gcal_plan_all(four[:3], time.time(), set())}
+    assert not (keys4 & keys3)
+
+
+def test_pulled_forward_group_keeps_a_stable_key(zeev):
+    """The churn bug: keyed on the CLAMPED due, a pulled-forward reminder mints
+    a new key every scan -- pruned, recreated and re-announced every 30 minutes
+    for the rest of the day. Keyed on the scheduled time it is stable."""
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    now = time.time()
+    events = [_bday("Sabrina Escalante", tomorrow)]
+    k1 = {k for k, _, _, _ in zeev.gcal_plan_all(events, now, set())}
+    k2 = {k for k, _, _, _ in zeev.gcal_plan_all(events, now + 1800, set())}
+    assert k1 and k1 == k2
+
+
+def test_birthday_scan_is_idempotent_across_polls(scan_db, monkeypatch):
+    """End to end: the loop runs every 30 minutes and must settle."""
+    z = scan_db
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    later = (dt.date.today() + dt.timedelta(days=4)).isoformat()
+    ev = [_bday("Sabrina Escalante", tomorrow), _bday("Nathan Is", tomorrow),
+          _bday("RJ Megesi", later)]
+    assert _drive(z, monkeypatch, ev)[0] > 0
+    assert _drive(z, monkeypatch, ev) == (0, 0, 0)
+    assert _drive(z, monkeypatch, ev) == (0, 0, 0)

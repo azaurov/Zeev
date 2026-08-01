@@ -54,6 +54,13 @@ def torah_db(tmp_path, zeev, monkeypatch):
          "before You, Adonoy, my Rock and my Redeemer."),
         ("Siddur", "Siddur Ashkenaz, Shabbat, Shacharit, Amidah, Concluding Passage",
          "יִהְיוּ לְרָצון אִמְרֵי פִי וְהֶגְיון לִבִּי לְפָנֶיךָ. ה' צוּרִי וְגואֲלִי"),
+        # The bedtime service. Note the spelling the ref actually uses:
+        # apostrophe in "Keri'at", and "Hamita" with NO trailing 'h' -- probes
+        # for "Kriat"/"HaMitah" find nothing and it reads as absent when it is
+        # not. That mis-spelling is why an earlier pass concluded it was
+        # missing and pointed "angelic prayer" at the wrong passage.
+        ("Siddur", "Siddur Ashkenaz, Weekday, Maariv, Keri'at Shema al Hamita",
+         "I hereby forgive anyone who has angered me, or sinned against me."),
     ]
     con.executemany(
         "INSERT INTO passages (source, ref, en, he) VALUES (?, ?, ?, '')", rows)
@@ -111,8 +118,6 @@ def test_generic_words_do_not_hijack_the_lookup(zeev, torah_db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("query", [
-    "help me with the angelic prayer",
-    "say the angelic prayer in Hebrew",
     "recite yihyu l'ratzon",
     "what is Yihyu Lratzon",
 ])
@@ -130,7 +135,7 @@ def test_angelic_prayer_resolves_to_yihyu_lratzon(zeev, torah_db, query):
 def test_alias_supplies_both_english_and_pointed_hebrew(zeev, torah_db):
     """Probing only the Weekday row leaves the model inventing the Hebrew,
     which is the exact failure the alias exists to stop."""
-    bodies = [en for _, en in zeev.torah_search("say the angelic prayer in Hebrew")]
+    bodies = [en for _, en in zeev.torah_search("recite yihyu l'ratzon")]
     assert any("May the words of my mouth" in b for b in bodies), bodies
     assert any("יִהְיוּ לְרָצון" in b for b in bodies), bodies
 
@@ -143,7 +148,7 @@ def test_alias_hit_returns_alone(zeev, torah_db):
     when it drifts. The exclusivity has to survive BOTH _torah_ref_lookup and
     torah_search's own FTS top-up; fixing only the former left it in.
     """
-    hits = zeev.torah_search("help me with the angelic prayer")
+    hits = zeev.torah_search("recite yihyu l'ratzon")
     assert all("Amidah, Concluding Passage" in r for r, _ in hits), hits
 
 
@@ -152,3 +157,31 @@ def test_alias_does_not_fire_on_ordinary_speech(zeev, torah_db):
     itself needs the prayer sense too, not merely the word."""
     assert not zeev._YIHYU_ALIAS_RE.search("she has an angelic voice")
     assert not zeev._ANGEL_PRAYER_RE.search("she has an angelic voice")
+
+
+@pytest.mark.parametrize("query", [
+    "Help me with the angelic prayer, the bedtime angelic prayer.",
+    "the bedtime shema",
+    "what do I say before bed",
+    "keriat shema al hamita",
+])
+def test_bedtime_wins_over_the_ambiguous_angelic_alias(zeev, torah_db, query):
+    """Live 2026-07-31: Alex asked for "the angelic prayer, the BEDTIME angelic
+    prayer" and the alias injected Yihyu L'ratzon instead. The 70B ignored the
+    wrong passage and answered correctly from its own knowledge, which is luck,
+    not a working retrieval.
+
+    "bedtime angelic prayer" matches both aliases, so first-match-wins ordering
+    is what makes the explicit word decide.
+    """
+    hits = zeev.torah_search(query)
+    assert hits, f"{query!r} found nothing"
+    assert all("Shema al Hamita" in r for r, _ in hits), hits
+
+
+def test_bare_angelic_prayer_offers_both_candidates(zeev, torah_db):
+    """Still ambiguous, so it supplies both rather than guessing a third time:
+    picking one unilaterally is what produced the wrong answer."""
+    refs = [r for r, _ in zeev.torah_search("help me with the angelic prayer")]
+    assert any("Shema al Hamita" in r for r in refs), refs
+    assert any("Amidah, Concluding Passage" in r for r in refs), refs

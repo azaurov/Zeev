@@ -4267,20 +4267,54 @@ _TORAH_REF_SKIP = {
 # substrings. Checked before bigrams: an alias is a stated intent, and letting
 # the generic lookup guess from the words instead is how "angelic prayer"
 # reached the 8B unsourced in the first place.
-_YIHYU_ALIAS_RE = re.compile(r"\byihyu\b|\bl'?ratzon\b|\bangelic\s+prayer\b", re.I)
+# The prayer named explicitly. Kept free of "angelic prayer" so that naming it
+# outright resolves to it ALONE -- folding the ambiguous phrase in here dragged
+# the bedtime service along behind an unambiguous request.
+_YIHYU_ALIAS_RE = re.compile(r"\byihyu\b|\bl'?ratzon\b", re.I)
+# The bedtime service. Note the ref spells it "Keri'at Shema al Hamita" --
+# apostrophe, and no trailing 'h' -- so probes for "Kriat"/"HaMitah" find
+# nothing and it reads as absent from the DB when it is not. Probe the
+# distinctive middle, "Shema al Hamita", not the whole title.
+_BEDTIME_PRAYER_RE = re.compile(
+    r"\bbedtime\b|\bbefore\s+bed\b|\bgoing\s+to\s+(sleep|bed)\b"
+    r"|\bal\s+ha.?mita\b|\bkeri.?at\s+shema\b|\bkriat\s+shema\b",
+    re.I,
+)
 _TORAH_REF_ALIASES = [
-    # "The angelic prayer" is Alex's name for Yihyu L'ratzon (Psalms 19:15),
-    # the meditation closing the Amidah. Confirmed with him 2026-07-31 -- the
-    # other candidate was Shalom Aleichem, which greets the ministering angels
-    # and is findable by its own name anyway.
+    # FIRST MATCH WINS, so this sits above the Yihyu entry: "the bedtime
+    # angelic prayer" matches both, and the explicit word is the intent.
     #
-    # BOTH refs are probed on purpose. Sefaria has no English for the Shabbat
-    # rows, so their `en` column holds the pointed HEBREW, while the Weekday
-    # row holds the English. Together they give the model the real gloss and
-    # the real Hebrew; the Weekday row alone leaves it inventing the Hebrew,
-    # which is the exact failure this alias exists to stop.
-    ((_ANGEL_PRAYER_RE, _YIHYU_ALIAS_RE),
+    # Alex asked for "the angelic prayer, the bedtime angelic prayer"
+    # 2026-07-31 -- Keri'at Shema al Hamita, the one invoking Michael,
+    # Gavriel, Uriel and Refael. An earlier guess pointed "angelic prayer" at
+    # Yihyu L'ratzon instead and injected the wrong passage; the 70B ignored it
+    # and answered correctly from its own knowledge, which is luck, not a
+    # working retrieval.
+    #
+    # CAVEAT: import_sefaria.py truncates every passage at 4000 chars and this
+    # row is one of the 6321 that hit the cap, so the DB holds the opening
+    # (forgiveness prayer, Psalm 91) but NOT the angels invocation itself. The
+    # passage is still the right one to supply; only a re-import with a higher
+    # cap actually reaches those lines.
+    ((_BEDTIME_PRAYER_RE,), ["Shema al Hamita"]),
+
+    # Named outright -- resolves to the Amidah pair alone, no bedtime service.
+    # The pair is probed together because Sefaria has no English for the
+    # Shabbat rows, so their `en` holds the pointed HEBREW while the Weekday
+    # row holds the English; the Weekday row alone leaves the model inventing
+    # the Hebrew, which is the failure being fixed.
+    ((_YIHYU_ALIAS_RE,),
      ["Weekday, Shacharit, Amidah, Concluding Passage",
+      "Shabbat, Shacharit, Amidah, Concluding Passage"]),
+
+    # Bare "angelic prayer" stays ambiguous and deliberately probes BOTH
+    # candidates rather than guessing a third time: the bedtime service, and
+    # Yihyu L'ratzon (Psalms 19:15, closing the Amidah) which is what Zeev
+    # recited when Alex first asked and he accepted at the time. Supplying both
+    # lets the model pick or ask; picking one here is what got it wrong before.
+    ((_ANGEL_PRAYER_RE,),
+     ["Shema al Hamita",
+      "Weekday, Shacharit, Amidah, Concluding Passage",
       "Shabbat, Shacharit, Amidah, Concluding Passage"]),
 ]
 
@@ -4321,7 +4355,8 @@ def _torah_ref_lookup(con, query, k):
     aliases = []
     for rxs, refs in _TORAH_REF_ALIASES:
         if any(rx.search(query) for rx in rxs):
-            aliases.extend(refs)
+            aliases = refs          # first match wins; do NOT accumulate
+            break
 
     rows, seen = [], set()
     for tier in (aliases, bigrams, singles):

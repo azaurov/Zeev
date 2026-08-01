@@ -416,6 +416,16 @@ Software I2C bus 3 on GPIO5 (SDA) / GPIO6 (SCL): `dtoverlay=i2c-gpio,bus=3,i2c_g
 
 - `zeev_cleanup()` runs at startup in all modes (clear crash leftovers) and is registered via `atexit` in `main()` and `run_device_mode()` so hanging Piper/mpg123 subprocesses are killed on any exit including unhandled exceptions.
 - `main()` startup greeting via gTTS+mpg123 (background, ~2s). Exit: "Goodbye, Alex." synchronously before `sys.exit()`.
+### Battery (PiSugar)
+
+`_battery_monitor()` (device mode) polls `get_battery()` every 30s and does two things.
+
+- **≤2%, not charging → shutdown.** Checked **first** and returns: the plea below waits up to ~2 min for a free device, and that wait must never sit in front of the shutdown. The plea also re-checks on return (`_battery_critical()`), since it blocks ~2.5 min unwatched.
+- **≤10%, not charging → both voices ask to be charged** (`_LOW_BATTERY_LINES`, Zeev `daniel` then Sarina `sarina`, the `_GOODNIGHT_LINES` shape). Speaks via `_announce_reminder`'s path — face-state wait, `_screen_wake()`, restore prior state — not `start_health_monitor`'s bare `_speak_device`, which talks over live turns.
+  - **Re-nags on a 300s cooldown, latch cleared while charging.** Firing per-poll is two pleas a minute down to the shutdown; firing once at 10% leaves eight silent percent. Clearing on charge is what re-arms the next unplug.
+  - **`charging is None` pleads.** PiSugar unreadable means we can't tell, and the 2% shutdown already treats it that way. Compounding this: **the Pi's own PWR port bypasses the PiSugar**, so a charger in the wrong port never sets `charging` and the plea keeps firing — correct, and why the lines name the PiSugar port.
+  - **Not gated on `_in_quiet_hours()`** — that window only lowers startup volume, and neither reminders nor health warnings honour it. Dying overnight is the worse failure.
+  - `_should_plead_battery()` is module-level and pure because the monitor is inside `run_device_mode` (needs the HAT to import) — same constraint as `handle_transcript`. Pinned by `tests/test_battery_plea.py`, incl. that every line pair actually states the request.
 - Journald persistent storage: `journalctl -b -1` works across reboots — but Raspberry Pi OS ships `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` (`Storage=volatile`), which silently reverts this and loses every prior boot. Overridden by a same-named file in `/etc/systemd/journald.conf.d/` plus `99-zeev-journal.conf` (200M, 30 days). Note journald only starts writing to `/var/log/journal` after a flush — `sudo journalctl --flush` — so a restart alone looks like the setting didn't take.
 
 ## bosgame Ollama integration

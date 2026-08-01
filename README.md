@@ -21,6 +21,7 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Thermal camera** — MLX90640 32×24 thermal imager; ASCII heatmap in terminal, live canvas in web UI
 - **Mobile web UI** — dark, responsive single-page chat with streaming tokens
 - **Device mode** — standalone push-to-talk companion on the Whisplay HAT (LCD face, LED, button)
+- **Low-battery plea** — below 10% on the PiSugar battery, Zeev and Sarina both ask to be plugged in, in their own voices, and keep asking every five minutes until charging starts; the request names the PiSugar port specifically, because the Pi's own power port bypasses the battery and never charges it. Below 2% the device says goodbye and shuts down cleanly. The plea waits for a free moment rather than talking over a conversation
 - **Voice-triggered visual effects** — say "show me some fire" or "do the matrix effect" and Zeev runs demoscene-style fire/matrix/psychedelic/liquid/tunnel/plasma/cartoon animations on the LCD
 - **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded to city/region via Nominatim; injected into context automatically on location queries; `/gps` terminal command; `GET /gps` web endpoint
 - **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights, weekly reflections) in a single WAL-mode `zeev.db`; no flat files
@@ -251,6 +252,8 @@ Hold the KEY button to record, release to send. Press again while Zeev is speaki
 Say `scan for bluetooth` → Zeev scans 10s and lists nearby devices. Say the device name (or `pair it` if only one) → Zeev pairs, trusts, and connects. All TTS and music then routes through the headphones automatically, resampled via ffmpeg to match the A2DP negotiated format. Say `disconnect bluetooth` to revert to the speaker. Manual control via `/bt scan`, `/bt pair <N>`, `/bt <N>`, `/bt off`.
 
 At startup, if headphones are already connected, Zeev auto-detects them via `bluealsa-aplay --list-pcms` and sets BT volume to raw 50/127 (~39%). Speaker volume is always set to raw 110/127 (~87%) regardless of BT state.
+
+**Battery:** the PiSugar level is polled every 30 seconds. Below 10% and not charging, Zeev and Sarina take turns asking to be charged, repeating every five minutes until a charger appears — a nag rather than a single notice, since 10% to empty is a long silent way down. Plug in and the reminder re-arms itself for next time. Below 2% Zeev says "Oh no, my time's up!" and shuts the Pi down. Note that charging must go through the **PiSugar's** port: the Pi's own power port bypasses the battery, so the plea will (correctly) keep asking.
 
 Physical disconnects (headphones powered off or out of range) are handled automatically: before each TTS call Zeev re-checks `bluealsa-aplay --list-pcms` and falls back to the wired speaker if the BT device is no longer present.
 

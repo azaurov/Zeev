@@ -211,6 +211,22 @@ Zeev's only write capabilities. `reminders` table (`text`, `due_ts` epoch, `fire
 
 Verified live: *"put dinner with Maria on my calendar Thursday at 7"* → `create_calendar_event{"summary":"dinner with Maria","when":"2026-07-30T19:00:00"}` → real event created, read back, deleted.
 
+#### Autonomous calendar reminders
+
+`_gcal_reminder_loop()` (every 30 min, started from `init_learning()` only when the token exists) reconciles the calendar into the existing `reminders` table via `gcal_scan_once()` — announcement is then just `_reminder_loop`. Read-only, so the readonly-scope caveat above doesn't apply. Off with `ZEEV_GCAL_AUTO_REMIND=0`.
+
+- **The filter is exclusion-based, and the real calendar is why.** 178 events / 45 days, **155 of them four daily habit blocks** (Dinner, apply for jobs, submit job searches, Digital Downtime) — reminding on those is ~4 announcements a day. And an allowlist of category words fails outright here: the genuine appointments are titled `psychiatry`, `Haircut w/Julie`, `physical therapy` — **none contains "appointment"**. What survives removing routine/Free/untimed IS the important set: measured **10 of 178, ~1.5/week**.
+- **Birthdays are checked FIRST — load-bearing, not style.** Google files contact birthdays *and anniversaries* as `eventType=birthday` + all-day + `transparency=transparent` + recurring; each is independently a skip, so any later position silently drops half the feature. Hand-typed ones ("Mail out bday", "Anniversary") have no `eventType`, hence the regex too.
+- **Routine detection keys on the TITLE, not `recurringEventId`** — found live: "Digital Downtime" is **five separate weekly series, one per weekday**, so per-series it looked like a harmless 2-in-a-fortnight event and all five produced reminders (8 of them). By title it is 10 in a fortnight.
+- **It's a rate (`_GCAL_ROUTINE_PER_WEEK`, 3), not a count** — a count is silently coupled to `ZEEV_GCAL_SCAN_DAYS`: halve the window and a habit block drops under a threshold tuned on the longer one.
+- **All-day events anchor to 09:00 *local*** (`_GCAL_ALLDAY_HOUR`). A bare `date` has no zone; anchoring in UTC puts a birthday at 5am or on the wrong day — same class as `_now_str()`.
+- **Truncation must not prune.** A vanished event is treated as deleted and its pending reminder cancelled — but `maxResults` (250) silently caps the response, so `len(items) >= maxResults` disables pruning for that pass. Two reasonable behaviours that otherwise combine into cancelling reminders for events that still exist.
+- A moved event cancels its stale announcement (`WHERE fired = 0` — one already spoken can't be unsaid). Key is `"<event id>:<lead minutes>"` so one event carries several leads without them overwriting each other.
+- **Scanned calendars are the ones Alex owns** (`accessRole`), which exactly separates the subscribed read-only feeds — *Phases of the Moon*, *Jewish Holidays* — from *Family*/*Ticketmaster*. A reminder every new moon is not a reminder. `ZEEV_GCAL_SKIP_CALENDARS` to exclude more.
+- `add_reminder_at()` takes an epoch: the scanner already holds exact timestamps, and round-tripping them through `_parse_when` is where a timezone error gets in.
+- `gcal_fetch` is deliberately **not** folded into this path — different question (formatted "what's on today" for the LLM, primary only). They share `_gcal_access_token()`.
+- Verified live on the Pi 2026-08-01: `[gcal] auto-reminders: +7 moved=0 pruned=0`, 7 rows, idempotent on rescan.
+
 ### GPS / geolocation
 
 Tiered pipeline: WiFi AP triangulation (Google Geolocation API → beacondb) → IP fallback (`ip-api.com`). `gps_locate()` cached 30 min. `_reverse_geocode` via Nominatim/OSM. `/gps` terminal command; `GET /gps` web endpoint.

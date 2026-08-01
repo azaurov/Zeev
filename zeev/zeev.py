@@ -781,6 +781,29 @@ _MUSIC_PROC       = None    # active mpg123 playback process
 _STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "90"))))
 _VOLUME           = _STARTUP_VOLUME   # 0–100; applied via amixer
 
+# Quiet hours. A reboot at 3am announcing itself at 90% into a dark house is
+# the whole problem here -- and restarts are not rare, since every deploy is
+# one. Only the STARTUP GREETING is affected: an ordinary reply is answering a
+# question that was just asked out loud, so it keeps the normal volume.
+_QUIET_START  = max(0, min(23, int(os.environ.get("ZEEV_QUIET_START", "22"))))
+_QUIET_END    = max(0, min(23, int(os.environ.get("ZEEV_QUIET_END", "8"))))
+_QUIET_VOLUME = max(0, min(100, int(os.environ.get("ZEEV_QUIET_VOLUME", "40"))))
+
+
+def _in_quiet_hours(hour=None):
+    """True inside the nightly quiet window.
+
+    The window WRAPS midnight, which is the whole subtlety: the obvious
+    ``_QUIET_START <= h < _QUIET_END`` is never true for 22->8, so the feature
+    would silently do nothing every night and look like a volume bug.
+    """
+    h = time.localtime().tm_hour if hour is None else hour
+    if _QUIET_START == _QUIET_END:
+        return False                      # empty window, not a 24h one
+    if _QUIET_START < _QUIET_END:
+        return _QUIET_START <= h < _QUIET_END
+    return h >= _QUIET_START or h < _QUIET_END
+
 
 def route_model(text):
     """Pick model ID automatically based on message content."""
@@ -9422,14 +9445,21 @@ def run_device_mode():
     init_tts()
     bt_detect_connected()
 
-    # Startup speaker volume (raw 0–127, derived from _STARTUP_VOLUME)
-    _startup_raw = round(_STARTUP_VOLUME / 100 * 127)
+    # Startup speaker volume (raw 0–127). Lowered for the greeting only when
+    # booting inside quiet hours; _speak_greeting restores the normal level as
+    # soon as it has finished, so the first real reply is at full volume.
+    _quiet_greeting = ("--no-greeting" not in sys.argv) and _in_quiet_hours()
+    _startup_pct = _QUIET_VOLUME if _quiet_greeting else _STARTUP_VOLUME
+    _startup_raw = round(_startup_pct / 100 * 127)
     try:
         subprocess.run(
             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(_startup_raw)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        print(f"[audio] speaker volume {_STARTUP_VOLUME}% (raw {_startup_raw}/127)", flush=True)
+        print(f"[audio] speaker volume {_startup_pct}% (raw {_startup_raw}/127)"
+              + (f" — quiet hours {_QUIET_START:02d}:00–{_QUIET_END:02d}:00,"
+                 f" greeting only (restores to {_STARTUP_VOLUME}%)"
+                 if _quiet_greeting else ""), flush=True)
     except Exception as e:
         print(f"[audio] startup speaker volume set failed: {e}", flush=True)
 
@@ -10906,22 +10936,42 @@ def run_device_mode():
         def _speak_greeting():
             _set_face("speaking", _greeting)
             board.set_rgb(*_LED_SPEAKING)
-            mp3 = elevenlabs_tts(_greeting)
-            if mp3 and shutil.which("mpg123"):
-                try:
-                    proc = subprocess.Popen(
-                        ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
-                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    proc.stdin.write(mp3)
-                    proc.stdin.close()
-                    proc.wait()
-                except BrokenPipeError:
-                    _speak_device(_greeting, voice="autumn")  # BT not ready yet, fall back to device speaker
-            else:
-                _speak_device(_greeting, voice="autumn")   # fallback if ElevenLabs unavailable
-            _go_idle()
-            _greeting_done.set()
+            # Both the volume restore and _greeting_done live in the finally.
+            # Either one skipped by an exception is a silent, delayed failure:
+            # the speaker stays at the quiet level for the whole session, or the
+            # wake listener waits on _greeting_done forever and the device is
+            # simply deaf -- neither pointing back at the greeting.
+            try:
+                mp3 = elevenlabs_tts(_greeting)
+                if mp3 and shutil.which("mpg123"):
+                    try:
+                        proc = subprocess.Popen(
+                            ["mpg123", "-q", "-a", bt_audio_dev(), "-"],
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        proc.stdin.write(mp3)
+                        proc.stdin.close()
+                        proc.wait()
+                    except BrokenPipeError:
+                        _speak_device(_greeting, voice="autumn")  # BT not ready yet, fall back to device speaker
+                else:
+                    _speak_device(_greeting, voice="autumn")   # fallback if ElevenLabs unavailable
+            except Exception as e:
+                print(f"[startup] greeting failed: {e}", flush=True)
+            finally:
+                if _quiet_greeting:
+                    try:
+                        subprocess.run(
+                            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker",
+                             str(round(_STARTUP_VOLUME / 100 * 127))],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        print(f"[audio] quiet-hours greeting done — volume back to "
+                              f"{_STARTUP_VOLUME}%", flush=True)
+                    except Exception as e:
+                        print(f"[audio] volume restore failed: {e}", flush=True)
+                _go_idle()
+                _greeting_done.set()
 
         threading.Thread(target=_speak_greeting, daemon=True).start()
     else:

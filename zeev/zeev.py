@@ -5235,6 +5235,19 @@ def needs_calendar(text):
     return bool(_CALENDAR_RE.search(text)) and GCAL_TOKEN_PATH.exists()
 
 
+def _utcnow():
+    """Naive UTC now.
+
+    Replaces datetime.utcnow(), which is deprecated and scheduled for removal
+    (it warns on every calendar refresh in the journal). Naive is deliberate and
+    must stay naive: the token file stores `expiry` as a naive UTC string and
+    the Calendar API's timeMin/timeMax are formatted with a literal Z, so an
+    aware datetime here would raise on comparison and change the strftime output.
+    """
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+
+
 def _gcal_refresh(tok: dict) -> dict:
     """Refresh the OAuth2 access token and update gcal_token.json. Returns updated tok."""
     resp = requests.post(
@@ -5252,7 +5265,7 @@ def _gcal_refresh(tok: dict) -> dict:
     tok["token"] = new["access_token"]
     import datetime as _dt
     expires_in = new.get("expires_in", 3600)
-    tok["expiry"] = (_dt.datetime.utcnow() + _dt.timedelta(seconds=expires_in)).strftime(
+    tok["expiry"] = (_utcnow() + _dt.timedelta(seconds=expires_in)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     GCAL_TOKEN_PATH.write_text(json.dumps(tok))
@@ -5268,7 +5281,7 @@ def _gcal_access_token():
     if expiry_str:
         try:
             exp = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
-            expired = _dt.datetime.utcnow() >= exp - _dt.timedelta(seconds=60)
+            expired = _utcnow() >= exp - _dt.timedelta(seconds=60)
         except ValueError:
             pass
     if expired:
@@ -5332,13 +5345,13 @@ def gcal_fetch(days=1) -> str:
         if expiry_str:
             try:
                 exp = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
-                expired = _dt.datetime.utcnow() >= exp - _dt.timedelta(seconds=60)
+                expired = _utcnow() >= exp - _dt.timedelta(seconds=60)
             except ValueError:
                 pass
         if expired:
             tok = _gcal_refresh(tok)
 
-        today = _dt.datetime.utcnow()
+        today = _utcnow()
         time_min = today.strftime("%Y-%m-%dT00:00:00Z")
         time_max = (today + _dt.timedelta(days=days)).strftime("%Y-%m-%dT23:59:59Z")
         resp = requests.get(
@@ -5600,7 +5613,15 @@ def gcal_reminder_plan(event, now, routine_titles=None):
     return out
 
 
-_GCAL_BDAY_OF_RE = re.compile(r"^(.*?)'?s\s+(?:birthday|b-?day|anniversary)\s*$",
+# The apostrophe is REQUIRED and may be typographic; the trailing "s" is
+# optional. Both halves matter and neither is cosmetic:
+#   "Robyn’s Birthday"  -- calendars and phone contacts routinely carry U+2019,
+#                          and an ASCII-only class left the name as "Robyn’".
+#   "Boris’ Birthday"   -- possessive of a name already ending in s, which
+#                          matched nothing and fell to the titles-verbatim path.
+# Requiring the apostrophe is what keeps "Mail out bday" from yielding the
+# "name" Mail out: make it optional and every unpossessed title becomes a person.
+_GCAL_BDAY_OF_RE = re.compile(r"^(.*?)['’]s?\s+(?:birthday|b-?day|anniversary)\s*$",
                               re.IGNORECASE)
 _GCAL_COUNT_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six",
                      7: "Seven", 8: "Eight", 9: "Nine"}

@@ -439,3 +439,23 @@ def test_birthday_scan_is_idempotent_across_polls(scan_db, monkeypatch):
     assert _drive(z, monkeypatch, ev)[0] > 0
     assert _drive(z, monkeypatch, ev) == (0, 0, 0)
     assert _drive(z, monkeypatch, ev) == (0, 0, 0)
+
+
+# --- possessive parsing ----------------------------------------------------
+
+@pytest.mark.parametrize("title,name", [
+    ("Karen Halpert's Birthday", "Karen Halpert"),
+    ("Robyn’s Birthday", "Robyn"),          # typographic apostrophe
+    ("Boris’ Birthday", "Boris"),           # possessive of a name ending in s
+    ("Hannah's birthday ", "Hannah"),
+    ("María Zaurova's anniversary", "María Zaurova"),
+    ("Happy birthday!", None),
+    ("Mail out bday", None),
+    ("Birthday Celebration", None),
+])
+def test_birthday_name_extraction(zeev, title, name):
+    """Calendars and phone contacts carry U+2019 routinely -- an ASCII-only
+    class left the name as "Robyn’", and "Boris’ Birthday" matched nothing
+    and fell through to reading titles verbatim. The apostrophe stays REQUIRED:
+    make it optional and "Mail out bday" yields the person "Mail out"."""
+    assert zeev._gcal_birthday_name(title) == name

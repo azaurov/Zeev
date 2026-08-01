@@ -4302,7 +4302,11 @@ _TORAH_REF_ALIASES = [
      # Raphael" -- sits at offset 10185, 87% in. No head slice reaches it, and
      # the words Alex actually says ("bedtime", "angelic") appear nowhere in
      # the English, so the excerpt cannot be centred from the query alone.
-     ("Michael", "at my right")),
+     ("Michael", "at my right"),
+     "the invocation of the four angels — \"In the Name of Adonoy, God of "
+     "Israel: at my right Michael, at my left Gabriel, before me Uriel, behind "
+     "me Raphael, and above my head, the Presence of Almighty\" — together "
+     "with its Hebrew"),
 
     # Named outright -- resolves to the Amidah pair alone, no bedtime service.
     # The pair is probed together because Sefaria has no English for the
@@ -4312,7 +4316,9 @@ _TORAH_REF_ALIASES = [
     ((_YIHYU_ALIAS_RE,),
      ["Weekday, Shacharit, Amidah, Concluding Passage",
       "Shabbat, Shacharit, Amidah, Concluding Passage"],
-     ("May the words",)),
+     ("May the words",),
+     "Yihyu L'ratzon — \"May the words of my mouth and the thoughts of my "
+     "heart be acceptable before You\" — together with its Hebrew"),
 
     # Bare "angelic prayer" stays ambiguous and deliberately probes BOTH
     # candidates rather than guessing a third time: the bedtime service, and
@@ -4323,7 +4329,10 @@ _TORAH_REF_ALIASES = [
      ["Shema al Hamita",
       "Weekday, Shacharit, Amidah, Concluding Passage",
       "Shabbat, Shacharit, Amidah, Concluding Passage"],
-     ("Michael", "at my right", "May the words")),
+     ("Michael", "at my right", "May the words"),
+     "either the four-angel invocation from the bedtime service or Yihyu "
+     "L'ratzon; both are quoted above, so recite whichever fits and say which "
+     "one it is"),
 ]
 
 
@@ -4361,7 +4370,7 @@ def _torah_ref_lookup(con, query, k):
         return con.execute(sql, [f"%{c}%" for c in cands] + [k]).fetchall()
 
     aliases = []
-    for rxs, refs, _focus in _TORAH_REF_ALIASES:
+    for rxs, refs, _focus, _hint in _TORAH_REF_ALIASES:
         if any(rx.search(query) for rx in rxs):
             aliases = refs          # first match wins; do NOT accumulate
             break
@@ -4387,10 +4396,25 @@ def _torah_ref_lookup(con, query, k):
 
 def torah_focus_terms(query):
     """Focus terms for whichever alias `query` matched, or ()."""
-    for rxs, _refs, focus in _TORAH_REF_ALIASES:
+    for rxs, _refs, focus, _hint in _TORAH_REF_ALIASES:
         if any(rx.search(query) for rx in rxs):
             return focus
     return ()
+
+
+def torah_alias_hint(query):
+    """What the matched alias means, in words, or "".
+
+    The excerpt holds several sections of a long service, and naming the
+    passage is not the same as naming the lines. Live 2026-07-31 the angels
+    invocation was quoted in the prompt and the 70B recited the Priestly
+    Blessing from the same excerpt instead -- correct text, wrong part. The
+    alias already knows which part was asked for; this is how it says so.
+    """
+    for rxs, _refs, _focus, hint in _TORAH_REF_ALIASES:
+        if any(rx.search(query) for rx in rxs):
+            return hint
+    return ""
 
 
 def torah_excerpt(en, query, budget, focus=()):
@@ -5900,15 +5924,23 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 # ("exactly 1-2 sentences") actively pushes toward a summary --
                 # so the named-prayer path needs the same explicit override the
                 # parsha path already has.
+                # Naming the passage is not naming the LINES. The excerpt holds
+                # several sections of a long service, and without this the 70B
+                # recited the Priestly Blessing from the same excerpt -- real
+                # text, wrong part. The alias knows which part was meant.
+                hint = torah_alias_hint(user_text)
                 parts.append(
-                    "\n\n## Instruction: The user asked for a specific prayer by"
-                    " name and its actual text is quoted above, mid-passage."
-                    " Recite the lines they asked about verbatim from that text."
-                    " Do NOT summarize it, do NOT describe what the prayer is,"
-                    " and do NOT supply wording from memory — your recollection"
-                    " of this liturgy is unreliable and has produced invented"
-                    " Hebrew before. If Hebrew is quoted above, reproduce it"
-                    " exactly as written. This overrides the 1-2 sentence limit."
+                    "\n\n## Instruction: The user is asking for "
+                    + (hint or "the prayer they named")
+                    + ". Its actual text is quoted above, mid-passage. Begin"
+                    " your reply with those exact lines, quoted verbatim from"
+                    " the text above, English first and then the Hebrew exactly"
+                    " as written. Do NOT open with the Shema or any other part"
+                    " of the service, do NOT summarize, do NOT describe what the"
+                    " prayer is, and do NOT supply wording from memory — your"
+                    " recollection of this liturgy is unreliable and has"
+                    " produced invented Hebrew before. This overrides the 1-2"
+                    " sentence limit."
                 )
 
     if needs_calendar(user_text):

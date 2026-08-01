@@ -21,6 +21,7 @@ import time
 import wave
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 
 import requests
 
@@ -3629,6 +3630,18 @@ def _db() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS idx_reminders_due
                 ON reminders (fired, due_ts);
+            -- Calendar-derived reminders. Keyed by "<event id>:<lead minutes>"
+            -- so one event can carry several (a day before AND an hour before)
+            -- without either being mistaken for the other. start_ts is kept so a
+            -- rescheduled event is detectable: the key survives, the start moves,
+            -- and the stale pending reminder is cancelled rather than left to
+            -- announce the old time. reminder_id is the row in `reminders`.
+            CREATE TABLE IF NOT EXISTS gcal_reminders (
+                event_key   TEXT    PRIMARY KEY,
+                start_ts    REAL    NOT NULL,
+                reminder_id INTEGER,
+                created_ts  REAL    NOT NULL
+            );
             -- Semantic index over `messages`. Vectors are computed remotely on
             -- bosgame (the Pi has neither the RAM nor the core to embed) and
             -- cached here, so retrieval itself is a local dot product.
@@ -3829,6 +3842,27 @@ def add_reminder(text, when):
         )
         con.commit()
         return cur.lastrowid, due
+
+
+def add_reminder_at(text, due_ts):
+    """Store a reminder at an exact epoch. Returns (id, due_ts).
+
+    Sibling of add_reminder for callers that already hold a real timestamp --
+    the calendar scanner does. Round-tripping an API datetime out to a string
+    and back through _parse_when is where an off-by-a-timezone gets in.
+    """
+    text = (text or "").strip()
+    if not text or due_ts is None:
+        return None, None
+    now = time.time()
+    with _db_lock:
+        con = _db()
+        cur = con.execute(
+            "INSERT INTO reminders (text, due_ts, created_ts, fired) VALUES (?, ?, ?, 0)",
+            (text, float(due_ts), now),
+        )
+        con.commit()
+        return cur.lastrowid, float(due_ts)
 
 
 def list_reminders(include_fired=False, limit=20):
@@ -4775,6 +4809,10 @@ def init_learning():
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
     threading.Thread(target=_memory_maintenance_loop, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
+    # Gated on the token so the dev checkout (and any Pi without calendar auth)
+    # pays nothing for a thread that could only fail.
+    if _GCAL_AUTO_ON and GCAL_TOKEN_PATH.exists():
+        threading.Thread(target=_gcal_reminder_loop, daemon=True).start()
     if _AMBIENT_LOCATION:
         threading.Thread(target=_gps_refresh_loop, daemon=True).start()
 
@@ -5342,6 +5380,352 @@ def gcal_fetch(days=1) -> str:
         result = f"(calendar unavailable: {e})"
     _gcal_cache[days] = {"result": result, "ts": now}
     return result
+
+
+# ---------------------------------------------------------------------------
+# Autonomous calendar reminders
+#
+# Zeev reminds Alex about what's on the calendar without being asked. The hard
+# part is not fetching -- it is deciding what deserves to be spoken aloud, and
+# the real calendar settles that: 178 events over 45 days, of which 155 are four
+# daily habit blocks ("Dinner", "apply for jobs", "submit job searches", "Digital
+# Downtime"). Reminding about all of them would mean speaking ~4x a day forever,
+# which is how a feature like this gets turned off.
+#
+# So the filter is EXCLUSION-based, not keyword-based. That is forced by the data
+# too: the appointments on this calendar are titled "psychiatry", "Haircut
+# w/Julie", "physical therapy" -- none of which contain the word "appointment".
+# An allowlist of category words would have missed every one of them. What is
+# left after removing routine blocks, Free-marked entries and untimed noise IS
+# the important set: measured 10 of 178, about 1.5 a week.
+#
+# gcal_fetch above is deliberately NOT refactored into this path. It answers a
+# different question (a formatted "what's on today" for the LLM, primary calendar
+# only) and shares the piece that matters, _gcal_access_token().
+# ---------------------------------------------------------------------------
+
+_GCAL_AUTO_ON     = os.environ.get("ZEEV_GCAL_AUTO_REMIND", "1") != "0"
+_GCAL_SCAN_DAYS   = int(os.environ.get("ZEEV_GCAL_SCAN_DAYS", "14"))
+_GCAL_SCAN_SEC    = int(os.environ.get("ZEEV_GCAL_SCAN_SEC", "1800"))   # 30 min
+# How often a repeating title has to occur to be a habit block rather than an
+# event. Expressed as a RATE, not a count, because a count is silently coupled
+# to the scan window: at ZEEV_GCAL_SCAN_DAYS=14 a weekday-daily block occurs 10
+# times, but at 7 it occurs 5 and would slip under a threshold tuned on the
+# longer window. A weekly appointment is ~1/week and survives; the daily blocks
+# on this calendar run 5-7/week.
+_GCAL_ROUTINE_PER_WEEK = float(os.environ.get("ZEEV_GCAL_ROUTINE_PER_WEEK", "3"))
+# All-day events have no time, so they are anchored to a local morning hour.
+_GCAL_ALLDAY_HOUR = int(os.environ.get("ZEEV_GCAL_ALLDAY_HOUR", "9"))
+_GCAL_MAX_RESULTS = 250
+_GCAL_SKIP_CALS   = [c.strip().lower()
+                     for c in os.environ.get("ZEEV_GCAL_SKIP_CALENDARS", "").split(",")
+                     if c.strip()]
+
+# Google marks contact birthdays AND anniversaries with eventType "birthday";
+# hand-typed ones ("Anniversary", "Mail out bday", "Perl's birthday") are plain
+# events, hence the regex as well.
+_GCAL_BIRTHDAY_RE  = re.compile(r"\b(birthdays?|b-?day|anniversar(?:y|ies))\b", re.IGNORECASE)
+_GCAL_INTERVIEW_RE = re.compile(r"\b(interview|screening|phone screen|onsite|recruiter)\b",
+                                re.IGNORECASE)
+# "dr" needs its dot: bare "dr" collides with Drive, Dr Pepper and drop.
+_GCAL_APPT_RE      = re.compile(
+    r"\b(appointments?|appt|doctor|dr\.|dentist|dental|clinic|hospital|surgery|"
+    r"therapy|therapist|psychiatry|psychiatrist|psychologist|checkup|check-up|"
+    r"physical|bloodwork|scan|mri|x-ray|vet|optometrist|dermatologist|haircut)\b",
+    re.IGNORECASE)
+_GCAL_TRAVEL_RE    = re.compile(r"\b(flight|flying|departure|airport|boarding|train|amtrak)\b",
+                                re.IGNORECASE)
+_GCAL_MEETING_RE   = re.compile(
+    r"\b(meeting|meet|call|sync|stand-?up|1:1|one[- ]on[- ]one|zoom|teams|"
+    r"conference|demo|presentation|review)\b", re.IGNORECASE)
+
+# Minutes before the start, per category. A day-ahead lead exists where there is
+# something to DO with the warning -- rearrange a morning, buy a present, print a
+# boarding pass. A 15-minute nudge before a routine meeting is the whole need.
+_GCAL_LEADS = {
+    "interview":   (1440, 60),
+    "appointment": (1440, 60),
+    "travel":      (1440, 120),
+    "birthday":    (1440, 0),
+    "meeting":     (15,),
+    "event":       (30,),
+}
+
+# Emoji and pictographs read badly through TTS ("🍽️ Dinner"), and calendar
+# titles are full of them.
+_GCAL_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿️⬀-⯿]+")
+
+
+def _gcal_clean_summary(summary):
+    s = _GCAL_EMOJI_RE.sub(" ", summary or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    # Titles are written as labels, not sentences, and plenty end in their own
+    # punctuation ("Happy birthday!") -- which the caller's full stop would turn
+    # into "Happy birthday!.".
+    return s.rstrip(".!?,;: ") or "an event"
+
+
+def gcal_event_start(event, allday_hour=_GCAL_ALLDAY_HOUR):
+    """Return (epoch_seconds, all_day) for an event, or (None, False).
+
+    All-day events carry a bare date with no zone, so the anchor is built naive
+    and read as LOCAL time -- the same trap _now_str() documents. Anchoring in
+    UTC would put a birthday reminder at 5am local, or on the wrong day.
+    """
+    import datetime as _dt
+    start = event.get("start", {})
+    raw = start.get("dateTime")
+    if raw:
+        try:
+            return _dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp(), False
+        except ValueError:
+            return None, False
+    raw = start.get("date")
+    if not raw:
+        return None, False
+    try:
+        d = _dt.datetime.strptime(raw, "%Y-%m-%d").replace(hour=allday_hour)
+        return d.timestamp(), True      # naive -> local, which is what we want
+    except ValueError:
+        return None, False
+
+
+def gcal_event_category(event, routine_titles=None):
+    """Classify an event, or return None if it should not produce a reminder.
+
+    Order is load-bearing. Birthdays are checked FIRST because Google files them
+    as all-day AND transparent AND recurring -- every later exclusion would drop
+    them, and birthdays are half of what was asked for.
+    """
+    summary = event.get("summary", "") or ""
+    if event.get("eventType") == "birthday" or _GCAL_BIRTHDAY_RE.search(summary):
+        return "birthday"
+    if event.get("status") == "cancelled":
+        return None
+    for att in event.get("attendees", []) or []:
+        if att.get("self") and att.get("responseStatus") == "declined":
+            return None
+    if (event.get("recurringEventId")
+            and routine_titles
+            and _gcal_norm_title(event.get("summary")) in routine_titles):
+        return None                      # a habit block, not an appointment
+    # "Free" is the user's own statement that it does not need their presence.
+    if event.get("transparency") == "transparent":
+        return None
+    if "dateTime" not in event.get("start", {}):
+        return None                      # all-day and not a birthday: noise
+    if _GCAL_INTERVIEW_RE.search(summary):
+        return "interview"
+    if _GCAL_APPT_RE.search(summary):
+        return "appointment"
+    if _GCAL_TRAVEL_RE.search(summary):
+        return "travel"
+    if _GCAL_MEETING_RE.search(summary):
+        return "meeting"
+    return "event"
+
+
+def _gcal_lead_phrase(lead_min):
+    return {0: "", 1440: "Tomorrow", 120: "In two hours", 60: "In an hour",
+            30: "In half an hour", 15: "In fifteen minutes"}.get(
+        lead_min, f"In {int(lead_min)} minutes")
+
+
+def gcal_reminder_text(event, category, lead_min, start_ts, all_day):
+    """Spoken text for one calendar-derived reminder."""
+    import datetime as _dt
+    summary = _gcal_clean_summary(event.get("summary"))
+    when = _dt.datetime.fromtimestamp(start_ts)
+    clock = when.strftime("%-I:%M %p") if when.minute else when.strftime("%-I %p")
+    if category == "birthday":
+        return f"{'Tomorrow' if lead_min else 'Today'}: {summary}."
+    if lead_min == 1440:
+        return f"Tomorrow at {clock}: {summary}."
+    if all_day:
+        return f"Today: {summary}."
+    return f"{_gcal_lead_phrase(lead_min)}: {summary} at {clock}."
+
+
+def gcal_reminder_plan(event, now, routine_titles=None):
+    """Return [(event_key, due_ts, text, start_ts), ...] for one event. Pure."""
+    category = gcal_event_category(event, routine_titles)
+    if not category:
+        return []
+    start_ts, all_day = gcal_event_start(event)
+    if start_ts is None or start_ts <= now:
+        return []
+    eid = event.get("id")
+    if not eid:
+        return []
+    out = []
+    for lead in _GCAL_LEADS.get(category, (30,)):
+        due = start_ts - lead * 60
+        if due <= now:
+            # Discovered late -- the lead has already passed. Announcing at the
+            # next poll still helps if the event is close, but replaying every
+            # lead of every event found on a cold start would be a monologue,
+            # so only the ones genuinely imminent are pulled forward.
+            if lead == 0 or start_ts - now > max(lead * 60, 3600) * 2:
+                continue
+            due = now
+        out.append((f"{eid}:{lead}",
+                    due,
+                    gcal_reminder_text(event, category, lead, start_ts, all_day),
+                    start_ts))
+    return out
+
+
+def gcal_calendars():
+    """Calendar ids worth scanning: the ones Alex owns.
+
+    Access role is the cleanest available signal, and it matches the real
+    account exactly -- 'Phases of the Moon' and 'Jewish Holidays' are subscribed
+    read-only feeds (a reminder every new moon is not a reminder), while Family
+    and Ticketmaster are owned and carry real plans.
+    """
+    tok = _gcal_access_token()
+    resp = requests.get(
+        "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        headers={"Authorization": f"Bearer {tok}"}, timeout=15)
+    resp.raise_for_status()
+    out = []
+    for c in resp.json().get("items", []):
+        if c.get("accessRole") not in ("owner", "writer"):
+            continue
+        if (c.get("summary", "") or "").lower() in _GCAL_SKIP_CALS:
+            continue
+        if (c.get("id", "") or "").lower() in _GCAL_SKIP_CALS:
+            continue
+        out.append(c["id"])
+    return out
+
+
+def gcal_events(days=None, calendars=None):
+    """Structured upcoming events. Returns (events, truncated).
+
+    `truncated` matters: maxResults silently caps the response, and the pruning
+    step below reads a missing event as a deleted one. Truncation would then
+    cancel reminders for events that still exist, so it disables pruning.
+    """
+    import datetime as _dt
+    days = days or _GCAL_SCAN_DAYS
+    tok = _gcal_access_token()
+    if calendars is None:
+        calendars = gcal_calendars()
+    now = _dt.datetime.now(_dt.timezone.utc)
+    params = {
+        "timeMin": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timeMax": (now + _dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": str(_GCAL_MAX_RESULTS),
+    }
+    events, truncated = [], False
+    for cal in calendars:
+        resp = requests.get(
+            f"https://www.googleapis.com/calendar/v3/calendars/{_url_quote(cal)}/events",
+            headers={"Authorization": f"Bearer {tok}"}, params=params, timeout=20)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if len(items) >= _GCAL_MAX_RESULTS:
+            truncated = True
+        events.extend(items)
+    return events, truncated
+
+
+def _gcal_norm_title(summary):
+    return _gcal_clean_summary(summary).lower()
+
+
+def gcal_routine_titles(events, days=None):
+    """Repeating titles frequent enough to be habit blocks. Pure.
+
+    Keyed on the TITLE, not on recurringEventId, because one habit is routinely
+    spread across several series: "Digital Downtime" on this calendar is five
+    separate weekly recurrences, one per weekday. Grouped by series each looked
+    like a harmless weekly event (2 occurrences in a fortnight) and all five
+    sailed through -- eight spoken reminders for a block whose entire purpose is
+    to be left alone. Grouped by title it is 10 in a fortnight, which is what it
+    actually is.
+    """
+    days = days or _GCAL_SCAN_DAYS
+    counts = {}
+    for e in events:
+        if not e.get("recurringEventId"):
+            continue                     # one-offs are never routine
+        t = _gcal_norm_title(e.get("summary"))
+        counts[t] = counts.get(t, 0) + 1
+    per_week = 7.0 / max(days, 1)
+    return {t for t, n in counts.items() if n * per_week >= _GCAL_ROUTINE_PER_WEEK}
+
+
+def gcal_scan_once(now=None):
+    """One pass. Returns (created, rescheduled, pruned)."""
+    now = now if now is not None else time.time()
+    events, truncated = gcal_events()
+    routine = gcal_routine_titles(events)
+
+    planned = {}
+    for e in events:
+        for key, due, text, start_ts in gcal_reminder_plan(e, now, routine):
+            planned[key] = (due, text, start_ts)
+
+    created = rescheduled = pruned = 0
+    with _db_lock:
+        con = _db()
+        existing = {r["event_key"]: r for r in
+                    con.execute("SELECT event_key, start_ts, reminder_id FROM gcal_reminders")}
+        for key, (due, text, start_ts) in planned.items():
+            row = existing.get(key)
+            if row is not None and abs(row["start_ts"] - start_ts) < 60:
+                continue
+            if row is not None:
+                # Moved. Drop the stale announcement -- but only if it has not
+                # already fired, or a past reminder would silently vanish.
+                con.execute("DELETE FROM reminders WHERE id = ? AND fired = 0",
+                            (row["reminder_id"],))
+                rescheduled += 1
+            else:
+                created += 1
+            cur = con.execute(
+                "INSERT INTO reminders (text, due_ts, created_ts, fired) VALUES (?, ?, ?, 0)",
+                (text, float(due), now))
+            con.execute(
+                "INSERT INTO gcal_reminders (event_key, start_ts, reminder_id, created_ts) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(event_key) DO UPDATE SET "
+                "start_ts = excluded.start_ts, reminder_id = excluded.reminder_id",
+                (key, float(start_ts), cur.lastrowid, now))
+
+        if not truncated:
+            # An event that vanished from the window was deleted from the
+            # calendar: cancel its pending reminder. Scoped to keys inside the
+            # window, so rows for events further out are not touched.
+            horizon = now + _GCAL_SCAN_DAYS * 86400
+            for key, row in existing.items():
+                if key in planned or not (now <= row["start_ts"] <= horizon):
+                    continue
+                con.execute("DELETE FROM reminders WHERE id = ? AND fired = 0",
+                            (row["reminder_id"],))
+                con.execute("DELETE FROM gcal_reminders WHERE event_key = ?", (key,))
+                pruned += 1
+        # Housekeeping: rows whose event is long past can never match again.
+        con.execute("DELETE FROM gcal_reminders WHERE start_ts < ?", (now - 30 * 86400,))
+        con.commit()
+    return created, rescheduled, pruned
+
+
+def _gcal_reminder_loop():
+    """Keep calendar-derived reminders in step with the calendar."""
+    time.sleep(20)          # let startup settle; the calendar is not urgent
+    while True:
+        try:
+            created, rescheduled, pruned = gcal_scan_once()
+            if created or rescheduled or pruned:
+                print(f"[gcal] auto-reminders: +{created} moved={rescheduled} "
+                      f"pruned={pruned}", flush=True)
+        except Exception as e:
+            print(f"[gcal] scan error: {e}", flush=True)
+        time.sleep(_GCAL_SCAN_SEC)
 
 
 # ---------------------------------------------------------------------------

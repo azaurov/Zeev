@@ -179,16 +179,16 @@ def test_no_double_punctuation(zeev):
 def test_birthday_text_says_today_or_tomorrow(zeev):
     start = time.time() + DAY
     assert zeev.gcal_reminder_text(_allday("Eli's birthday", "2026-06-03"),
-                                   "birthday", 0, start, True).startswith("Today")
+                                   "birthday", 0, start, True).endswith("is today.")
     assert zeev.gcal_reminder_text(_allday("Eli's birthday", "2026-06-03"),
-                                   "birthday", 1440, start, True).startswith("Tomorrow")
+                                   "birthday", 1440, start, True).endswith("is tomorrow.")
 
 
 def test_timed_text_carries_the_clock(zeev):
     start = dt.datetime.now().astimezone().replace(hour=14, minute=30) + dt.timedelta(days=1)
     txt = zeev.gcal_reminder_text(_timed("psychiatry", start), "appointment", 60,
                                   start.timestamp(), False)
-    assert "2:30 PM" in txt and "In an hour" in txt
+    assert "2:30 PM" in txt and "in an hour" in txt
 
 
 def test_whole_hour_drops_the_minutes(zeev):
@@ -319,3 +319,22 @@ def test_one_off_events_are_never_routine(zeev):
     generic the title."""
     events = [_timed("Meeting", _soon(24 * i), id=f"m{i}") for i in range(1, 9)]
     assert zeev.gcal_routine_titles(events, days=14) == set()
+
+
+def test_text_composes_with_the_spoken_prefix(zeev):
+    """_reminder_loop speaks "Reminder: <text>". The stored row looks fine on
+    its own, so this only shows up out loud -- "Reminder: Tomorrow at 2:30 PM:
+    psychiatry" was the first cut."""
+    start = dt.datetime.now().astimezone().replace(hour=14, minute=30) + dt.timedelta(days=1)
+    cases = [
+        zeev.gcal_reminder_text(_timed("psychiatry", start), "appointment", 60,
+                                start.timestamp(), False),
+        zeev.gcal_reminder_text(_timed("psychiatry", start), "appointment", 1440,
+                                start.timestamp(), False),
+        zeev.gcal_reminder_text(_allday("Eli's birthday", "2026-06-03"), "birthday",
+                                0, start.timestamp(), True),
+    ]
+    for text in cases:
+        spoken = f"Reminder: {text}"
+        assert "::" not in spoken
+        assert spoken.count(":") == spoken.count(" PM") + spoken.count(" AM") + 1, spoken

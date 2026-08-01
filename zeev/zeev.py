@@ -5526,24 +5526,30 @@ def gcal_event_category(event, routine_titles=None):
 
 
 def _gcal_lead_phrase(lead_min):
-    return {0: "", 1440: "Tomorrow", 120: "In two hours", 60: "In an hour",
-            30: "In half an hour", 15: "In fifteen minutes"}.get(
-        lead_min, f"In {int(lead_min)} minutes")
+    return {120: "in two hours", 60: "in an hour", 30: "in half an hour",
+            15: "in fifteen minutes"}.get(lead_min, f"in {int(lead_min)} minutes")
 
 
 def gcal_reminder_text(event, category, lead_min, start_ts, all_day):
-    """Spoken text for one calendar-derived reminder."""
+    """Spoken text for one calendar-derived reminder.
+
+    Phrased to sit AFTER _reminder_loop's "Reminder: " prefix, which is what is
+    actually spoken. The obvious "Tomorrow at 2:30 PM: psychiatry" becomes
+    "Reminder: Tomorrow at 2:30 PM: psychiatry" out loud -- two colons and a
+    redundant lead-in. Reading the stored row does not show this; only the
+    announcement path does.
+    """
     import datetime as _dt
     summary = _gcal_clean_summary(event.get("summary"))
     when = _dt.datetime.fromtimestamp(start_ts)
     clock = when.strftime("%-I:%M %p") if when.minute else when.strftime("%-I %p")
     if category == "birthday":
-        return f"{'Tomorrow' if lead_min else 'Today'}: {summary}."
+        return f"{summary} is {'tomorrow' if lead_min else 'today'}."
     if lead_min == 1440:
-        return f"Tomorrow at {clock}: {summary}."
+        return f"{summary}, tomorrow at {clock}."
     if all_day:
-        return f"Today: {summary}."
-    return f"{_gcal_lead_phrase(lead_min)}: {summary} at {clock}."
+        return f"{summary}, today."
+    return f"{summary} {_gcal_lead_phrase(lead_min)}, at {clock}."
 
 
 def gcal_reminder_plan(event, now, routine_titles=None):

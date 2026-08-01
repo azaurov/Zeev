@@ -11349,6 +11349,12 @@ def run_device_mode():
         Unsolicited speech, so it follows _announce_reminder's shape rather than
         start_health_monitor's bare _speak_device: it waits for the device to be
         free instead of talking over a live turn, and restores the prior state.
+
+        Deliberately NOT gated on _in_quiet_hours(): that window only lowers the
+        startup volume, and neither reminders nor health warnings are silenced by
+        it. A device that dies overnight because the plea was too polite to ask
+        is the worse of the two failures -- it is quieter at night either way,
+        since the quiet-hours volume is already in effect.
         """
         for _ in range(60):          # wait up to ~2 min for the device to be free
             if _face_state in ("idle", "ready"):
@@ -11368,6 +11374,14 @@ def run_device_mode():
         _speak_device(sarina_line, "sarina")
         _go_idle() if was_idle else _go_ready()
 
+    def _battery_critical(level, charging):
+        if level is None or level > 2 or charging:
+            return False
+        print("[shutdown] Battery critical — shutting down.", flush=True)
+        _speak_device("Oh no, my time's up!")
+        subprocess.run(["sudo", "shutdown", "-h", "now"])
+        return True
+
     def _battery_monitor():
         last_plea = 0.0
         while True:
@@ -11375,10 +11389,7 @@ def run_device_mode():
             level, charging = get_battery()
             # Shutdown is checked first and exits the loop: at 2% there is no
             # room for the plea's up-to-2-minute wait for a free device.
-            if level is not None and level <= 2 and not charging:
-                print("[shutdown] Battery critical — shutting down.", flush=True)
-                _speak_device("Oh no, my time's up!")
-                subprocess.run(["sudo", "shutdown", "-h", "now"])
+            if _battery_critical(level, charging):
                 return
             if charging:
                 # Clearing the latch is what re-arms the plea for the next
@@ -11391,6 +11402,11 @@ def run_device_mode():
                     _plead_for_charge(level)
                 except Exception as e:
                     print(f"[battery] plea failed: {e}", flush=True)
+                # The plea blocks for up to ~2.5 min (face wait plus two voices),
+                # during which nothing was watching the level. Re-check before
+                # sleeping another 30s rather than noticing 2% that much late.
+                if _battery_critical(*get_battery()):
+                    return
 
     threading.Thread(target=_battery_monitor, daemon=True).start()
 

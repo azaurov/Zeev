@@ -38,6 +38,19 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# Maximum characters stored per passage, for `en` and `he` independently.
+#
+# Was 4000, which silently severed 6321 of 20832 rows -- 94% of the Gemara,
+# and Keri'at Shema al Hamita mid-service, so its angels invocation simply did
+# not exist locally. A truncated row is indistinguishable from a complete one
+# at query time: it has no marker, so retrieval succeeds and the answer is
+# quietly missing whatever came after the cut.
+#
+# Raised 2026-07-31. The cap exists only to bound pathological rows; text is
+# cheap on disk (the whole corpus was 59 MB of characters at 4000) and the
+# retrieval layer decides how much of a passage reaches the prompt.
+MAX_PASSAGE_CHARS = 20000
 from threading import Lock, Semaphore
 
 DB_PATH  = Path(__file__).resolve().parent / "data" / "torah.db"
@@ -499,7 +512,7 @@ def import_dss(db_path):
             if sref in done:
                 skipped += 1
                 continue
-            he = "".join(words).strip()[:4000]
+            he = "".join(words).strip()[:MAX_PASSAGE_CHARS]
             if he:
                 ref = f"DSS {scroll} frag.{frag_lbl} — {name}"
                 con.execute(
@@ -542,7 +555,7 @@ def import_sumerian(db_path):
         if en:
             con.execute(
                 "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
-                ("Sumerian", ref, en[:4000], ""),
+                ("Sumerian", ref, en[:MAX_PASSAGE_CHARS], ""),
             )
             inserted += 1
         con.execute("INSERT OR IGNORE INTO done(ref) VALUES (?)", (sref,))
@@ -639,7 +652,7 @@ def import_corpus(refs, db_path, workers=3, rate_limit=4):
                 if en:
                     con.execute(
                         "INSERT INTO passages(source, ref, en, he) VALUES (?,?,?,?)",
-                        (source, human_ref, en[:4000], he[:4000]),
+                        (source, human_ref, en[:MAX_PASSAGE_CHARS], he[:MAX_PASSAGE_CHARS]),
                     )
                 else:
                     errors[0] += 1

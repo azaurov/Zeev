@@ -4356,7 +4356,7 @@ def _torah_ref_lookup(con, query, k):
         # One OR'd scan per tier rather than one per candidate: each LIKE
         # '%x%' is a full scan of ~20k rows, and eight of them measured 923ms
         # on the Pi Zero. Two tiers keep bigram precedence at 2 scans.
-        sql = ("SELECT ref, en FROM passages WHERE "
+        sql = ("SELECT ref, en, he FROM passages WHERE "
                + " OR ".join(["ref LIKE ?"] * len(cands)) + " LIMIT ?")
         return con.execute(sql, [f"%{c}%" for c in cands] + [k]).fetchall()
 
@@ -4368,10 +4368,10 @@ def _torah_ref_lookup(con, query, k):
 
     rows, seen = [], set()
     for tier in (aliases, bigrams, singles):
-        for ref, en in probe(tier):
+        for ref, en, he in probe(tier):
             if ref not in seen:
                 seen.add(ref)
-                rows.append((ref, en))
+                rows.append((ref, en, he))
         # An alias that hit wins OUTRIGHT, even short of k -- hence the flag,
         # which torah_search needs too: returning early from here alone still
         # left it topping the result up from FTS. It names the exact passage,
@@ -4406,34 +4406,70 @@ def torah_excerpt(en, query, budget, focus=()):
     words people say are often absent from the translation: "bedtime" and
     "angelic" appear nowhere in this passage's English.
     """
-    en = en or ""
-    if len(en) <= budget:
-        return en
-    low = en.lower()
+    return _torah_window(en or "", _torah_match_pos(en or "", query, focus), budget)
+
+
+def _torah_match_pos(text, query, focus):
+    """Offset of the first query word or focus term in `text`, or -1."""
+    low = (text or "").lower()
     terms = [w for w in re.findall(r"[A-Za-z']{4,}", query or "")
              if w.lower() not in _TORAH_REF_SKIP]
-    pos = -1
     for t in list(terms) + list(focus):
         i = low.find(t.lower())
         if i >= 0:
-            pos = i
-            break
+            return i
+    return -1
+
+
+def _torah_window(text, pos, budget):
+    if len(text) <= budget:
+        return text
     if pos < 0:
-        return en[:budget]
+        return text[:budget]
     start = max(0, pos - budget // 3)
     if start:
         # Snap forward to a sentence boundary so the excerpt doesn't open
         # mid-clause, but only if one is close -- otherwise keep the offset and
         # risk an abrupt start rather than skipping past the match itself.
-        m = re.search(r"[.!?]\s", en[start:start + 200])
+        m = re.search(r"[.!?]\s", text[start:start + 200])
         if m:
             start += m.end()
-    chunk = en[start:start + budget]
-    return ("…" if start else "") + chunk + ("…" if start + budget < len(en) else "")
+    chunk = text[start:start + budget]
+    return ("…" if start else "") + chunk + ("…" if start + budget < len(text) else "")
+
+
+def torah_excerpt_he(he, en, query, budget, focus=()):
+    """Window the HEBREW column at the same relative position the English matched.
+
+    The Hebrew cannot be located by keyword -- the query is English and the
+    text is pointed Hebrew -- but `en` and `he` are parallel renderings of one
+    passage, so the fraction transfers even though the scripts do not. Measured
+    on Keri'at Shema al Hamita: the angels sit at 86.5% of the English (9238 of
+    10678) and 86.4% of the Hebrew (7614 of 8813), so the projected offset
+    lands within about ten characters.
+
+    This exists because torah_search returns `en` only, and for this passage the
+    Hebrew lives in `he` -- so a request to hear it in Hebrew reached the model
+    with English text alone and it invented the Hebrew, which is the original
+    bug. (The Shabbat Amidah rows hide this: Sefaria has no English for them, so
+    their `en` already holds Hebrew.)
+    """
+    he = he or ""
+    if len(he) <= budget:
+        return he
+    pos = _torah_match_pos(en or "", query, focus)
+    frac = (pos / len(en)) if (pos >= 0 and en) else 0.0
+    return _torah_window(he, int(frac * len(he)), budget)
 
 
 def torah_search(query, k=3):
-    """Return up to k (ref, en_text) pairs from the local Torah FTS5 database."""
+    """Return up to k ``(ref, en, he)`` triples from the local Torah FTS5 DB.
+
+    Arity changed from 2 on 2026-07-31 (the same kind of break `_parse_torah_ref`
+    took). `he` is needed because for most siddur rows the Hebrew lives only in
+    that column, so a request to hear a prayer in Hebrew reached the model with
+    English text alone -- and it invented the Hebrew.
+    """
     if not TORAH_DB.exists():
         return []
     try:
@@ -4456,12 +4492,12 @@ def torah_search(query, k=3):
             return ref_rows
         fts_q = " OR ".join(fts_words)
         rows = con.execute(
-            "SELECT ref, en FROM passages WHERE passages MATCH ? ORDER BY rank LIMIT ?",
+            "SELECT ref, en, he FROM passages WHERE passages MATCH ? ORDER BY rank LIMIT ?",
             (fts_q, k - len(ref_rows)),
         ).fetchall()
         con.close()
-        seen = {r for r, _ in ref_rows}
-        return ref_rows + [(r, e) for r, e in rows if r not in seen]
+        seen = {r for r, _, _ in ref_rows}
+        return ref_rows + [(r, e, h) for r, e, h in rows if r not in seen]
     except Exception as e:
         print(f"[db] torah_search failed: {e}", flush=True)
         return []
@@ -5838,10 +5874,19 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             # loose FTS hits should stay roughly as terse as before.
             budget = max(600, 2400 // len(torah_hits))
             focus = torah_focus_terms(user_text)
-            torah_lines = "\n".join(
-                f"{ref}: {torah_excerpt(en, user_text, budget, focus)}"
-                for ref, en in torah_hits
-            )
+            # The Hebrew is supplied only when the turn actually asks for it:
+            # it is expensive in tokens and useless to an English answer. But
+            # without it a "say it in Hebrew" turn sees English text alone and
+            # the model invents the Hebrew -- the original failure.
+            want_he = bool(_HE_CONTENT_RE.search(user_text)) or FORCED_LANG == "he"
+            _lines = []
+            for ref, en, he in torah_hits:
+                _lines.append(f"{ref}: {torah_excerpt(en, user_text, budget, focus)}")
+                if want_he and he:
+                    _lines.append(
+                        f"{ref} (Hebrew): "
+                        f"{torah_excerpt_he(he, en, user_text, budget, focus)}")
+            torah_lines = "\n".join(_lines)
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
 
     if needs_calendar(user_text):

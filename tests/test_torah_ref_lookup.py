@@ -63,7 +63,8 @@ def torah_db(tmp_path, zeev, monkeypatch):
          "I hereby forgive anyone who has angered me, or sinned against me."),
     ]
     con.executemany(
-        "INSERT INTO passages (source, ref, en, he) VALUES (?, ?, ?, '')", rows)
+        "INSERT INTO passages (source, ref, en, he) VALUES (?, ?, ?, ?)",
+        [(s_, r_, e_, "עברית " + r_) for s_, r_, e_ in rows])
     con.commit()
     con.close()
     monkeypatch.setattr(zeev, "TORAH_DB", path)
@@ -97,13 +98,13 @@ def test_two_char_words_still_form_a_bigram(zeev, torah_db):
     """"Ma Tovu" is why the tokenizer takes 2-char words. At a 3-char floor
     "ma" is dropped, one word remains, no bigram is formed and the lookup
     returns nothing at all."""
-    assert any("Ma Tovu" in ref for ref, _ in zeev.torah_search("what is ma tovu"))
+    assert any("Ma Tovu" in ref for ref, *_ in zeev.torah_search("what is ma tovu"))
 
 
 def test_body_text_search_still_works(zeev, torah_db):
     """The ref lookup leads but must not displace ordinary FTS retrieval."""
     hits = zeev.torah_search("who created the heaven and the earth")
-    assert any("Genesis" in ref for ref, _ in hits), hits
+    assert any("Genesis" in ref for ref, *_ in hits), hits
 
 
 def test_generic_words_do_not_hijack_the_lookup(zeev, torah_db):
@@ -128,14 +129,14 @@ def test_angelic_prayer_resolves_to_yihyu_lratzon(zeev, torah_db, query):
     which greets the ministering angels and is findable by its own name.
     """
     hits = zeev.torah_search(query)
-    refs = [r for r, _ in hits]
+    refs = [r for r, *_ in hits]
     assert any("Amidah, Concluding Passage" in r for r in refs), refs
 
 
 def test_alias_supplies_both_english_and_pointed_hebrew(zeev, torah_db):
     """Probing only the Weekday row leaves the model inventing the Hebrew,
     which is the exact failure the alias exists to stop."""
-    bodies = [en for _, en in zeev.torah_search("recite yihyu l'ratzon")]
+    bodies = [en for _, en, _he in zeev.torah_search("recite yihyu l'ratzon")]
     assert any("May the words of my mouth" in b for b in bodies), bodies
     assert any("יִהְיוּ לְרָצון" in b for b in bodies), bodies
 
@@ -149,7 +150,7 @@ def test_alias_hit_returns_alone(zeev, torah_db):
     torah_search's own FTS top-up; fixing only the former left it in.
     """
     hits = zeev.torah_search("recite yihyu l'ratzon")
-    assert all("Amidah, Concluding Passage" in r for r, _ in hits), hits
+    assert all("Amidah, Concluding Passage" in r for r, *_ in hits), hits
 
 
 def test_alias_does_not_fire_on_ordinary_speech(zeev, torah_db):
@@ -176,13 +177,13 @@ def test_bedtime_wins_over_the_ambiguous_angelic_alias(zeev, torah_db, query):
     """
     hits = zeev.torah_search(query)
     assert hits, f"{query!r} found nothing"
-    assert all("Shema al Hamita" in r for r, _ in hits), hits
+    assert all("Shema al Hamita" in r for r, *_ in hits), hits
 
 
 def test_bare_angelic_prayer_offers_both_candidates(zeev, torah_db):
     """Still ambiguous, so it supplies both rather than guessing a third time:
     picking one unilaterally is what produced the wrong answer."""
-    refs = [r for r, _ in zeev.torah_search("help me with the angelic prayer")]
+    refs = [r for r, *_ in zeev.torah_search("help me with the angelic prayer")]
     assert any("Shema al Hamita" in r for r in refs), refs
     assert any("Amidah, Concluding Passage" in r for r in refs), refs
 
@@ -251,3 +252,48 @@ def test_excerpt_marks_that_it_is_one(zeev):
     """The model must not read a mid-passage window as the passage's opening."""
     q = "help me with the angelic prayer"
     assert zeev.torah_excerpt(_LONG, q, 600, zeev.torah_focus_terms(q)).startswith("…")
+
+
+# ---------------------------------------------------------------------------
+# The Hebrew column
+# ---------------------------------------------------------------------------
+
+_LONG_HE = (
+    "אני מוחל לכל מי שהכעיס אותי. " * 120
+    + "בְּשֵׁם יְהֹוָה אֱלֺהֵי יִשְׂרָאֵל מִימִינִי מִיכָאֵל וּמִשְּׂמֹאלִי גַבְרִיאֵל "
+      "וּמִלְּפָנַי אוֹרִיאֵל וּמֵאֲחוֹרַי רְפָאֵל וְעַל רֹאשִי שְׁכִינַת אֵל. "
+    + "שִׁיר הַמַּעֲלוֹת אַשְׁרֵי כָּל יְרֵא יְהֹוָה. " * 20
+)
+
+
+def test_hebrew_is_anchored_by_the_english_match(zeev):
+    """The Hebrew cannot be located by keyword -- the query is English and the
+    text is pointed Hebrew -- so the window is projected from where the English
+    matched. en and he are parallel renderings of one passage, so the fraction
+    transfers even though the scripts do not.
+
+    Measured on the real Keri'at Shema al Hamita: angels at 86.5% of the
+    English and 86.4% of the Hebrew.
+    """
+    q = "help me with the angelic prayer"
+    ex = zeev.torah_excerpt_he(_LONG_HE, _LONG, q, 900, zeev.torah_focus_terms(q))
+    assert "מִיכָאֵל" in ex, ex[:120]
+    assert "גַבְרִיאֵל" in ex
+
+
+def test_short_hebrew_returned_whole(zeev):
+    assert zeev.torah_excerpt_he("קצר", "short", "q", 900, ()) == "קצר"
+
+
+def test_hebrew_falls_back_to_the_head_with_no_english_match(zeev):
+    ex = zeev.torah_excerpt_he(_LONG_HE, _LONG, "zzzz", 200, ())
+    assert ex.startswith("אני מוחל")
+
+
+def test_search_returns_the_hebrew_column(zeev, torah_db):
+    """Arity is 3 now. For most siddur rows the Hebrew lives ONLY here, so a
+    'say it in Hebrew' turn that never sees this column gets English text and
+    the model invents the Hebrew -- the original bug."""
+    hits = zeev.torah_search("say Shalom Aleichem")
+    assert hits and len(hits[0]) == 3, hits[0]
+    assert any(he for _, _, he in hits)

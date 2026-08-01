@@ -4296,7 +4296,13 @@ _TORAH_REF_ALIASES = [
     # (forgiveness prayer, Psalm 91) but NOT the angels invocation itself. The
     # passage is still the right one to supply; only a re-import with a higher
     # cap actually reaches those lines.
-    ((_BEDTIME_PRAYER_RE,), ["Shema al Hamita"]),
+    ((_BEDTIME_PRAYER_RE,), ["Shema al Hamita"],
+     # Focus terms. The full service is 11645 chars and the angels invocation
+     # -- "at my right Michael, at my left Gabriel, before me Uriel, behind me
+     # Raphael" -- sits at offset 10185, 87% in. No head slice reaches it, and
+     # the words Alex actually says ("bedtime", "angelic") appear nowhere in
+     # the English, so the excerpt cannot be centred from the query alone.
+     ("Michael", "at my right")),
 
     # Named outright -- resolves to the Amidah pair alone, no bedtime service.
     # The pair is probed together because Sefaria has no English for the
@@ -4305,7 +4311,8 @@ _TORAH_REF_ALIASES = [
     # the Hebrew, which is the failure being fixed.
     ((_YIHYU_ALIAS_RE,),
      ["Weekday, Shacharit, Amidah, Concluding Passage",
-      "Shabbat, Shacharit, Amidah, Concluding Passage"]),
+      "Shabbat, Shacharit, Amidah, Concluding Passage"],
+     ("May the words",)),
 
     # Bare "angelic prayer" stays ambiguous and deliberately probes BOTH
     # candidates rather than guessing a third time: the bedtime service, and
@@ -4315,7 +4322,8 @@ _TORAH_REF_ALIASES = [
     ((_ANGEL_PRAYER_RE,),
      ["Shema al Hamita",
       "Weekday, Shacharit, Amidah, Concluding Passage",
-      "Shabbat, Shacharit, Amidah, Concluding Passage"]),
+      "Shabbat, Shacharit, Amidah, Concluding Passage"],
+     ("Michael", "at my right", "May the words")),
 ]
 
 
@@ -4353,7 +4361,7 @@ def _torah_ref_lookup(con, query, k):
         return con.execute(sql, [f"%{c}%" for c in cands] + [k]).fetchall()
 
     aliases = []
-    for rxs, refs in _TORAH_REF_ALIASES:
+    for rxs, refs, _focus in _TORAH_REF_ALIASES:
         if any(rx.search(query) for rx in rxs):
             aliases = refs          # first match wins; do NOT accumulate
             break
@@ -4375,6 +4383,53 @@ def _torah_ref_lookup(con, query, k):
         if len(rows) >= k:
             break
     return rows[:k], False
+
+
+def torah_focus_terms(query):
+    """Focus terms for whichever alias `query` matched, or ()."""
+    for rxs, _refs, focus in _TORAH_REF_ALIASES:
+        if any(rx.search(query) for rx in rxs):
+            return focus
+    return ()
+
+
+def torah_excerpt(en, query, budget, focus=()):
+    """At most `budget` chars of `en`, centred on the part actually asked about.
+
+    A head slice is not good enough on a long passage. Keri'at Shema al Hamita
+    runs 11645 chars and its angels invocation sits at offset 10185 -- 87% in --
+    so every budget that starts at the beginning returns the forgiveness prayer
+    and silently omits the thing being asked for. That looked exactly like the
+    4000-char import truncation and is a second, independent cause.
+
+    Query words are tried first, then the alias's focus terms, because the
+    words people say are often absent from the translation: "bedtime" and
+    "angelic" appear nowhere in this passage's English.
+    """
+    en = en or ""
+    if len(en) <= budget:
+        return en
+    low = en.lower()
+    terms = [w for w in re.findall(r"[A-Za-z']{4,}", query or "")
+             if w.lower() not in _TORAH_REF_SKIP]
+    pos = -1
+    for t in list(terms) + list(focus):
+        i = low.find(t.lower())
+        if i >= 0:
+            pos = i
+            break
+    if pos < 0:
+        return en[:budget]
+    start = max(0, pos - budget // 3)
+    if start:
+        # Snap forward to a sentence boundary so the excerpt doesn't open
+        # mid-clause, but only if one is close -- otherwise keep the offset and
+        # risk an abrupt start rather than skipping past the match itself.
+        m = re.search(r"[.!?]\s", en[start:start + 200])
+        if m:
+            start += m.end()
+    chunk = en[start:start + budget]
+    return ("…" if start else "") + chunk + ("…" if start + budget < len(en) else "")
 
 
 def torah_search(query, k=3):
@@ -5778,8 +5833,14 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     elif needs_torah(user_text):
         torah_hits = torah_search(user_text)
         if torah_hits:
+            # Budget shared across hits rather than a flat 500 each: an alias
+            # returns a single exact passage and deserves the room, while three
+            # loose FTS hits should stay roughly as terse as before.
+            budget = max(600, 2400 // len(torah_hits))
+            focus = torah_focus_terms(user_text)
             torah_lines = "\n".join(
-                f"{ref}: {en[:500]}" for ref, en in torah_hits
+                f"{ref}: {torah_excerpt(en, user_text, budget, focus)}"
+                for ref, en in torah_hits
             )
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
 

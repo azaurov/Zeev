@@ -185,3 +185,69 @@ def test_bare_angelic_prayer_offers_both_candidates(zeev, torah_db):
     refs = [r for r, _ in zeev.torah_search("help me with the angelic prayer")]
     assert any("Shema al Hamita" in r for r in refs), refs
     assert any("Amidah, Concluding Passage" in r for r in refs), refs
+
+
+# ---------------------------------------------------------------------------
+# Excerpting a long passage
+# ---------------------------------------------------------------------------
+
+# Shape of the real Keri'at Shema al Hamita: 11645 chars with the angels
+# invocation at offset 10185 (87% in). Reproduced structurally so the test does
+# not need the 110MB DB or the network.
+_LONG = (
+    "I hereby forgive anyone who has angered me. " * 120
+    + "In the Name of Adonoy, God of Israel: at my right Michael, at my left "
+      "Gabriel, before me Uriel, behind me Raphael, and above my head, the "
+      "Presence of Almighty. "
+    + "A song of ascents. Fortunate are all who fear Adonoy. " * 20
+)
+
+
+def test_head_slice_would_miss_the_point(zeev):
+    """Pins WHY windowing exists. The old prompt used a flat en[:500]; every
+    budget that starts at the beginning returns the forgiveness prayer and
+    silently omits what was asked for -- indistinguishable from the 4000-char
+    import truncation, and a second independent cause of the same symptom."""
+    assert "Michael" not in _LONG[:2400]
+
+
+@pytest.mark.parametrize("budget", [2400, 800, 600])
+def test_excerpt_centres_on_the_angels(zeev, budget):
+    q = "help me with the angelic prayer"
+    ex = zeev.torah_excerpt(_LONG, q, budget, zeev.torah_focus_terms(q))
+    assert len(ex) <= budget + 2, len(ex)          # +2 for the ellipses
+    for name in ("Michael", "Gabriel", "Uriel", "Raphael"):
+        assert name in ex, f"{name} missing at budget {budget}"
+
+
+def test_focus_terms_are_needed_because_the_query_words_are_absent(zeev):
+    """"bedtime" and "angelic" appear nowhere in the English translation, so
+    the excerpt cannot be centred from the query alone."""
+    assert "bedtime" not in _LONG.lower()
+    assert "angelic" not in _LONG.lower()
+    assert zeev.torah_focus_terms("the bedtime angelic prayer")
+
+
+def test_query_words_win_over_focus_terms(zeev):
+    """Focus is the fallback, not an override: asking about another part of the
+    same passage must not be dragged to the angels."""
+    ex = zeev.torah_excerpt(_LONG, "what does it say about forgive",
+                            600, ("Michael",))
+    assert "forgive" in ex
+    assert "Michael" not in ex
+
+
+def test_short_passage_is_returned_whole(zeev):
+    assert zeev.torah_excerpt("Short passage.", "anything", 2400, ("Michael",)) \
+        == "Short passage."
+
+
+def test_no_match_falls_back_to_the_head(zeev):
+    ex = zeev.torah_excerpt(_LONG, "zzzz", 120, ())
+    assert ex.startswith("I hereby forgive")
+
+
+def test_excerpt_marks_that_it_is_one(zeev):
+    """The model must not read a mid-passage window as the passage's opening."""
+    q = "help me with the angelic prayer"
+    assert zeev.torah_excerpt(_LONG, q, 600, zeev.torah_focus_terms(q)).startswith("…")

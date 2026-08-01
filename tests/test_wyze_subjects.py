@@ -147,3 +147,53 @@ def test_empty_and_stage_direction_only_replies(zeev):
         "FOUND: no\n(Sarina's voice, calm and professional.)")
     assert seen is False
     assert desc == "", "a stage-direction-only description is spoken as silence"
+
+
+# ---------------------------------------------------------------------------
+# Stage labels vs the verdict
+# ---------------------------------------------------------------------------
+
+def test_speaker_label_does_not_block_the_verdict(zeev):
+    """Live 2026-07-31, bedroom-cam returned:
+
+        "Sarina: FOUND: no. I see a bed with rumpled grey bedding, a fan..."
+
+    _SUBJECT_FOUND_RE anchors to line start, so the label in front of it meant
+    a clean "no" parsed as None -- the unparseable case, which is the expensive
+    one. Stripping stage directions BEFORE matching fixes the verdict; it was
+    previously computed only as an emptiness test and thrown away.
+    """
+    seen, desc = zeev.parse_subject_sighting(
+        "Sarina: FOUND: no. I see a bed with rumpled grey bedding, a fan, "
+        "a bookshelf, and a wolf triptych wall hanging.")
+    assert seen is False, f"verdict misparsed as {seen}"
+    assert "FOUND" not in desc, desc
+    assert not desc.lower().startswith("sarina"), desc
+    assert "rumpled grey bedding" in desc
+
+
+def test_description_is_spoken_clean(zeev):
+    """`desc` is SPOKEN, not merely tested for emptiness -- the leak reached
+    Alex as "On the bedroom cam I can see: Sarina: FOUND: no. I see a bed..."
+    """
+    for raw in [
+        "Sarina: FOUND: yes. A grey cat is asleep on the chair.",
+        "(Sarina speaks in a composed, professional voice)\n\nFOUND: yes\n\n"
+        "A grey cat is asleep on the chair.",
+        "**Sarina:** FOUND: yes. A grey cat is asleep on the chair.",
+    ]:
+        seen, desc = zeev.parse_subject_sighting(raw)
+        assert seen is True, raw
+        assert "FOUND" not in desc, desc
+        assert "Sarina" not in desc, desc
+        assert "grey cat" in desc, desc
+
+
+def test_unparseable_still_returns_none(zeev):
+    """Stripping must not turn a genuinely format-ignoring reply into a "no" --
+    that folding is the mistake the three-state verdict exists to avoid."""
+    seen, desc = zeev.parse_subject_sighting(
+        "Sarina: I see a cluttered room filled with books and furniture.")
+    assert seen is None
+    assert "cluttered room" in desc
+    assert not desc.lower().startswith("sarina"), desc

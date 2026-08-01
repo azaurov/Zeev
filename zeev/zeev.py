@@ -6357,14 +6357,22 @@ def parse_subject_sighting(reply: str):
     next camera and then denies the sighting while holding the description that
     made it.
     """
-    text = (reply or "").strip()
+    # Stage directions come off BEFORE the verdict is matched, not merely as an
+    # emptiness test. _SUBJECT_FOUND_RE anchors to line start, so a speaker
+    # label sitting in front of it -- "Sarina: FOUND: no." -- stopped the
+    # verdict matching at all: a clean "no" was read as unparseable, which is
+    # the expensive case this function exists to avoid. The label then leaked
+    # into the spoken reply, live 2026-07-31: "On the bedroom cam I can see:
+    # Sarina: FOUND: no. I see a bed with rumpled grey bedding..."
+    text = _strip_stage_directions((reply or "").strip())
     if not text:
         return None, ""
     m = _SUBJECT_FOUND_RE.search(text)
     desc = (text[:m.start()] + text[m.end():]).strip() if m else text
     desc = re.sub(r"^[\s:.,\-–—]+", "", desc)
-    if not _strip_stage_directions(desc):
-        desc = ""
+    # Again: removing the verdict can pull a second label to the front, and
+    # this is the value that gets SPOKEN, not just tested for emptiness.
+    desc = _strip_stage_directions(desc)
     if not m:
         return None, desc
     return m.group(1).lower() == "yes", desc
@@ -9122,13 +9130,40 @@ def handle_transcript(ctx, transcript):
         threading.Thread(target=_bg_memorize, daemon=True).start()
 
     # Truncate to last complete sentence so TTS never gets a dangling fragment
-    last_complete = re.search(r'^(.*[.!?])\s*$', reply.strip(), re.DOTALL)
+    # NOT `^(.*[.!?])\s*$`: that anchor only matches a reply which ALREADY ends
+    # at a terminator, so a genuinely truncated one failed to match, speak_text
+    # fell back to the whole reply, and the dangling fragment was spoken -- the
+    # exact opposite of this comment. Dead since it was written: the log line
+    # below appears zero times in seven days of journal. Without `\s*$` the
+    # greedy `.*` runs through the LAST terminator and the fragment is dropped.
+    # A reply with no terminator at all is still spoken whole, matching the
+    # rule _stream_speak already follows.
+    _stripped = reply.strip()
+    last_complete = re.search(r'^(.*[.!?])', _stripped, re.DOTALL)
     speak_text = last_complete.group(1) if last_complete else reply
-    if speak_text != reply:
+    cut_short = speak_text != _stripped
+    if cut_short:
         print(f"[tts] truncated to last sentence ({len(speak_text)}/{len(reply)} chars)", flush=True)
 
-    # If LLM ended with "Want to hear more?", pre-generate the detail in background
     _WANT_MORE_RE = re.compile(r'want\s+to\s+hear\s+more\??\s*$', re.IGNORECASE)
+
+    # Rule 3 of the VOICE INTERFACE prompt asks for a "Want to hear more?" when
+    # a topic deserves one, but that is prompt compliance and the 8B routinely
+    # skips it -- so a reply that ran out of tokens simply STOPPED and the rest
+    # was never offered. Live 2026-07-31 the Hebrew prayer ended mid-phrase with
+    # nothing following it. A dropped dangling fragment is hard evidence the
+    # model was still talking, so the offer is made deterministically rather
+    # than left to the model to remember.
+    offer_appended = False
+    if cut_short and not _WANT_MORE_RE.search(speak_text):
+        speak_text = speak_text.rstrip() + " Want to hear more?"
+        offer_appended = True
+        # Session already holds `reply` (stored above, before truncation). Keep
+        # what was SAID and what is remembered in step: an affirmative re-enters
+        # this handler, and a history where Zeev never asked anything makes the
+        # answer read as a non-sequitur.
+        if ctx.session and ctx.session[-1].get("role") == "assistant":
+            ctx.session[-1]["content"] = speak_text
     if _WANT_MORE_RE.search(speak_text) and not ctx._speak_cancel.is_set():
         ctx._pending_detail_source[0] = transcript
         ctx._pending_detail_ready.clear()
@@ -9166,6 +9201,13 @@ def handle_transcript(ctx, transcript):
         print(f"[+{time.perf_counter()-t0:.1f}s] Speaking…", flush=True)
         print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
         ctx._progressive_speak(speak_text, voice=_LAST_VOICE)
+    elif offer_appended and not ctx._speak_cancel.is_set():
+        # The streaming path already spoke every complete sentence as it
+        # arrived and dropped the dangling fragment, so an offer appended to
+        # speak_text afterwards is never uttered -- it would exist only in the
+        # log and the history, and the follow-up listener below would then wait
+        # for an answer to a question the user never heard.
+        ctx._speak_device("Want to hear more?", _LAST_VOICE)
     print(f"[+{time.perf_counter()-t0:.1f}s] Done", flush=True)
 
     # Zeev just asked a question -- listen for the answer instead of making the

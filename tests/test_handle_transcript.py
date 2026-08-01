@@ -809,3 +809,77 @@ def test_ordinary_english_stays_terse(zeev, monkeypatch, ctx):
     tok = _capture_tok_limit(zeev, monkeypatch, ctx, "what's the weather like")
     assert tok is not None, "never reached the LLM"
     assert tok <= 200, f"ordinary chat inflated to {tok} tokens"
+
+
+# ---------------------------------------------------------------------------
+# "Want to hear more?" when the reply ran out of room
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    status_code = 200
+
+    def __init__(self, text, streaming=False):
+        self._text = text
+        # handle_transcript takes the streaming path only when resp.raw exists
+        # (`STREAM_TTS and getattr(resp, "raw", None) is not None`), so the
+        # attribute is what selects which branch this drives.
+        self.raw = object() if streaming else None
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._text}}]}
+
+
+def _run_llm_turn(zeev, monkeypatch, ctx, reply_text, streamed=False):
+    """Drive one LLM turn with a canned reply. streamed=True makes
+    _stream_speak return the text, mimicking STREAM_TTS=1 in production."""
+    monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: (_FakeResp(reply_text, streamed), None))
+    monkeypatch.setattr(zeev, "_groq_post",
+                        lambda *a, **k: (_FakeResp(reply_text, streamed), None))
+    if streamed:
+        ctx._stream_speak = lambda *a, **k: (
+            ctx.spoke.append(reply_text) or reply_text)
+    ctx._followup_listen = lambda: ""
+    zeev.handle_transcript(ctx, "tell me about the siddur")
+    return ctx
+
+
+def test_offer_is_appended_when_the_reply_was_cut_off(zeev, monkeypatch, ctx):
+    """Live 2026-07-31: the Hebrew prayer reply ended mid-phrase with an
+    unclosed quote and nothing followed it.
+
+    Rule 3 of the VOICE INTERFACE prompt asks the model to offer more, but that
+    is prompt compliance and the 8B skips it. A dropped dangling fragment is
+    hard evidence it was still talking, so the offer is deterministic.
+    """
+    _run_llm_turn(zeev, monkeypatch, ctx,
+                  "The first part is complete. But the second part runs out of ro")
+    assert any("Want to hear more?" in s for s in ctx.spoke), ctx.spoke
+    assert ctx.session[-1]["content"].endswith("Want to hear more?"), ctx.session[-1]
+
+
+def test_offer_is_spoken_on_the_streaming_path_too(zeev, monkeypatch, ctx):
+    """STREAM_TTS=1 is the default, and by this point the stream has already
+    spoken every complete sentence. Appending to speak_text alone would leave
+    the offer in the log only -- and the follow-up listener would then wait for
+    an answer to a question the user never heard."""
+    _run_llm_turn(zeev, monkeypatch, ctx,
+                  "The first part is complete. But the second runs out of ro",
+                  streamed=True)
+    assert any(s.strip() == "Want to hear more?" for s in ctx.spoke), ctx.spoke
+
+
+def test_no_offer_when_the_reply_finished_cleanly(zeev, monkeypatch, ctx):
+    """A complete reply must not get a spurious offer -- there is nothing held
+    back to deliver, and the follow-up listener would open the mic for nothing."""
+    _run_llm_turn(zeev, monkeypatch, ctx, "The siddur is the Jewish prayer book.")
+    assert not any("Want to hear more?" in s for s in ctx.spoke), ctx.spoke
+
+
+def test_model_supplied_offer_is_not_duplicated(zeev, monkeypatch, ctx):
+    """When the model does comply, the offer must not be appended twice."""
+    _run_llm_turn(zeev, monkeypatch, ctx,
+                  "The siddur is the Jewish prayer book. Want to hear more?")
+    spoken = " ".join(ctx.spoke)
+    assert spoken.lower().count("want to hear more") == 1, ctx.spoke

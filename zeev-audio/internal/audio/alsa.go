@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -97,6 +98,40 @@ func GetVolume() int {
 	return volume
 }
 
+// WM8960 "Speaker" is 0–127 in 1 dB steps: raw 121 = 0 dB, raw 127 = +6 dB, and
+// anything under ~48 sits below -73 dB, i.e. off. The old level*127/100 made the
+// slider linear in DECIBELS -- ~12.7 dB per 10% -- so the bottom third was
+// inaudible and each notch more than doubled loudness. Measured on the Pi
+// 2026-08-01: "40%" was -70 dB (silent), "90%" was -7 dB (merely normal).
+//
+// MUST stay in step with _pct_to_raw() in zeev.py: the Python fallback runs
+// whenever the daemon is down, and two different curves would mean the same
+// percentage produced audibly different volumes depending on which path set it.
+const (
+	wm8960Raw0dB = 121
+	volMinDB     = -40.0
+	volMaxDB     = 6.0
+)
+
+// pctToRaw converts a 0–100 volume percentage to a WM8960 Speaker raw value.
+func pctToRaw(pct int) int {
+	if pct <= 0 {
+		return 0 // true mute, not merely very quiet
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	db := volMinDB + float64(pct-1)*(volMaxDB-volMinDB)/99.0
+	raw := int(math.Round(db)) + wm8960Raw0dB
+	if raw < 0 {
+		raw = 0
+	}
+	if raw > 127 {
+		raw = 127
+	}
+	return raw
+}
+
 // SetVolume sets the system volume (0–100) via amixer and returns the clamped level.
 func SetVolume(level int) (int, error) {
 	if level < 0 {
@@ -106,11 +141,12 @@ func SetVolume(level int) (int, error) {
 		level = 100
 	}
 
-	// Try Master control first; fall back to card-specific Speaker.
+	// Try Master control first; fall back to card-specific Speaker. This card
+	// has no Master, so the fallback is in practice always the path taken.
 	cmd := exec.Command("amixer", "sset", "Master", fmt.Sprintf("%d%%", level))
 	if err := cmd.Run(); err != nil {
 		cmd2 := exec.Command("amixer", "-c", "wm8960soundcard", "sset", "Speaker",
-			strconv.Itoa(level*127/100))
+			strconv.Itoa(pctToRaw(level)))
 		if err2 := cmd2.Run(); err2 != nil {
 			return level, fmt.Errorf("amixer Master: %w; amixer Speaker: %v", err, err2)
 		}

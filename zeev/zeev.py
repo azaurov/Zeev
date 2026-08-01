@@ -778,8 +778,31 @@ _MUSIC_PROC       = None    # active mpg123 playback process
 # settings feed more of Zeev's own voice back into the wake detector; the
 # model.reset() + OWW_SETTLE fix addresses the root cause, but if false wakes
 # reappear at high volume this is the first knob to turn down.
-_STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "90"))))
+_STARTUP_VOLUME   = max(0, min(100, int(os.environ.get("ZEEV_VOLUME", "70"))))
 _VOLUME           = _STARTUP_VOLUME   # 0–100; applied via amixer
+
+# WM8960 "Speaker" is 0-127 in 1 dB steps: raw 121 = 0 dB, raw 127 = +6 dB, and
+# anything under ~48 sits below -73 dB, i.e. off. Mapping percent linearly onto
+# raw therefore made the slider linear in DECIBELS -- ~12.7 dB per 10%, more
+# than doubling perceived loudness per notch, with the bottom third of the
+# range inaudible. Measured on the Pi 2026-08-01: "40%" was -70 dB, which is
+# not quiet, it is silent; "90%" was -7 dB and read as merely normal.
+#
+# Percent is now linear in dB across a usable window: 1% = -40 dB, 100% = +6 dB
+# (the chip maximum). That puts a comfortable level near 70% and a genuinely
+# loud one near 90%, which is how a volume control reads to a person.
+_WM8960_RAW_0DB = 121
+_VOL_MIN_DB     = float(os.environ.get("ZEEV_VOL_MIN_DB", "-40"))
+_VOL_MAX_DB     = float(os.environ.get("ZEEV_VOL_MAX_DB", "6"))
+
+
+def _pct_to_raw(pct):
+    """Volume percent (0–100) → WM8960 Speaker raw value (0–127)."""
+    pct = max(0, min(100, int(pct)))
+    if pct <= 0:
+        return 0                      # true mute, not merely very quiet
+    db = _VOL_MIN_DB + (pct - 1) * (_VOL_MAX_DB - _VOL_MIN_DB) / 99.0
+    return max(0, min(127, int(round(db)) + _WM8960_RAW_0DB))
 
 # Quiet hours. A reboot at 3am announcing itself at 90% into a dark house is
 # the whole problem here -- and restarts are not rare, since every deploy is
@@ -1452,9 +1475,10 @@ def set_volume(level):
         capture_output=True,
     )
     if r.returncode != 0:
-        raw = round(level / 100 * 127)
+        # This card has no Master, so in practice this is always the path.
         subprocess.run(
-            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(raw)],
+            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker",
+             str(_pct_to_raw(level))],
             capture_output=True,
         )
     return level
@@ -9471,7 +9495,7 @@ def run_device_mode():
     # soon as it has finished, so the first real reply is at full volume.
     _quiet_greeting = ("--no-greeting" not in sys.argv) and _in_quiet_hours()
     _startup_pct = _QUIET_VOLUME if _quiet_greeting else _STARTUP_VOLUME
-    _startup_raw = round(_startup_pct / 100 * 127)
+    _startup_raw = _pct_to_raw(_startup_pct)
     try:
         subprocess.run(
             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(_startup_raw)],
@@ -10986,7 +11010,7 @@ def run_device_mode():
                     try:
                         subprocess.run(
                             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker",
-                             str(round(_STARTUP_VOLUME / 100 * 127))],
+                             str(_pct_to_raw(_STARTUP_VOLUME))],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
                         print(f"[audio] quiet-hours greeting done — volume back to "

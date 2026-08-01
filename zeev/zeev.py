@@ -1364,6 +1364,28 @@ def _strip_stage_directions(text):
     return text.strip()
 
 
+# Closing punctuation that may legitimately follow a sentence's terminator.
+# Without it a reply ending `...to you!"` looks TRUNCATED, because the greedy
+# match stops at the `!` and the trailing quote is left over. That is not a
+# cosmetic misread: finish_turn treats "truncated" as hard evidence the model
+# was cut off, so a COMPLETE reply got "Want to hear more?" appended and spoken,
+# had its stored history rewritten to the modified text, armed the follow-up
+# listener and burned an LLM call pre-generating a continuation. Observed live
+# 2026-08-01 19:07 on "(sung in harmony) "Happy birthday to you...!"" -- logged
+# as 113/114 chars, i.e. the single missing character was the closing quote.
+_SENTENCE_TAIL_RE = re.compile(r'^(.*[.!?][")\'\]”’»]*)', re.DOTALL)
+
+
+def _last_complete_sentence(text):
+    """Text up to and including its last complete sentence, or None.
+
+    Returns None when there is no terminator at all, which the caller reads as
+    "speak it whole" -- the same rule _stream_speak follows.
+    """
+    m = _SENTENCE_TAIL_RE.search(text)
+    return m.group(1) if m else None
+
+
 def _clean_for_tts(text, lang=None):
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = _strip_stage_directions(text)
@@ -9151,6 +9173,20 @@ _TURN_DEPTH = [0]
 # a loop the user cannot walk away from.
 _FOLLOWUP_MAX_DEPTH = 2
 
+# A pivot or a question after "yes" means the answer is not a bare yes. Live
+# 2026-08-01 19:07, "Yes, but can you sing in harmony together with Zeev?" hit
+# the affirmative regex on its first word, so the pre-generated continuation was
+# delivered and the actual question was never answered or even seen.
+_MORE_PIVOT_RE = re.compile(r"\b(but|however|actually|instead|rather|though)\b",
+                            re.IGNORECASE)
+
+
+def _plain_affirmative(text, yes_re):
+    """True for a bare "yes, go on" -- NOT for a yes carrying a new request."""
+    if not text or not yes_re.search(text):
+        return False
+    return not (_MORE_PIVOT_RE.search(text) or "?" in text)
+
 
 _QUESTION_TAIL_MAX = 80
 
@@ -9303,7 +9339,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         return
 
     # ── Pending detail expansion ──────────────────────────────────────────
-    if ctx._pending_detail_source[0] and ctx._MORE_YES_RE.search(transcript):
+    if ctx._pending_detail_source[0] and _plain_affirmative(transcript, ctx._MORE_YES_RE):
         if not ctx._pending_detail_ready.is_set():
             print(f"[+{time.perf_counter()-t0:.1f}s] waiting on pre-generated detail…", flush=True)
             ctx._pending_detail_ready.wait(timeout=8)
@@ -10132,8 +10168,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # A reply with no terminator at all is still spoken whole, matching the
     # rule _stream_speak already follows.
     _stripped = reply.strip()
-    last_complete = re.search(r'^(.*[.!?])', _stripped, re.DOTALL)
-    speak_text = last_complete.group(1) if last_complete else reply
+    speak_text = _last_complete_sentence(_stripped) or reply
     cut_short = speak_text != _stripped
     if cut_short:
         print(f"[tts] truncated to last sentence ({len(speak_text)}/{len(reply)} chars)", flush=True)
@@ -10211,15 +10246,21 @@ def handle_transcript(ctx, transcript, _depth=0):
             and not ctx._speak_cancel.is_set()
             and _depth < _FOLLOWUP_MAX_DEPTH):
         answer = ctx._followup_listen()
-        if answer and ctx._MORE_YES_RE.search(answer):
+        if _plain_affirmative(answer, ctx._MORE_YES_RE):
             # Re-enter with the answer. The pending-detail branch at the top
             # delivers it and clears the pending state.
             return handle_transcript(ctx, answer, _depth=_depth + 1)
-        if answer:
-            print("[followup] not an affirmative — dropping pending detail", flush=True)
         ctx._pending_detail[0] = None
         ctx._pending_detail_source[0] = None
         ctx._pending_detail_ready.clear()
+        # "No, what's the weather?" is not a yes, but it IS a question, and
+        # dropping it discarded the turn entirely -- Zeev asked, Alex answered,
+        # and nothing happened. Only a bare decline stays silent.
+        if answer and ("?" in answer or _MORE_PIVOT_RE.search(answer)):
+            print("[followup] not a plain yes — answering it as its own turn", flush=True)
+            return handle_transcript(ctx, answer, _depth=_depth + 1)
+        if answer:
+            print("[followup] not an affirmative — dropping pending detail", flush=True)
     elif _followup_turn(ctx, speak_text, _depth):
         # Any other question Zeev asked -- the answer becomes the next turn.
         return

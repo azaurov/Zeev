@@ -912,6 +912,53 @@ def get_battery():
         return _batt_state
 
 
+# Low battery: Zeev and Sarina ask to be plugged in. Above the 2% shutdown, far
+# enough that there is time to act on it.
+_LOW_BATTERY_PCT      = 10
+# Re-nag interval. Firing every poll (30s) would be two pleas a minute all the
+# way down to the shutdown, which is worse than not having the feature; firing
+# exactly once at 10% leaves eight silent percent before the device dies. Same
+# shape as start_health_monitor's cooldown.
+_LOW_BATTERY_COOLDOWN = 300
+
+
+def _should_plead_battery(level, charging, last_plea_ts, now,
+                          threshold=_LOW_BATTERY_PCT,
+                          cooldown=_LOW_BATTERY_COOLDOWN):
+    """Should the low-battery plea be spoken now?
+
+    Pure so it can be tested without the HAT -- the monitor that calls it lives
+    inside run_device_mode and cannot be imported.
+
+    `charging is None` means PiSugar was unreadable, and that pleads: the same
+    reading drives the 2% shutdown, and staying quiet because we cannot tell is
+    the wrong way to be wrong. Note also that the Pi's own PWR port bypasses the
+    PiSugar entirely, so a charger in the wrong port never sets `charging` -- the
+    plea naming the PiSugar port is doing real work there.
+    """
+    if level is None or level > threshold:
+        return False
+    if charging:
+        return False
+    return now - last_plea_ts >= cooldown
+
+
+# Paired Zeev/Sarina lines, same two-voice shape as _GOODNIGHT_LINES. Every pair
+# must actually ask Alex to plug the thing in -- two atmospheric lines where
+# neither states the request is the failure mode here. "percent" is spelled out
+# because this is spoken.
+_LOW_BATTERY_LINES = [
+    ("Alex, I'm down to {pct} percent. Could you plug me into the PiSugar port?",
+     "Please, Alex — the PiSugar cable, before I drop off mid-sentence."),
+    ("Alex, {pct} percent left. I'd rather not go quiet on you — power, please.",
+     "Plug him in, Alex. The PiSugar port, not the Pi's own one — that one doesn't charge."),
+    ("{pct} percent, Alex. I'm asking nicely: charge me.",
+     "I'm asking too, Alex. One cable into the PiSugar and we'll both stop nagging."),
+    ("Alex, my battery's at {pct} percent and falling. Please put me on the charger.",
+     "Don't let him run out, Alex — the PiSugar port. I'd miss the conversation."),
+]
+
+
 # ---------------------------------------------------------------------------
 # System health monitoring (temperature + load)
 # ---------------------------------------------------------------------------
@@ -11296,18 +11343,56 @@ def run_device_mode():
     threading.Thread(target=_wake_listener, daemon=True).start()
     start_health_monitor(lambda msg: _speak_device(f"Warning: {msg}."))
 
-    def _battery_shutdown_monitor():
-        _triggered = False
-        while not _triggered:
+    def _plead_for_charge(level):
+        """Both voices ask Alex to plug the device in.
+
+        Unsolicited speech, so it follows _announce_reminder's shape rather than
+        start_health_monitor's bare _speak_device: it waits for the device to be
+        free instead of talking over a live turn, and restores the prior state.
+        """
+        for _ in range(60):          # wait up to ~2 min for the device to be free
+            if _face_state in ("idle", "ready"):
+                break
+            time.sleep(2)
+        zeev_line, sarina_line = random.choice(_LOW_BATTERY_LINES)
+        pct = int(level)
+        zeev_line = zeev_line.format(pct=pct)
+        sarina_line = sarina_line.format(pct=pct)
+        print(f"[battery] plea at {pct}%: {zeev_line} / {sarina_line}", flush=True)
+        _screen_wake()
+        was_idle = _face_state == "idle"
+        _set_face("speaking", zeev_line)
+        board.set_rgb(*_LED_SPEAKING)
+        _speak_device(zeev_line, "daniel")
+        _set_face("speaking", sarina_line)
+        _speak_device(sarina_line, "sarina")
+        _go_idle() if was_idle else _go_ready()
+
+    def _battery_monitor():
+        last_plea = 0.0
+        while True:
             time.sleep(30)
             level, charging = get_battery()
+            # Shutdown is checked first and exits the loop: at 2% there is no
+            # room for the plea's up-to-2-minute wait for a free device.
             if level is not None and level <= 2 and not charging:
-                _triggered = True
                 print("[shutdown] Battery critical — shutting down.", flush=True)
                 _speak_device("Oh no, my time's up!")
                 subprocess.run(["sudo", "shutdown", "-h", "now"])
+                return
+            if charging:
+                # Clearing the latch is what re-arms the plea for the next
+                # unplug, rather than leaving it cooling down across a recharge.
+                last_plea = 0.0
+                continue
+            if _should_plead_battery(level, charging, last_plea, time.time()):
+                last_plea = time.time()
+                try:
+                    _plead_for_charge(level)
+                except Exception as e:
+                    print(f"[battery] plea failed: {e}", flush=True)
 
-    threading.Thread(target=_battery_shutdown_monitor, daemon=True).start()
+    threading.Thread(target=_battery_monitor, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
         _keepalive_stop.set()

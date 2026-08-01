@@ -45,3 +45,36 @@ def test_equal_bounds_disable_rather_than_mute_all_day(zeev, monkeypatch):
 
 def test_quiet_volume_is_below_normal(zeev):
     assert zeev._QUIET_VOLUME < zeev._STARTUP_VOLUME
+
+
+# ---------------------------------------------------------------------------
+# Greeting bucket
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hour,expected", [
+    (22, "night"), (23, "night"), (0, "night"), (2, "night"), (4, "night"),
+    (5, "morning"), (8, "morning"), (11, "morning"),
+    (12, "afternoon"), (17, "afternoon"),
+    (18, "evening"), (21, "evening"),
+])
+def test_time_of_day_buckets(zeev, hour, expected):
+    """"night" wraps midnight and so is tested first. The plain `hour < 12`
+    chain this replaced called 01:42 "morning" and greeted a dark house with
+    "Good morning, Alex." -- observed live."""
+    assert zeev._time_of_day(hour) == expected, hour
+
+
+def test_night_and_quiet_windows_differ_on_purpose(zeev):
+    """Quiet hours run to 08:00 because volume should stay down through early
+    morning; the greeting stops calling it night at 05:00, since being told
+    "it's late" at 07:00 is simply wrong."""
+    assert zeev._time_of_day(6) == "morning"
+    assert zeev._in_quiet_hours(6)
+
+
+def test_every_bucket_has_a_greeting(zeev):
+    """A missing key would raise KeyError inside the startup thread, which
+    would take out _greeting_done with it and leave the wake listener waiting
+    forever -- the device deaf, with a traceback nowhere near the cause."""
+    buckets = {zeev._time_of_day(h) for h in range(24)}
+    assert buckets == {"night", "morning", "afternoon", "evening"}

@@ -790,6 +790,27 @@ _QUIET_END    = max(0, min(23, int(os.environ.get("ZEEV_QUIET_END", "8"))))
 _QUIET_VOLUME = max(0, min(100, int(os.environ.get("ZEEV_QUIET_VOLUME", "40"))))
 
 
+def _time_of_day(hour=None):
+    """Bucket for the startup greeting: night / morning / afternoon / evening.
+
+    "night" wraps midnight, so it is tested first -- the plain `hour < 12`
+    chain this replaced called 01:42 "morning" and greeted a dark house with
+    "Good morning, Alex."
+
+    Deliberately NOT the same window as _in_quiet_hours (22:00-08:00): that one
+    governs volume and reasonably covers early morning, but being told "it's
+    late" at 07:00 would just be wrong. Night ends at 05:00, quiet at 08:00.
+    """
+    h = time.localtime().tm_hour if hour is None else hour
+    if h >= 22 or h < 5:
+        return "night"
+    if h < 12:
+        return "morning"
+    if h < 18:
+        return "afternoon"
+    return "evening"
+
+
 def _in_quiet_hours(hour=None):
     """True inside the nightly quiet window.
 
@@ -10920,9 +10941,11 @@ def run_device_mode():
     print(f"Press while recording to cancel & exit.")
     print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
-    _hour = time.localtime().tm_hour
-    _tod = "morning" if _hour < 12 else "afternoon" if _hour < 18 else "evening"
+    _tod = _time_of_day()
     _secretary_greetings = {
+        # Short on purpose: this one plays into a dark house, usually because a
+        # deploy restarted the service, and nobody asked for it.
+        "night": "It's late, Alex. Sarina here — I'll keep it down.",
         "morning": "Good morning, Alex. Sarina here, Zeev's secretary — all systems ready.",
         "afternoon": "Good afternoon, Alex. Sarina here — ready to assist.",
         "evening": "Good evening, Alex. Sarina here, ready when you are.",

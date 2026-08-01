@@ -297,3 +297,44 @@ def test_search_returns_the_hebrew_column(zeev, torah_db):
     hits = zeev.torah_search("say Shalom Aleichem")
     assert hits and len(hits[0]) == 3, hits[0]
     assert any(he for _, _, he in hits)
+
+
+# ---------------------------------------------------------------------------
+# Telling the model to actually USE the passage
+# ---------------------------------------------------------------------------
+
+def test_named_prayer_gets_a_recite_instruction(zeev, torah_db, monkeypatch):
+    """Live 2026-07-31: retrieval was already correct -- the angels invocation
+    WAS in the prompt -- and the 70B answered from memory anyway, opening with
+    the Shema.
+
+    A labelled block is not an instruction, and the VOICE INTERFACE rule
+    ("exactly 1-2 sentences") actively pushes toward a summary. The parsha path
+    has carried an explicit override for exactly this reason.
+    """
+    monkeypatch.setattr(zeev, "retrieve_semantic", lambda *a, **k: None)
+    monkeypatch.setattr(zeev, "retrieve_relevant", lambda *a, **k: None)
+    p = zeev._build_system_prompt("Help me with the Bedtime Angelic Prayer.")
+    assert "Relevant Torah/Talmud passages" in p
+    low = p.lower()
+    assert "verbatim" in low, "no recite instruction"
+    assert "do not summarize" in low
+    assert "overrides the 1-2 sentence limit" in low
+
+
+def test_named_prayer_always_gets_the_hebrew(zeev, torah_db, monkeypatch):
+    """Asking for a prayer by name is asking for the prayer, which is Hebrew --
+    even when the words "in Hebrew" are never spoken."""
+    monkeypatch.setattr(zeev, "retrieve_semantic", lambda *a, **k: None)
+    monkeypatch.setattr(zeev, "retrieve_relevant", lambda *a, **k: None)
+    p = zeev._build_system_prompt("Help me with the Bedtime Angelic Prayer.")
+    assert "(Hebrew)" in p, "Hebrew column not supplied"
+
+
+def test_ordinary_torah_question_gets_no_recite_override(zeev, torah_db, monkeypatch):
+    """The override is for named prayers only. A general question must stay
+    terse -- it is spoken aloud, and 900 tokens is minutes of talking."""
+    monkeypatch.setattr(zeev, "retrieve_semantic", lambda *a, **k: None)
+    monkeypatch.setattr(zeev, "retrieve_relevant", lambda *a, **k: None)
+    p = zeev._build_system_prompt("what does the Talmud say about honesty")
+    assert "overrides the 1-2 sentence limit" not in p.lower()

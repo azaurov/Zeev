@@ -5878,7 +5878,11 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             # it is expensive in tokens and useless to an English answer. But
             # without it a "say it in Hebrew" turn sees English text alone and
             # the model invents the Hebrew -- the original failure.
-            want_he = bool(_HE_CONTENT_RE.search(user_text)) or FORCED_LANG == "he"
+            # `focus` is non-empty only when an alias matched, i.e. the user
+            # named a specific prayer. Then the Hebrew always goes in: asking
+            # for a prayer by name is asking for the prayer, which is Hebrew.
+            want_he = (bool(focus) or FORCED_LANG == "he"
+                       or bool(_HE_CONTENT_RE.search(user_text)))
             _lines = []
             for ref, en, he in torah_hits:
                 _lines.append(f"{ref}: {torah_excerpt(en, user_text, budget, focus)}")
@@ -5888,6 +5892,24 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                         f"{torah_excerpt_he(he, en, user_text, budget, focus)}")
             torah_lines = "\n".join(_lines)
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
+            if focus:
+                # Retrieval was already working when this was added: live
+                # 2026-07-31 the angels invocation was in the prompt and the 70B
+                # answered from memory anyway, opening with the Shema. A labelled
+                # block is not an instruction, and the VOICE INTERFACE rule
+                # ("exactly 1-2 sentences") actively pushes toward a summary --
+                # so the named-prayer path needs the same explicit override the
+                # parsha path already has.
+                parts.append(
+                    "\n\n## Instruction: The user asked for a specific prayer by"
+                    " name and its actual text is quoted above, mid-passage."
+                    " Recite the lines they asked about verbatim from that text."
+                    " Do NOT summarize it, do NOT describe what the prayer is,"
+                    " and do NOT supply wording from memory — your recollection"
+                    " of this liturgy is unreliable and has produced invented"
+                    " Hebrew before. If Hebrew is quoted above, reproduce it"
+                    " exactly as written. This overrides the 1-2 sentence limit."
+                )
 
     if needs_calendar(user_text):
         _gcal_days = gcal_days_from_query(user_text)
@@ -9111,7 +9133,10 @@ def handle_transcript(ctx, transcript):
     if needs_parsha_reading(transcript):
         tok_limit = 1600  # room to recite several chapters
     elif needs_torah(transcript):
-        tok_limit = 350
+        # A named prayer is a recitation, not a summary: 350 tokens cannot hold
+        # the lines plus their pointed Hebrew, and a cap that tight is itself an
+        # instruction to summarize.
+        tok_limit = 900 if torah_focus_terms(transcript) else 350
     elif model_id in (MODELS["3"][0], MODELS["2"][0]):
         tok_limit = 160
     else:

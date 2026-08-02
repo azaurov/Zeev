@@ -61,7 +61,7 @@ def test_voices_take_turns_in_blocks(zeev):
     closes. Swapping every line chopped it into six short utterances instead of
     giving each persona a phrase to shape."""
     voices = [v for v, _ in zeev.birthday_duet_lines("Alex")]
-    assert set(voices) == {"daniel", "sarina"}, "both personas must sing"
+    assert set(voices) == {"daniel", zeev._DUET_SARINA_VOICE}, "both personas must sing"
     assert voices[0] == "daniel", "Zeev leads, as in the goodnight pair"
     assert voices[-1] == "daniel", "and Zeev finishes it off"
     assert any(a != b for a, b in zip(voices, voices[1:])), "they must hand over"
@@ -87,3 +87,20 @@ def test_a_duet_request_naming_no_song_is_not_assumed_to_be_birthday(zeev):
     Birthday, and answering an unspecified request with it would be a wrong
     answer confidently delivered, so it goes to the LLM instead."""
     assert not _fires(zeev, "Yes, but can you sing in harmony together with Zeev?")
+
+
+def test_sarina_sings_in_her_own_song_voice(zeev):
+    """Alex picked af_jessica for the song by ear. Scoped to the song only --
+    "sarina" everywhere else stays af_heart, so greetings and reminders are
+    unchanged."""
+    assert zeev._DUET_SARINA_KOKORO == "af_jessica"
+    voices = [v for v, _ in zeev.birthday_duet_lines("Alex")]
+    assert zeev._DUET_SARINA_VOICE in voices
+    assert "sarina" not in voices
+
+
+def test_the_song_voice_is_a_persona_key_not_a_kokoro_name(zeev):
+    """A raw Kokoro name works on the daemon path but reaches Orpheus verbatim
+    in the fallback, where no such voice exists -- a turn taken while the daemon
+    was down would 400 and drop to espeak."""
+    assert not zeev._DUET_SARINA_VOICE.startswith(("af_", "am_", "bf_", "bm_"))

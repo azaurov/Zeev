@@ -535,6 +535,21 @@ def _birthday_song_name(text):
     return "Alex"
 
 
+# Sarina sings the birthday song in af_jessica, not her usual af_heart -- Alex
+# chose it by ear from a live audition of all 15 English female Kokoro voices.
+#
+# It is a PERSONA KEY rather than the raw Kokoro name on purpose. Passing
+# "af_jessica" straight through does work on the daemon path (the voice mapper
+# falls through to the given name), but _speak_device's Orpheus fallback sets
+# `orpheus_voice = voice`, and Orpheus has no such voice -- so a turn taken while
+# the daemon was down would 400 and drop to espeak. A key maps on every path.
+#
+# Scoped to the song ONLY. "sarina" is untouched, so she still greets, answers
+# and reads reminders in af_heart.
+_DUET_SARINA_VOICE = "sarina_song"
+_DUET_SARINA_KOKORO = "af_jessica"
+
+
 def birthday_duet_lines(name="Alex"):
     """(voice, block) pairs: Zeev takes a verse, Sarina takes a verse, Zeev closes.
 
@@ -557,7 +572,7 @@ def birthday_duet_lines(name="Alex"):
     """
     return [
         ("daniel", f"Happy birthday to you. Happy birthday to you, {name}."),
-        ("sarina", f"Happy birthday, dear {name}. Happy birthday to you."),
+        (_DUET_SARINA_VOICE, f"Happy birthday, dear {name}. Happy birthday to you."),
         ("daniel", f"Many happy returns, {name} — from Sarina and me."),
     ]
 
@@ -11106,6 +11121,8 @@ def run_device_mode():
             daemon_voice = "am_adam"
         elif voice == "sarina":
             daemon_voice = "af_heart"
+        elif voice == _DUET_SARINA_VOICE:
+            daemon_voice = _DUET_SARINA_KOKORO
         else:
             daemon_voice = voice
 
@@ -11218,7 +11235,7 @@ def run_device_mode():
 
             # 3. Orpheus / OpenAI — WAV output via aplay
             orpheus_voice = voice
-            if voice == "sarina":
+            if voice in ("sarina", _DUET_SARINA_VOICE):
                 orpheus_voice = "autumn"
             wav = groq_tts(clean, voice=orpheus_voice) if (TTS_SERVER in ("auto", "orpheus") and lang == "en") else (
                   _openai_tts(clean, lang) if (TTS_SERVER == "openai" and lang == "en") else None)

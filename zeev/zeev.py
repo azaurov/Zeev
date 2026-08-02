@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import os
 import random
 import re
@@ -5347,7 +5348,9 @@ _GPS_RE = re.compile(
     r"what (city|country|state|region|timezone|zip|postal) (am i in|is this|are we in)|"
     r"gps (coordinates?|location|position)|current (location|position|coordinates?)|"
     r"locate (me|us|yourself)|find (my|our) location|"
-    r"what('?s| is) (my|our|the current) (location|position|address|city|country))\b",
+    r"what('?s| is) (my|our|the current) (location|position|address|city|country)|"
+    r"(what|which) (street|road|block) (am i|are we) on|what street is this|"
+    r"am i (at|near) home|are we (at|near) home)\b",
     re.IGNORECASE,
 )
 
@@ -5527,13 +5530,20 @@ def gps_locate() -> dict:
 
 
 def _reverse_geocode(lat: float, lon: float) -> dict:
-    """Reverse-geocode coordinates to city/region/country via Nominatim (OpenStreetMap).
-    Returns partial address dict or empty dict on failure.
+    """Reverse-geocode coordinates to city/region/country plus street/POI detail
+    via Nominatim (OpenStreetMap). Returns partial address dict or empty dict on failure.
+
+    zoom=18 (building level) is what surfaces `address.road` at all -- zoom=14
+    (the old value) never returns it, only suburb/city -- and `name` at that zoom
+    carries a POI label ("Main Plaza") when the fix sits on one, empty otherwise
+    (a bare building has no name). Verified against live Nominatim responses:
+    `city` is identical at zoom 14 vs 18, so raising it doesn't touch the
+    every-turn ambient block, only what's available for the street-level ask.
     """
     try:
         resp = requests.get(
             "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "json", "zoom": 14},
+            params={"lat": lat, "lon": lon, "format": "json", "zoom": 18, "addressdetails": 1},
             headers={"User-Agent": "Zeev-AI-Companion/1.0"},
             timeout=5,
         )
@@ -5547,10 +5557,105 @@ def _reverse_geocode(lat: float, lon: float) -> dict:
                 "countryCode": addr.get("country_code", "").upper(),
                 "zip": addr.get("postcode", ""),
                 "display_name": data.get("display_name", ""),
+                "road": addr.get("road", ""),
+                "neighbourhood": addr.get("neighbourhood") or addr.get("suburb", ""),
+                # A bare building has no name; a POI (plaza, cafe, park) does.
+                "poi": data.get("name", ""),
             }
     except Exception as e:
         print(f"[gps] reverse geocode failed: {e}", flush=True)
     return {}
+
+
+def _geocoded_location() -> dict:
+    """`gps_locate()`'s fix, reverse-geocoded once and cached back onto it.
+
+    All three call sites (prompt block, `/gps`, the refresh loop) used to gate
+    the Nominatim call on `not loc.get("city")` -- fine until the refresh loop
+    ran once, filled in `city`, and every later site stopped calling
+    `_reverse_geocode` at all, so `road`/`poi` (added after `city` already
+    worked) could never actually populate on an already-warm cache entry. The
+    gate is now "have we tried at all" (`_geocoded`), and a successful
+    enrichment is written back into `_gps_cache` so it's shared and not
+    re-fetched every turn.
+    """
+    loc = gps_locate()
+    if loc.get("method", "ip") != "ip" and loc.get("lat") is not None and "_geocoded" not in loc:
+        geo = _reverse_geocode(loc["lat"], loc["lon"])
+        loc = {**loc, **{k: v for k, v in geo.items() if v}, "_geocoded": True}
+        if _gps_cache.get("result") is not None:
+            _gps_cache["result"] = loc
+    return loc
+
+
+_VICINITY_MAX_ACC = 50   # metres; road/POI/home claims need at least this good a fix
+
+def _env_float(name: str, default: float | None) -> float | None:
+    """Parse a numeric .env value, or fall back rather than crash on a typo.
+
+    Runs at import (module-level reads below), same constraint as
+    `parse_subjects`: a stray character in a hand-edited `.env` on the Pi must
+    not stop the whole app from starting.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[gps] {name}={raw!r} is not a number, ignoring", flush=True)
+        return default
+
+
+_HOME_LAT = _env_float("ZEEV_HOME_LAT", None)
+_HOME_LON = _env_float("ZEEV_HOME_LON", None)
+_HOME_RADIUS = _env_float("ZEEV_HOME_RADIUS", 100.0)   # metres
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def vicinity_place(loc: dict) -> str:
+    """'at home' / 'near Main Plaza' / 'on Lincoln Street' / '' -- finer than
+    `ambient_place()`'s city/region on purpose, so it stays behind `needs_gps`
+    rather than going out on every turn.
+
+    Gated on `_VICINITY_MAX_ACC`: Nominatim returns the nearest road for ANY
+    coordinate regardless of fix quality, so an IP fix (~25km) or a poor
+    beacondb fix would otherwise name a street with no basis. Home is checked
+    first and wins outright -- "on Lincoln Street" is true but withholds the
+    one answer that's actually useful for a fix sitting in the driveway.
+
+    No `ZEEV_HOME_LAT`/`ZEEV_HOME_LON` configured means no home claim, ever --
+    never "not home", which would assert a negative from missing config alone.
+    """
+    lat, lon = loc.get("lat"), loc.get("lon")
+    acc = loc.get("accuracy")
+    # A missing accuracy must fail toward silence, not toward asserting a
+    # street/home claim with no known basis -- the opposite default of most
+    # fields in this module, where "or 0"/"" degrades gracefully.
+    if lat is None or lon is None or acc is None or acc > _VICINITY_MAX_ACC:
+        return ""
+    if _HOME_LAT is not None and _HOME_LON is not None:
+        if _haversine_m(lat, lon, _HOME_LAT, _HOME_LON) <= _HOME_RADIUS:
+            return "at home"
+    if loc.get("poi"):
+        return f"near {loc['poi']}"
+    if loc.get("road"):
+        # "approximately" because this is the one claim here without a firm
+        # basis like a configured home radius or a named POI -- just the
+        # nearest road to a fix that's still ±up-to-50m. The model restates
+        # prompt-block text as settled fact, so the hedge has to live in the
+        # words themselves rather than in a caveat it might drop.
+        return f"approximately on {loc['road']}"
+    return ""
 
 
 def gps_summary(loc: dict) -> str:
@@ -5558,6 +5663,9 @@ def gps_summary(loc: dict) -> str:
     if "error" in loc:
         return f"Location unavailable: {loc['error']}"
     parts = []
+    vicinity = vicinity_place(loc)
+    if vicinity:
+        parts.append(vicinity)
     if loc.get("city"):
         parts.append(loc["city"])
     if loc.get("regionName"):
@@ -5636,16 +5744,11 @@ def _gps_refresh_loop():
     time.sleep(20)      # let startup have the core
     while True:
         try:
-            loc = gps_locate()
+            # A WiFi fix carries no place name; the ambient block is nothing
+            # but place names, so resolve it here in the background rather
+            # than on a turn.
+            loc = _geocoded_location()
             if "error" not in loc:
-                # A WiFi fix carries no place name; the ambient block is nothing
-                # but place names, so resolve it here in the background rather
-                # than on a turn.
-                if not loc.get("city") and loc.get("lat") is not None:
-                    geo = _reverse_geocode(loc["lat"], loc["lon"])
-                    if geo:
-                        loc = {**loc, **{k: v for k, v in geo.items() if v}}
-                        _gps_cache["result"] = loc
                 print(f"[gps] fix: {ambient_place(loc) or 'unknown'} "
                       f"(±{int(loc.get('accuracy') or 0)}m via {loc.get('method')})",
                       flush=True)
@@ -7173,11 +7276,7 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         parts.append(f"\n\n## {_gcal_label}:\n{cal}")
 
     if needs_gps(user_text):
-        loc = gps_locate()
-        # For WiFi-triangulated fixes, enrich with a reverse-geocoded place name
-        if loc.get("method", "ip") != "ip" and not loc.get("city"):
-            geo = _reverse_geocode(loc["lat"], loc["lon"])
-            loc = {**loc, **{k: v for k, v in geo.items() if v}}
+        loc = _geocoded_location()
         parts.append(f"\n\n## Current location:\n{gps_summary(loc)}")
 
     # The reasoning model reaches for LaTeX and markdown unprompted -- a live
@@ -13151,13 +13250,10 @@ def main():
         if user_input.lower() == "/gps":
             aps = _wifi_scan_aps()
             print(f"{DIM}[locating... {len(aps)} APs visible]{RESET}", flush=True)
-            loc = gps_locate()
+            loc = _geocoded_location()
             if "error" in loc:
                 print(f"{DIM}Location unavailable: {loc['error']}{RESET}\n")
             else:
-                if loc.get("method", "ip") != "ip" and not loc.get("city"):
-                    geo = _reverse_geocode(loc["lat"], loc["lon"])
-                    loc = {**loc, **{k: v for k, v in geo.items() if v}}
                 print(f"{DIM}Location: {gps_summary(loc)}{RESET}")
                 if loc.get("query"):
                     print(f"{DIM}IP: {loc['query']}  ISP: {loc.get('isp', '?')}{RESET}")

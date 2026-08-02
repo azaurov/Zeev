@@ -2030,6 +2030,26 @@ def groq_stt(wav_bytes, prompt=None):
                               "whisper-large-v3-turbo", prompt=prompt, language=lang)
 
 
+# Whisper answers silence and room noise with confident, well-formed stock
+# phrases rather than an empty string -- overwhelmingly the closing lines of its
+# training data ("Thank you.", "Thanks for watching."). A `\w{2,}` noise guard
+# cannot catch these: they are perfectly good words. Only the phrase itself is
+# the tell, so the list is matched whole, never as a substring -- a real "thank
+# you for the reminder" must still get through.
+_WHISPER_HALLUCINATIONS = frozenset((
+    "thank you", "thanks", "you", "please", "goodbye", "bye",
+    "beep", "beep beep", "bing", "bong",
+    "thank you for watching", "thank you for listening",
+    "thanks for watching", "thanks for listening",
+    "i dont know", "i don't know", "",
+))
+
+
+def _is_whisper_hallucination(text):
+    """True if a transcript is one of Whisper's stock noise artefacts."""
+    return re.sub(r"[^\w\s]", "", (text or "").lower()).strip() in _WHISPER_HALLUCINATIONS
+
+
 # Phone-context Whisper prompt — biases transcription toward call vocabulary,
 # suppresses hallucinations on silence/ring tone.
 _FOLLOWUP_WHISPER_PROMPT = (
@@ -3386,12 +3406,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
         if not transcript or not re.search(r'\w{2,}', transcript):
             continue
         # Filter known Whisper hallucinations on hold music / ring tones
-        _hallu = re.sub(r'[^\w\s]', '', transcript.lower()).strip()
-        if _hallu in ("thank you", "thanks", "you", "please", "goodbye", "bye",
-                      "beep", "beep beep", "bing", "bong",
-                      "thank you for watching", "thank you for listening",
-                      "thanks for watching", "thanks for listening",
-                      "i dont know", "i don't know", ""):
+        if _is_whisper_hallucination(transcript):
             print(f"[call] Filtered hallucination: {transcript!r}", flush=True)
             continue
 
@@ -11454,7 +11469,16 @@ def run_device_mode():
         # Same noise-artifact guard the call loop uses (see bt_call_loop): a
         # spurious wake picks up room noise, and Whisper answers with confident
         # nonsense like "A A" -- which then became a real LLM turn.
-        if not follow_text or not follow_text.strip() or not re.search(r"\w{2,}", follow_text):
+        #
+        # It used to be only HALF that guard, despite the comment: the call loop
+        # also drops Whisper's stock noise phrases, and those are exactly what a
+        # silent room produces. Live 2026-08-02 15:13 a false wake transcribed as
+        # "Thank you.", which sails through \w{2,}, and Zeev answered "You're
+        # welcome, Alex." -- then embedded both halves into semantic memory,
+        # where a fabricated exchange can resurface in a later prompt as fact.
+        if (not follow_text or not follow_text.strip()
+                or not re.search(r"\w{2,}", follow_text)
+                or _is_whisper_hallucination(follow_text)):
             if follow_text and follow_text.strip():
                 print(f"[wake] discarded noise transcript: {follow_text.strip()!r}", flush=True)
             _set_face("error", "Didn't catch that")

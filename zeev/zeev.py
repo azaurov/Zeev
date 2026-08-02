@@ -495,6 +495,64 @@ _GOODNIGHT_LINES = [
      "Everything can wait until morning."),
 ]
 
+# ── Birthday duet ───────────────────────────────────────────────────────────
+# The second branch (after goodnight) where both personas speak, and the reason
+# it exists: asked twice on 2026-08-01 to "sing a birthday song together with
+# Zeev", the turn fell through to the 8B, which answered *alone* in one voice
+# while narrating "(sung in harmony)" -- describing a duet instead of
+# performing one.
+#
+# Gated to the first 70 chars (a request leads with it) and excluding
+# _TOOL_INTENT_RE, so "remind me to sing happy birthday to Leo at six" stays a
+# reminder. Placed above the music gate, or "sing me a birthday song" becomes a
+# YouTube search.
+_BIRTHDAY_SONG_RE = re.compile(
+    r"\b(sing|song|serenade|chant)\b[^.?!]{0,40}\bbirthday\b"
+    r"|\bbirthday\b[^.?!]{0,40}\b(sing|song|serenade|duet)\b",
+    re.IGNORECASE,
+)
+# Who the song is for. "with Zeev"/"with Sarina" is the DUET partner, never the
+# recipient, so a bare capitalised name is only taken after for/to. Whisper
+# capitalises names inconsistently, hence the case-insensitive fallback list of
+# household names.
+_BIRTHDAY_FOR_RE = re.compile(
+    r"\b(?:for|to)\s+(?!me\b|us\b|him\b|her\b|them\b|my\b|the\b|a\b)"
+    r"([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+)?)",
+)
+_BIRTHDAY_DUET_EXCLUDE = {"zeev", "ze'ev", "zaev", "sarina", "serena"}
+
+
+def _birthday_song_name(text):
+    """Who to sing to. Defaults to Alex -- it is his device."""
+    m = _BIRTHDAY_FOR_RE.search(text or "")
+    if m:
+        name = m.group(1).strip()
+        if name.lower() not in _BIRTHDAY_DUET_EXCLUDE:
+            return name
+    for who in _GOODNIGHT_HOUSEHOLD:
+        if re.search(rf"\b{re.escape(who)}\b", text or "", re.IGNORECASE):
+            return who
+    return "Alex"
+
+
+def birthday_duet_lines(name="Alex"):
+    """(voice, line) pairs, alternating Zeev and Sarina.
+
+    Real harmony is not possible: playback is one ALSA stream and the two voices
+    are separate synthesis calls, so they can only ever alternate. The lines are
+    written to trade off rather than overlap, and the last one is sung together
+    in the only sense available -- one after the other, naming both.
+    """
+    return [
+        ("daniel", "Happy birthday to you."),
+        ("sarina", "Happy birthday to you."),
+        ("daniel", f"Happy birthday, dear {name}."),
+        ("sarina", f"Happy birthday to you, {name}."),
+        ("daniel", "And many more."),
+        ("sarina", f"From both of us, {name} — Zeev and Sarina."),
+    ]
+
+
 _CAMERA_RE = re.compile(
     r"\bwhat (do you see|can you see|are you seeing|do you look at)\b"
     r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
@@ -9349,6 +9407,25 @@ def handle_transcript(ctx, transcript, _depth=0):
         # Both lines are recorded, but the tail must not re-speak them in a
         # single voice -- hence speak=False.
         finish_turn(ctx, f"{zeev_line} {sarina_line}", user_text=transcript,
+                    face=False, led=False, speak=False)
+        return
+
+    # ── Birthday duet ────────────────────────────────────────────────────
+    # Both voices, alternating. Sits with goodnight rather than below, because
+    # every gate under here would take it away: "sing" reaches the music branch
+    # as a YouTube search, and the LLM fallthrough answers in a single voice.
+    if (_BIRTHDAY_SONG_RE.search(transcript[:70])
+            and not _TOOL_INTENT_RE.search(transcript)):
+        who = _birthday_song_name(transcript)
+        lines = birthday_duet_lines(who)
+        print(f"[duet] birthday duet for {who}", flush=True)
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        for voice, line in lines:
+            if ctx._speak_cancel.is_set():
+                break        # the button interrupts a duet like any other reply
+            ctx._set_face("speaking", line)
+            ctx._speak_device(line, voice)
+        finish_turn(ctx, " ".join(line for _, line in lines), user_text=transcript,
                     face=False, led=False, speak=False)
         return
 

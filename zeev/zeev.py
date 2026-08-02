@@ -536,20 +536,29 @@ def _birthday_song_name(text):
 
 
 def birthday_duet_lines(name="Alex"):
-    """(voice, line) pairs, alternating Zeev and Sarina.
+    """(voice, block) pairs: Zeev takes a verse, Sarina takes a verse, Zeev closes.
 
-    Real harmony is not possible: playback is one ALSA stream and the two voices
-    are separate synthesis calls, so they can only ever alternate. The lines are
-    written to trade off rather than overlap, and the last one is sung together
-    in the only sense available -- one after the other, naming both.
+    BLOCKS, not line-by-line alternation, and NO pitch processing. Both were
+    learned the hard way on 2026-08-02:
+
+    - A real simultaneous-harmony version was built and rejected outright --
+      "horrible, like a poltergeist". Retuning TTS to a melody means shifting
+      pitch, and rubberband's default drags the formants along with it, which is
+      exactly what changes WHO a voice sounds like ("chipmunks instead of Zeev
+      and Sarina"). formant=preserved plus per-note tuning to within 25 cents
+      did not rescue it either. Pitched TTS does not sound like singing; it
+      sounds haunted. Do not try this again -- see the notes in CLAUDE.md.
+    - Swapping voice every single line chopped it into six short utterances.
+      Whole verses give each persona a continuous phrase to shape, and it is
+      three TTS calls instead of six.
+
+    The voices are their ordinary speaking selves, which is the point: Alex
+    recognises them.
     """
     return [
-        ("daniel", "Happy birthday to you."),
-        ("sarina", "Happy birthday to you."),
-        ("daniel", f"Happy birthday, dear {name}."),
-        ("sarina", f"Happy birthday to you, {name}."),
-        ("daniel", "And many more."),
-        ("sarina", f"From both of us, {name} — Zeev and Sarina."),
+        ("daniel", f"Happy birthday to you. Happy birthday to you, {name}."),
+        ("sarina", f"Happy birthday, dear {name}. Happy birthday to you."),
+        ("daniel", f"Many happy returns, {name} — from Sarina and me."),
     ]
 
 

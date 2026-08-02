@@ -56,12 +56,15 @@ def test_partner_names_are_never_the_recipient(zeev):
         assert zeev._birthday_song_name(text) not in ("Zeev", "Sarina")
 
 
-def test_both_voices_alternate(zeev):
-    lines = zeev.birthday_duet_lines("Alex")
-    voices = [v for v, _ in lines]
+def test_voices_take_turns_in_blocks(zeev):
+    """Blocks, not line-by-line: Zeev takes a verse, Sarina takes a verse, Zeev
+    closes. Swapping every line chopped it into six short utterances instead of
+    giving each persona a phrase to shape."""
+    voices = [v for v, _ in zeev.birthday_duet_lines("Alex")]
     assert set(voices) == {"daniel", "sarina"}, "both personas must sing"
-    assert all(a != b for a, b in zip(voices, voices[1:])), "they must alternate"
     assert voices[0] == "daniel", "Zeev leads, as in the goodnight pair"
+    assert voices[-1] == "daniel", "and Zeev finishes it off"
+    assert any(a != b for a, b in zip(voices, voices[1:])), "they must hand over"
 
 
 def test_the_name_is_actually_sung(zeev):
@@ -70,11 +73,12 @@ def test_the_name_is_actually_sung(zeev):
     assert not any("Alex" in line for _, line in lines)
 
 
-def test_both_personas_are_named_in_the_closing_line(zeev):
+def test_the_closing_line_speaks_for_both(zeev):
     """Sequential playback cannot overlap two voices, so "together" is carried
-    by the words -- the last line is the only place that is stated."""
-    _, last = zeev.birthday_duet_lines("Alex")[-1]
-    assert "Zeev" in last and "Sarina" in last
+    by the words. Zeev closes, so he is the one who says it is from both."""
+    voice, last = zeev.birthday_duet_lines("Alex")[-1]
+    assert voice == "daniel"
+    assert "Sarina" in last and "me" in last
 
 
 def test_a_duet_request_naming_no_song_is_not_assumed_to_be_birthday(zeev):

@@ -585,10 +585,220 @@ def birthday_duet_lines(name="Alex"):
     recognises them.
     """
     return [
-        ("daniel", f"Happy birthday to you. Happy birthday to you, {name}."),
-        (_DUET_SARINA_VOICE, f"Happy birthday, dear {name}. Happy birthday to you."),
-        ("daniel", f"Many happy returns, {name} — from Sarina and me."),
+        ("daniel", f"{name}! It's your birthday! Happy birthday to you!"),
+        (_DUET_SARINA_VOICE, f"Happy birthday, dear {name}! Go on, make a wish!"),
+        ("daniel", f"Many happy returns! Have a wonderful day, from Sarina and me!"),
     ]
+
+
+# --- The jazz bed --------------------------------------------------------
+#
+# A rendered backing track under the (untouched) Orpheus vocals. The vocals are
+# never processed for pitch -- that is the lesson of the singing attempt, and
+# the whole reason this works: only the accompaniment is synthesised.
+#
+# Settings below are Alex's, chosen by ear over several passes on the device.
+# Every one of them was a real decision, so don't "tidy" them:
+#   BPM 132       medium swing, and near the 131 measured off his reference clip
+#   gain 0.26     the duet is the point; the trio sits behind it
+#   0.92/0.92/1.0 first two verses eased off, the last at full speed to close
+_DUET_BPM        = float(os.environ.get("DUET_BPM", "132"))
+_DUET_BEAT_GAIN  = float(os.environ.get("DUET_BEAT_GAIN", "0.26"))
+# atempo changes DURATION only and leaves pitch alone, so unlike a pitch shift
+# it cannot alter who the voice sounds like.
+_DUET_VERSE_TEMPO = [float(x) for x in
+                     os.environ.get("DUET_VERSE_TEMPO", "0.92,0.92,1.0").split(",")]
+_DUET_SR    = 24000
+_DUET_SWING = 2.0 / 3.0          # the offbeat sits 2/3 through the beat
+_DUET_CACHE = BASE_DIR / "data" / "duet_cache"
+
+# I - VI7 - ii7 - V7. A turnaround loops indefinitely and stays consonant under
+# speech, which carries no fixed pitch of its own to clash with.
+_DUET_WALK = [
+    ("Fmaj7", [174.61, 196.00, 220.00, 261.63]),
+    ("D7",    [293.66, 261.63, 220.00, 185.00]),
+    ("Gm7",   [196.00, 220.00, 233.08, 293.66]),
+    ("C7",    [261.63, 233.08, 220.00, 196.00]),
+]
+_DUET_COMP = {"Fmaj7": [349.23, 440.00, 523.25], "D7": [370.00, 440.00, 587.33],
+              "Gm7":   [349.23, 466.16, 587.33], "C7": [329.63, 466.16, 523.25]}
+
+
+def _duet_jazz_bed(seconds, np):
+    """Ride, hi-hat, walking bass and comping stabs.
+
+    Voiced for the Whisplay's tiny driver, not for a studio: nothing below
+    ~150 Hz survives on it, so the "bass" is deliberately an octave above a
+    real upright -- a true bass line would be inaudible while still eating the
+    headroom the voices need. The ride is built from inharmonic partials plus a
+    noise shimmer because a cymbal made of filtered white noise reads as hiss.
+    """
+    sr, beat = _DUET_SR, 60.0 / _DUET_BPM
+    bar = 4 * beat
+    buf = np.zeros(int(seconds * sr) + sr)
+
+    def env(n, attack, decay, power=2.0):
+        t = np.arange(n) / sr
+        return np.clip(t / max(attack, 1e-6), 0, 1) * np.exp(-t / decay) ** power
+
+    def noise_band(dur, lo, hi, decay, seed):
+        n = int(dur * sr)
+        X = np.fft.rfft(np.random.default_rng(seed).standard_normal(n))
+        fr = np.fft.rfftfreq(n, 1 / sr)
+        X[(fr < lo) | (fr > hi)] = 0
+        return np.fft.irfft(X, n) * env(n, 0.001, decay)
+
+    n = int(0.45 * sr)
+    t = np.arange(n) / sr
+    ride = (sum(np.sin(2 * np.pi * f * t) for f in (3140, 4180, 5290, 6730, 8110)) / 5 * 0.55
+            + noise_band(0.45, 5000, sr / 2, 0.16, 23) * 0.45) * env(n, 0.001, 0.16, 1.0)
+    foot = noise_band(0.08, 4000, 9000, 0.012, 31)
+
+    def pluck(freq, dur):
+        m = int(dur * sr)
+        tt = np.arange(m) / sr
+        return (np.sin(2 * np.pi * freq * tt) + 0.32 * np.sin(2 * np.pi * 2 * freq * tt)
+                + 0.12 * np.sin(2 * np.pi * 3 * freq * tt)) * env(m, 0.004, dur * 0.42, 1.2)
+
+    def stab(freqs):
+        m = int(0.26 * sr)
+        tt = np.arange(m) / sr
+        return (sum(np.sin(2 * np.pi * f * tt) + 0.25 * np.sin(2 * np.pi * 2 * f * tt)
+                    for f in freqs) / len(freqs)) * env(m, 0.006, 0.10, 1.4)
+
+    def place(sig, at, gain):
+        i = int(at * sr)
+        j = min(len(buf), i + len(sig))
+        if i < len(buf):
+            buf[i:j] += sig[:j - i] * gain
+
+    for b in range(int(seconds / bar) + 1):
+        t0 = b * bar
+        chord, walk = _DUET_WALK[b % len(_DUET_WALK)]
+        for k in range(4):
+            tk = t0 + k * beat
+            place(ride, tk, 0.5 if k % 2 == 0 else 0.38)
+            if k in (1, 3):
+                place(ride, tk + beat * _DUET_SWING, 0.30)   # the "ding-a"
+                place(foot, tk, 0.42)                        # hat on 2 and 4
+            place(pluck(walk[k], beat * 0.92), tk, 0.55)
+        place(stab(_DUET_COMP[chord]), t0 + beat * (1 + _DUET_SWING), 0.24)
+        if b % 2 == 1:
+            place(stab(_DUET_COMP[chord]), t0 + beat * (3 + _DUET_SWING), 0.20)
+    return buf[:int(seconds * sr)]
+
+
+def _duet_decode(path, np):
+    """Decode via ffmpeg, never via the WAV header.
+
+    Groq Orpheus returns a streaming-style WAV whose header declares a bogus
+    frame count, so wave.readframes(getnframes()) tries to allocate gigabytes
+    and dies with MemoryError on a 512 MB Pi.
+    """
+    raw = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", path, "-f", "s16le",
+         "-ac", "1", "-ar", str(_DUET_SR), "pipe:1"],
+        check=True, stdout=subprocess.PIPE, timeout=120).stdout
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768
+
+
+def render_birthday_duet(name="Alex"):
+    """Mix the Orpheus duet over the jazz bed. Returns a WAV path, or None.
+
+    Cached per (name, wording, settings): the render costs three Orpheus calls
+    plus a few seconds of DSP, which is far too slow to sit inside a voice turn
+    more than once. Returning None is a normal outcome -- no numpy, no ffmpeg,
+    Orpheus rate-limited -- and the caller just speaks the duet plainly instead.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    if not shutil.which("ffmpeg"):
+        return None
+    lines = birthday_duet_lines(name)
+    sig = hashlib.sha1(
+        f"{lines}|{_DUET_BPM}|{_DUET_BEAT_GAIN}|{_DUET_VERSE_TEMPO}".encode()).hexdigest()[:10]
+    _DUET_CACHE.mkdir(parents=True, exist_ok=True)
+    out = _DUET_CACHE / f"duet_{re.sub(r'[^a-z0-9]+', '', name.lower())}_{sig}.wav"
+    if out.exists():
+        return str(out)
+
+    beat = 60.0 / _DUET_BPM
+    bar = 4 * beat
+    blocks = []
+    for i, (voice, text) in enumerate(lines):
+        wav = groq_tts(text, voice=_ORPHEUS_FIRST.get(voice, voice))
+        if not wav:
+            print("[duet] Orpheus unavailable — plain duet instead", flush=True)
+            return None
+        src = _DUET_CACHE / f"_blk{i}_{sig}.wav"
+        src.write_bytes(wav)
+        rate = _DUET_VERSE_TEMPO[i] if i < len(_DUET_VERSE_TEMPO) else 1.0
+        if abs(rate - 1.0) > 0.01:
+            slow = _DUET_CACHE / f"_slow{i}_{sig}.wav"
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+                            "-af", f"atempo={rate:.3f}", "-ar", str(_DUET_SR),
+                            "-ac", "1", str(slow)], check=True, timeout=120)
+            blocks.append(_duet_decode(str(slow), np))
+            slow.unlink(missing_ok=True)
+        else:
+            blocks.append(_duet_decode(str(src), np))
+        src.unlink(missing_ok=True)
+
+    # Two bars of intro so the swing establishes, then each verse on its own
+    # downbeat, padded to whole bars so nothing drifts against the beat.
+    starts, t = [], 2 * bar
+    for x in blocks:
+        starts.append(t)
+        t += float(np.ceil((len(x) / _DUET_SR) / bar) * bar)
+    total = t + bar
+
+    mix = _duet_jazz_bed(total, np) * _DUET_BEAT_GAIN
+    for x, at in zip(blocks, starts):
+        i = int(at * _DUET_SR)
+        mix[i:i + len(x)] += x
+    peak = float(np.max(np.abs(mix)))
+    if peak > 0:
+        mix = mix / peak * 0.92
+    with wave.open(str(out), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(_DUET_SR)
+        w.writeframes((mix * 32767).astype(np.int16).tobytes())
+    print(f"[duet] rendered {out.name} ({total:.1f}s, {_DUET_BPM:.0f} BPM)", flush=True)
+    return str(out)
+
+
+# Tracked so the button can cut the song off like any other reply -- the
+# duet plays as one long file, so without this it would be uninterruptible.
+_duet_proc = None
+
+
+def play_duet_wav(path, adev):
+    """Play the rendered duet on `adev`. Returns True if it actually played."""
+    global _duet_proc
+    try:
+        cmd = ["aplay", "-D", adev, "-q", str(path)]
+        if _BT_AUDIO_DEV and shutil.which("ffmpeg"):
+            # BlueALSA needs the negotiated format exactly; pipe through ffmpeg.
+            ff = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "quiet", "-i", str(path), "-f", "s16le",
+                 "-ar", str(_BT_RATE), "-ac", str(_BT_CHANNELS), "pipe:1"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            p = subprocess.Popen(
+                ["aplay", "-D", adev, "-f", "S16_LE", "-r", str(_BT_RATE),
+                 "-c", str(_BT_CHANNELS), "-q", "-"],
+                stdin=ff.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ff.stdout.close()
+        else:
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _duet_proc = p
+        p.wait(timeout=180)
+        return True
+    except Exception as e:
+        print(f"[duet] playback failed: {e}", flush=True)
+        return False
+    finally:
+        _duet_proc = None
 
 
 _CAMERA_RE = re.compile(
@@ -9458,6 +9668,19 @@ def handle_transcript(ctx, transcript, _depth=0):
         lines = birthday_duet_lines(who)
         print(f"[duet] birthday duet for {who}", flush=True)
         ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        ctx._set_face("speaking", f"Happy birthday, {who}!")
+        # The rendered version sings over a jazz bed. It needs numpy, ffmpeg and
+        # a reachable Orpheus, so None is an ordinary outcome and the plain
+        # spoken duet below is a real fallback, not an error path.
+        song = None
+        try:
+            song = render_birthday_duet(who)
+        except Exception as e:
+            print(f"[duet] render failed: {e}", flush=True)
+        if song and play_duet_wav(song, bt_audio_dev()):
+            finish_turn(ctx, " ".join(line for _, line in lines), user_text=transcript,
+                        face=False, led=False, speak=False)
+            return
         for voice, line in lines:
             if ctx._speak_cancel.is_set():
                 break        # the button interrupts a duet like any other reply
@@ -10824,6 +11047,13 @@ def run_device_mode():
                 _audio.speak_stop()
             except Exception as e:
                 print(f"[tts] daemon speak_stop failed: {e}", flush=True)
+        # The duet plays as one long file outside the _tts_p* pair, so without
+        # this the button could not cut the song off.
+        if _duet_proc:
+            try:
+                _duet_proc.kill()
+            except Exception:
+                pass
         for p in (_tts_p2, _tts_p1):
             if p:
                 try:

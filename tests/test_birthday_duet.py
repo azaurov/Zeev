@@ -120,3 +120,55 @@ def test_the_song_voice_is_a_persona_key_not_a_kokoro_name(zeev):
     in the fallback, where no such voice exists -- a turn taken while the daemon
     was down would 400 and drop to espeak."""
     assert not zeev._DUET_SARINA_VOICE.startswith(("af_", "am_", "bf_", "bm_"))
+
+
+# --- the jazz bed ----------------------------------------------------------
+
+def test_lines_are_exclamatory(zeev):
+    """Orpheus takes its energy from punctuation -- full stops read level and
+    closing, exclamations lift. The wording was chosen by ear against a
+    flatter version of the same lines."""
+    for _, line in zeev.birthday_duet_lines("Alex"):
+        assert "!" in line
+
+
+def test_settled_render_parameters(zeev):
+    """Every one of these was chosen by ear over several passes on the device;
+    they are decisions, not defaults."""
+    assert zeev._DUET_BPM == 132          # medium swing, near the reference clip
+    assert zeev._DUET_BEAT_GAIN == 0.26   # the duet is the point, jazz sits behind
+    assert zeev._DUET_VERSE_TEMPO == [0.92, 0.92, 1.0]
+
+
+def test_verse_tempo_never_touches_pitch(zeev):
+    """atempo changes duration only. A pitch shift here would undo the voices
+    exactly as the abandoned singing build did."""
+    src = __import__("inspect").getsource(zeev.render_birthday_duet)
+    assert "atempo" in src
+    assert "rubberband" not in src and "asetrate" not in src
+
+
+def test_render_degrades_to_none_without_ffmpeg(zeev, monkeypatch):
+    """None is an ordinary outcome -- the caller speaks the duet plainly."""
+    monkeypatch.setattr(zeev.shutil, "which", lambda *a, **k: None)
+    assert zeev.render_birthday_duet("Alex") is None
+
+
+def test_render_returns_none_when_orpheus_is_unavailable(zeev, monkeypatch, tmp_path):
+    """A 429 must not break the song, only downgrade it."""
+    monkeypatch.setattr(zeev, "_DUET_CACHE", tmp_path)
+    monkeypatch.setattr(zeev.shutil, "which", lambda *a, **k: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(zeev, "groq_tts", lambda *a, **k: None)
+    assert zeev.render_birthday_duet("Alex") is None
+
+
+def test_jazz_bed_is_synthesised_at_the_right_length(zeev):
+    np = pytest.importorskip("numpy")
+    bed = zeev._duet_jazz_bed(4.0, np)
+    assert len(bed) == int(4.0 * zeev._DUET_SR)
+    assert float(np.max(np.abs(bed))) > 0.05, "the bed must actually contain audio"
+
+
+def test_swing_is_a_triplet_feel(zeev):
+    """Straight eighths with a jazz kit still sound like rock."""
+    assert abs(zeev._DUET_SWING - 2 / 3) < 1e-9

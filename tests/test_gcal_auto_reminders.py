@@ -459,3 +459,62 @@ def test_birthday_name_extraction(zeev, title, name):
     and fell through to reading titles verbatim. The apostrophe stays REQUIRED:
     make it optional and "Mail out bday" yields the person "Mail out"."""
     assert zeev._gcal_birthday_name(title) == name
+
+
+# --- digest must track the calendar, not the clock -------------------------
+
+def _bday_at(name, date_obj):
+    return _allday(f"{name}'s Birthday", date_obj.isoformat(), id=name,
+                   eventType="birthday")
+
+
+def test_a_fired_group_is_not_reissued_for_its_remaining_member(scan_db, monkeypatch):
+    """Live 2026-08-02: the 09:00 bucket announced "Two birthdays today:
+    Sabrina Escalante and Nathan Is. And tomorrow: RJ Megesi", then the 09:09
+    scan announced "RJ Megesi's Birthday is tomorrow" all over again.
+
+    Sabrina and Nathan had dropped out of the bucket's digest the moment their
+    own 9 AM passed, minting a new key for the same bucket -- membership drifted
+    with the CLOCK rather than with the calendar. RJ was announced twice.
+    """
+    z = scan_db
+    today = dt.date.today()
+    ev = [_bday_at("Sabrina", today), _bday_at("Nathan", today),
+          _bday_at("RJ", today + dt.timedelta(days=1))]
+    monkeypatch.setattr(z, "gcal_events", lambda *a, **k: (ev, False))
+
+    at = lambda h, m: dt.datetime.combine(today, dt.time(h, m)).timestamp()
+    assert z.gcal_scan_once(now=at(8, 50))[0] > 0
+    spoken = [r["text"] for r in z.due_reminders(now=at(9, 0) + 30)]
+    assert any("And tomorrow: RJ" in t for t in spoken), spoken
+
+    # Every later scan of the same unchanged calendar must be a no-op.
+    for h, m in ((9, 9), (9, 39), (14, 0), (23, 30)):
+        assert z.gcal_scan_once(now=at(h, m)) == (0, 0, 0), f"churn at {h}:{m:02d}"
+        again = [r["text"] for r in z.due_reminders(now=at(h, m))]
+        assert not any("RJ" in t for t in again), f"RJ re-announced at {h}:{m:02d}: {again}"
+
+    # RJ's own day-of reminder is still pending for tomorrow morning.
+    assert any("RJ's Birthday is today." == r["text"] for r in z.list_reminders())
+
+
+def test_bucket_key_is_stable_all_day(zeev):
+    """The key is what stops a re-announcement, so pin it directly."""
+    today = dt.date.today()
+    ev = [_bday_at("Sabrina", today), _bday_at("Nathan", today),
+          _bday_at("RJ", today + dt.timedelta(days=1))]
+    at = lambda h, m: dt.datetime.combine(today, dt.time(h, m)).timestamp()
+    keys = [frozenset(k for k, _, _, _ in zeev.gcal_plan_all(ev, at(h, m), set()))
+            for h, m in ((8, 50), (9, 9), (14, 0), (23, 30))]
+    morning = keys[0]
+    for later in keys[1:]:
+        assert later <= morning, "a new key appeared as the day progressed"
+
+
+def test_a_started_event_gets_no_lead(zeev):
+    """_gcal_due_for_lead must reject an event already under way -- otherwise a
+    passed birthday still contributes a clamped due and announces itself."""
+    now = time.time()
+    assert zeev._gcal_due_for_lead(now - 60, 1440, now) is None
+    assert zeev._gcal_due_for_lead(now - 60, 0, now) is None
+    assert zeev._gcal_due_for_lead(now + 7200, 60, now) is not None

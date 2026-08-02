@@ -5613,6 +5613,8 @@ def _gcal_due_for_lead(start_ts, lead, now):
     event found on a cold start would be a monologue -- so only genuinely
     imminent ones are pulled forward.
     """
+    if start_ts <= now:
+        return None          # already begun: no lead can still lead it
     due = start_ts - lead * 60
     if due > now:
         return due
@@ -5725,7 +5727,11 @@ def gcal_plan_all(events, now, routine_titles=None):
         if (gcal_event_category(e, routine_titles) == "birthday"
                 and "dateTime" not in e.get("start", {})):
             start_ts, _ = gcal_event_start(e)
-            if start_ts is not None and start_ts > now:
+            if start_ts is not None:
+                # NOT filtered to start_ts > now. A birthday whose 9 AM anchor
+                # has already passed today still belongs to its bucket's
+                # membership -- see the digest note below. It contributes no
+                # due, because _gcal_due_for_lead rejects a started event.
                 day = _dt.datetime.fromtimestamp(start_ts).date().isoformat()
                 groups.setdefault((day, start_ts), []).append(e)
             continue
@@ -5737,9 +5743,6 @@ def gcal_plan_all(events, now, routine_titles=None):
     buckets = {}
     for (day, start_ts), evs in groups.items():
         for lead in _GCAL_LEADS["birthday"]:
-            due = _gcal_due_for_lead(start_ts, lead, now)
-            if due is None:
-                continue
             # Bucket and key on the SCHEDULED time, never the clamped due. A
             # pulled-forward reminder has due == now, so keying on it mints a
             # new key every scan: the old row is pruned, a fresh one created and
@@ -5748,18 +5751,36 @@ def gcal_plan_all(events, now, routine_titles=None):
             # to be given the same stability.
             sched = round(start_ts - lead * 60)
             b = buckets.setdefault(sched, {"today": [], "tomorrow": [], "ids": [],
-                                           "start": start_ts, "due": due})
+                                           "start": start_ts, "due": None})
+            # Membership is accumulated unconditionally; only the DUE is
+            # conditional. Members and dues had been collected together, which
+            # meant a member dropped out of the digest the moment its own lead
+            # stopped being schedulable -- and that is a function of the clock,
+            # not of the calendar. See the digest note below.
             b["tomorrow" if lead else "today"].extend(evs)
             b["ids"].extend(e.get("id", "") for e in evs)
             b["start"] = min(b["start"], start_ts)
-            b["due"] = min(b["due"], due)
+            due = _gcal_due_for_lead(start_ts, lead, now)
+            if due is not None:
+                b["due"] = due if b["due"] is None else min(b["due"], due)
 
     for sched, b in buckets.items():
+        if b["due"] is None:
+            continue        # every lead in this bucket has passed
+
         for slot in ("today", "tomorrow"):
             b[slot].sort(key=lambda e: e.get("id", ""))
         # The digest makes membership part of the key, so adding or removing a
         # birthday changes the key: the old bucket is pruned and the new one
         # created, rather than a stale "Four birthdays" surviving as three.
+        #
+        # It must therefore change ONLY when the calendar changes. Live
+        # 2026-08-02: the 09:00 bucket announced "Two birthdays today: Sabrina
+        # and Nathan. And tomorrow: RJ Megesi", and the 09:09 scan announced
+        # "RJ Megesi's Birthday is tomorrow" all over again -- because Sabrina
+        # and Nathan had dropped out of the digest once their own 9 AM passed,
+        # minting a new key for the same bucket. Membership is date-based and
+        # survives the day; only the dues expire.
         digest = hashlib.sha1("|".join(sorted(b["ids"])).encode()).hexdigest()[:8]
         text = gcal_birthday_text([e.get("summary", "") for e in b["today"]],
                                   [e.get("summary", "") for e in b["tomorrow"]])

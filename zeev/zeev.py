@@ -506,6 +506,11 @@ _GOODNIGHT_LINES = [
 # _TOOL_INTENT_RE, so "remind me to sing happy birthday to Leo at six" stays a
 # reminder. Placed above the music gate, or "sing me a birthday song" becomes a
 # YouTube search.
+# Widened from 70: "Can you call my wife Maria? It's 857-701-7252 and sing her
+# the happy birthday song." put "birthday" at character 67, so the window cut it
+# off three characters short and the song missed too. A request can carry a
+# preamble; what keeps this honest is the tool/call exclusions, not the window.
+_BIRTHDAY_SONG_MAX_START = 120
 _BIRTHDAY_SONG_RE = re.compile(
     r"\b(sing|song|serenade|chant)\b[^.?!]{0,40}\bbirthday\b"
     r"|\bbirthday\b[^.?!]{0,40}\b(sing|song|serenade|duet)\b",
@@ -903,13 +908,34 @@ _BT_CALL_RE = re.compile(
 _BT_CALL_MAX_START = 60
 
 
+# "call" is not a trigger on its own -- it was dropped 2026-07-26 because it is
+# far too common in ordinary speech ("call it a night", "I'll call you back").
+# A spoken PHONE NUMBER removes that ambiguity completely, and nothing else in
+# casual conversation looks like one.
+_BT_CALL_SOFT_RE = re.compile(r"\b(call|calling)\b", re.IGNORECASE)
+_BT_CALL_NUMBER_RE = re.compile(r"\+?\d[\d\s\-\.\(\)]{5,18}\d")
+_BT_CALL_MIN_DIGITS = 7
+
+
 def _bt_call_match(transcript: str):
-    """Return the _BT_CALL_RE match only if it's reasonably near the start
-    of the utterance, so long rambling turns that merely mention "dial"
-    don't get misclassified as a phone-call intent."""
+    """Return a match if this is a phone-call intent, else None.
+
+    The match is only used as a boolean -- the number is extracted separately at
+    the call site -- so any truthy match will do.
+    """
     m = _BT_CALL_RE.search(transcript)
     if m and m.start() <= _BT_CALL_MAX_START:
         return m
+    # Live 2026-08-02: "Can you call my wife Maria? It's 857-701-7252 and sing
+    # her the happy birthday song." reached the LLM, which answered "I can't
+    # place phone calls" -- a flat denial of something Zeev does. "call" missed
+    # by design, and the number, which is the least ambiguous signal in the
+    # whole utterance, was not looked at.
+    soft = _BT_CALL_SOFT_RE.search(transcript)
+    if soft and soft.start() <= _BT_CALL_MAX_START:
+        num = _BT_CALL_NUMBER_RE.search(transcript)
+        if num and len(re.sub(r"\D", "", num.group(0))) >= _BT_CALL_MIN_DIGITS:
+            return soft
     return None
 
 
@@ -7084,6 +7110,23 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         re.search(rf"\b{re.escape(k)}\b", user_text, re.IGNORECASE)
         for k in WYZE_SUBJECTS
     ) if WYZE_SUBJECTS else False
+    # Calling: the mirror of the camera guard above. That one stops Zeev
+    # inventing a capability he lacks; this one stops him DENYING one he has.
+    # Live 2026-08-02 a request to ring Maria on a spoken number missed the
+    # dial gate and the model answered "I'm sorry, but I can't place phone
+    # calls" -- flatly untrue, and the kind of answer that teaches Alex not to
+    # ask again. The gate is an allowlist over unbounded phrasing, so
+    # fallthrough is permanent by construction and needs its own guard.
+    if _BT_CALL_SOFT_RE.search(user_text) or _BT_CALL_RE.search(user_text):
+        parts.append(
+            "\n\n## Calling: you CAN place phone calls from this device over "
+            "Bluetooth HFP, and you have done so before. Never say you are "
+            "unable to make calls. If a call was asked for and you are "
+            "answering in words instead, the number was probably not clear — "
+            "ask for the number to dial, or say the phone is not connected. "
+            "Do not claim the call has been placed either: if you are "
+            "generating a reply, it has not been.")
+
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
             or _CAMERA_RE.search(user_text) or _subj_named):
         if WYZE_CAMERAS:
@@ -9662,8 +9705,13 @@ def handle_transcript(ctx, transcript, _depth=0):
     # Both voices, alternating. Sits with goodnight rather than below, because
     # every gate under here would take it away: "sing" reaches the music branch
     # as a YouTube search, and the LLM fallthrough answers in a single voice.
-    if (_BIRTHDAY_SONG_RE.search(transcript[:70])
-            and not _TOOL_INTENT_RE.search(transcript)):
+    # Excludes call intent as well as tool intent, and for the same reason:
+    # this branch sits ABOVE the phone-call branch, so "call Maria ... and sing
+    # her happy birthday" would otherwise be sung into the room while the phone
+    # never rang. A request to sing to someone ON THE PHONE is a call.
+    if (_BIRTHDAY_SONG_RE.search(transcript[:_BIRTHDAY_SONG_MAX_START])
+            and not _TOOL_INTENT_RE.search(transcript)
+            and not _bt_call_match(transcript)):
         who = _birthday_song_name(transcript)
         lines = birthday_duet_lines(who)
         print(f"[duet] birthday duet for {who}", flush=True)

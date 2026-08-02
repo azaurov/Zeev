@@ -172,3 +172,32 @@ def test_jazz_bed_is_synthesised_at_the_right_length(zeev):
 def test_swing_is_a_triplet_feel(zeev):
     """Straight eighths with a jazz kit still sound like rock."""
     assert abs(zeev._DUET_SWING - 2 / 3) < 1e-9
+
+
+# --- a call that mentions singing is a CALL --------------------------------
+
+def test_call_with_a_number_beats_the_duet(zeev):
+    """Live 2026-08-02: "Can you call my wife Maria? It's 857-701-7252 and sing
+    her the happy birthday song." The duet branch sits ABOVE the phone branch,
+    so without this exclusion the song plays in the room and the phone never
+    rings -- which is the opposite of what was asked."""
+    t = "Can you call my wife Maria? It's 857-701-7252 and sing her the happy birthday song."
+    assert zeev._bt_call_match(t), "the call gate must catch it"
+    fires = (bool(zeev._BIRTHDAY_SONG_RE.search(t[:zeev._BIRTHDAY_SONG_MAX_START]))
+             and not zeev._TOOL_INTENT_RE.search(t)
+             and not zeev._bt_call_match(t))
+    assert not fires, "the duet must stand down for a call"
+
+
+def test_song_request_without_a_number_still_sings(zeev):
+    t = "Can you sing happy birthday for my mother Sabrina?"
+    assert not zeev._bt_call_match(t)
+    assert zeev._BIRTHDAY_SONG_RE.search(t[:zeev._BIRTHDAY_SONG_MAX_START])
+
+
+def test_the_window_reaches_a_late_birthday(zeev):
+    """"birthday" landed at character 67 and the old 70-char window cut it off
+    three characters short, so even the song missed."""
+    t = "Can you call my wife Maria? It's 857-701-7252 and sing her the happy birthday song."
+    assert not zeev._BIRTHDAY_SONG_RE.search(t[:70])
+    assert zeev._BIRTHDAY_SONG_RE.search(t[:zeev._BIRTHDAY_SONG_MAX_START])

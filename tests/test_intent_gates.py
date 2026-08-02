@@ -383,3 +383,36 @@ def test_bare_angelic_is_ordinary_english(zeev, text):
     has no way to express proximity, and the bare word is common speech."""
     assert not zeev._ANGEL_PRAYER_RE.search(text), text
     assert not zeev._TORAH_RE.search(text), text
+
+
+# --- "call" needs a number to count ---------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Can you call my wife Maria? It's 857-701-7252 and sing her the happy birthday song.",
+    "call 857-701-7252",
+    "calling Maria at (857) 701-7252 please",
+    "dial 857-701-7252",
+])
+def test_call_intent_detected(zeev, text):
+    assert zeev._bt_call_match(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Let's call it a night",
+    "I'll call you back later",
+    "remind me to call Dave at 4",
+    "call my wife",
+    "give me a call sometime",
+    "set a timer for 20 minutes",
+])
+def test_bare_call_is_not_a_dial(zeev, text):
+    """"call" was dropped as a trigger because it is everywhere in speech. A
+    spoken PHONE NUMBER is what makes it unambiguous -- nothing else in casual
+    conversation looks like one."""
+    assert not zeev._bt_call_match(text)
+
+
+def test_a_short_number_is_not_a_phone_number(zeev):
+    """"call me at 4" and "call room 210" must not dial."""
+    assert not zeev._bt_call_match("call me at 4")
+    assert not zeev._bt_call_match("call room 210")

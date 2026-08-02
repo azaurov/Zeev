@@ -2672,9 +2672,19 @@ def bt_detect_connected():
             for i, line in enumerate(lines):
                 m = re.search(r'bluealsa:DEV=([0-9A-Fa-f:]{17}),PROFILE=a2dp', line)
                 if m:
+                    # DIRECTION MATTERS. A phone connects as an audio SOURCE, so
+                    # its a2dp PCM is capture-only -- it is something to listen
+                    # to, not something to play through. Matching PROFILE=a2dp
+                    # without checking direction picked Alex's S22 as the
+                    # "headphones" the moment he paired it to make a call, and
+                    # every aplay to it failed (`keepalive: aplay: exit status
+                    # 1`, once every 20s). Zeev stayed running and went
+                    # completely silent, which reads as a crash.
+                    block = lines[i + 1:min(i + 4, len(lines))]
+                    if not any("playback" in b for b in block):
+                        continue
                     _BT_AUDIO_DEV = f"bluealsa:DEV={m.group(1)},PROFILE=a2dp"
-                    for j in range(i+1, min(i+4, len(lines))):
-                        fmt = lines[j]
+                    for fmt in block:
                         mc = re.search(r'(\d+) channel', fmt)
                         mr = re.search(r'(\d+) Hz', fmt)
                         if mc:

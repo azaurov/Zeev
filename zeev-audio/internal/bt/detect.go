@@ -24,10 +24,10 @@ var (
 
 // Status holds the current BT audio state.
 type Status struct {
-	Connected  bool
-	Dev        string
-	Rate       int
-	Channels   int
+	Connected bool
+	Dev       string
+	Rate      int
+	Channels  int
 }
 
 // GetStatus returns a snapshot of the current BT audio state.
@@ -35,10 +35,10 @@ func GetStatus() Status {
 	mu.RLock()
 	defer mu.RUnlock()
 	return Status{
-		Connected:  audioDev != "",
-		Dev:        audioDev,
-		Rate:       btRate,
-		Channels:   btChannels,
+		Connected: audioDev != "",
+		Dev:       audioDev,
+		Rate:      btRate,
+		Channels:  btChannels,
 	}
 }
 
@@ -133,9 +133,20 @@ func parsePCMs(data []byte) (Status, bool) {
 		dev := fmt.Sprintf("bluealsa:DEV=%s,PROFILE=a2dp", m[1])
 		rate := 44100
 		ch := 2
+		// DIRECTION MATTERS. A phone connects as an audio SOURCE, so its a2dp
+		// PCM is capture-only -- something to listen to, not to play through.
+		// Matching PROFILE=a2dp without checking direction picked Alex's S22
+		// as "headphones" the moment he paired it to place a call, and every
+		// aplay to it failed (keepalive: aplay: exit status 1, every 20s).
+		// The daemon stayed up and all speech went silent, which reads as a
+		// crash rather than a routing fault.
+		playback := false
 		for j := i + 1; j < len(lines) && j < i+4; j++ {
 			if pcmLineRe.MatchString(lines[j]) {
 				break // next device's header — no codec line found for this one
+			}
+			if strings.Contains(lines[j], "playback") {
+				playback = true
 			}
 			if rm := rateRe.FindStringSubmatch(lines[j]); rm != nil {
 				rate, _ = strconv.Atoi(rm[1])
@@ -143,6 +154,9 @@ func parsePCMs(data []byte) (Status, bool) {
 			if cm := chRe.FindStringSubmatch(lines[j]); cm != nil {
 				ch, _ = strconv.Atoi(cm[1])
 			}
+		}
+		if !playback {
+			continue // capture-only (a phone, not headphones)
 		}
 		return Status{Connected: true, Dev: dev, Rate: rate, Channels: ch}, true
 	}

@@ -512,8 +512,13 @@ _GOODNIGHT_LINES = [
 # preamble; what keeps this honest is the tool/call exclusions, not the window.
 _BIRTHDAY_SONG_MAX_START = 120
 _BIRTHDAY_SONG_RE = re.compile(
-    r"\b(sing|song|serenade|chant)\b[^.?!]{0,40}\bbirthday\b"
-    r"|\bbirthday\b[^.?!]{0,40}\b(sing|song|serenade|duet)\b",
+    # Proximity, NOT same-sentence. Maria asked "Can you sing a song for me?
+    # Happy birthday?" down the phone and the old [^.?!] class stopped dead at
+    # her question mark. People speak in fragments and Whisper punctuates them;
+    # 40 characters apart is the real signal, and a sentence boundary in the
+    # middle of it means nothing.
+    r"\b(sing|song|serenade|chant)\b.{0,40}\bbirthday\b"
+    r"|\bbirthday\b.{0,40}\b(sing|song|serenade|duet)\b",
     re.IGNORECASE,
 )
 # Who the song is for. "with Zeev"/"with Sarina" is the DUET partner, never the
@@ -589,11 +594,46 @@ def birthday_duet_lines(name="Alex"):
     The voices are their ordinary speaking selves, which is the point: Alex
     recognises them.
     """
+    if not name:
+        # Sung to someone whose name we do not actually know -- down a phone
+        # line, usually. Guessing is worse than omitting: singing "dear Alex"
+        # at Maria is a plainly wrong answer delivered with total confidence.
+        return [
+            ("daniel", "It's your birthday! Happy birthday to you!"),
+            (_DUET_SARINA_VOICE, "Happy birthday! Go on, make a wish!"),
+            ("daniel", "Many happy returns! Have a wonderful day, from Sarina and me!"),
+        ]
     return [
         ("daniel", f"{name}! It's your birthday! Happy birthday to you!"),
         (_DUET_SARINA_VOICE, f"Happy birthday, dear {name}! Go on, make a wish!"),
         ("daniel", f"Many happy returns! Have a wonderful day, from Sarina and me!"),
     ]
+
+
+# "This is Maria", "it's Maria speaking" -- the caller naming themselves is the
+# only reliable source of who is on the other end.
+_CALL_SELF_NAME_RE = re.compile(
+    # Trigger is case-insensitive ("This is Maria"), the NAME is not: requiring
+    # a capital is what stops "it's a lovely day" yielding the name "a".
+    r"\b(?i:this is|it'?s|i'?m|you'?ve reached)\s+([A-Z][a-z'’-]{1,15})\b")
+
+
+def call_song_name(call_intent="", call_log=None):
+    """Who the phone duet is for, or None if unknown.
+
+    _birthday_song_name defaults to Alex -- correct on the device, wrong on a
+    call, where Alex is the one who DIALLED. Better to sing no name at all.
+    """
+    m = _BIRTHDAY_FOR_RE.search(call_intent or "")
+    if m and m.group(1).strip().lower() not in _BIRTHDAY_DUET_EXCLUDE:
+        return m.group(1).strip()
+    for entry in (call_log or []):
+        if entry.get("role") != "caller":
+            continue
+        m = _CALL_SELF_NAME_RE.search(entry.get("text", ""))
+        if m:
+            return m.group(1)
+    return None
 
 
 # --- The jazz bed --------------------------------------------------------
@@ -3591,6 +3631,35 @@ def bt_fast_detect(sco_dev: str, samplerate: int) -> tuple[bytes, str, str]:
     return pcm, call_type, transcript
 
 
+
+def play_wav_sco(path, sco_dev, samplerate):
+    """Play a rendered WAV down an active call. Returns True if it played.
+
+    Call audio is a narrowband mono SCO link (8k CVSD or 16k mSBC), so the
+    24 kHz duet has to be resampled to whatever the link actually negotiated --
+    aplay at the wrong rate on a SCO PCM does not resample, it just plays
+    rubbish or fails outright.
+    """
+    if not path or not shutil.which("ffmpeg"):
+        return False
+    try:
+        ff = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "quiet", "-i", str(path), "-f", "s16le",
+             "-ar", str(samplerate), "-ac", "1", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen(
+            ["aplay", "-D", sco_dev, "-f", "S16_LE", "-r", str(samplerate),
+             "-c", "1", "-q", "-"],
+            stdin=ff.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ff.stdout.close()
+        p.wait(timeout=180)
+        print(f"[call] sang the duet down the line ({samplerate}Hz)", flush=True)
+        return p.returncode == 0
+    except Exception as e:
+        print(f"[call] duet over SCO failed: {e}", flush=True)
+        return False
+
+
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
                  call_intent: str = "",
@@ -3865,6 +3934,22 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             bt_call_hangup()
             break
 
+        # A song request on a live call is answered by PLAYING the duet, not by
+        # describing it. Live 2026-08-02 Maria asked four times; Zeev said he
+        # would be "delighted to sing a birthday duet" and then never could,
+        # because nothing connected the rendered song to the call audio.
+        if call_type in ("live", "unknown") and _BIRTHDAY_SONG_RE.search(transcript):
+            song = None
+            try:
+                song = render_birthday_duet(call_song_name(call_intent, call_log))
+            except Exception as e:
+                print(f"[call] duet render failed: {e}", flush=True)
+            if song and play_wav_sco(song, sco_dev, samplerate):
+                call_log.append({"role": "zeev", "text": "(sang happy birthday)"})
+                turn += 1
+                continue
+            print("[call] duet unavailable — falling through to a spoken reply", flush=True)
+
         # LLM reply — inject context based on call type
         if ivr_context:
             prompt = f"{ivr_context}\n\nIVR said: {transcript}"
@@ -3881,7 +3966,14 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             prompt = transcript
         reply = llm_fn(prompt)
         if not reply:
-            reply = "I'm sorry, I didn't catch that."
+            # NOT a hearing failure. The transcript above is right there in the
+            # log -- llm_fn returned empty, and blaming the microphone sent
+            # Maria into repeating herself four times, louder each time, which
+            # could never have helped. Retry once, then be honest about it.
+            print(f"[call] empty LLM reply for {transcript!r} — retrying", flush=True)
+            reply = llm_fn(prompt)
+        if not reply:
+            reply = "Sorry, I lost my train of thought there. One moment."
 
         # IVR mode: if reply is a single digit send it as DTMF, skip TTS
         if ivr_context:

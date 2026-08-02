@@ -90,13 +90,29 @@ def test_a_duet_request_naming_no_song_is_not_assumed_to_be_birthday(zeev):
 
 
 def test_sarina_sings_in_her_own_song_voice(zeev):
-    """Alex picked af_jessica for the song by ear. Scoped to the song only --
-    "sarina" everywhere else stays af_heart, so greetings and reminders are
-    unchanged."""
-    assert zeev._DUET_SARINA_KOKORO == "af_jessica"
+    """Alex picked Orpheus "autumn" by ear. Scoped to the song only -- "sarina"
+    everywhere else still speaks on Kokoro af_heart, so greetings and reminders
+    are unchanged."""
+    assert zeev._DUET_SARINA_ORPHEUS == "autumn"
+    assert zeev._DUET_SARINA_KOKORO == "af_heart"
     voices = [v for v, _ in zeev.birthday_duet_lines("Alex")]
     assert zeev._DUET_SARINA_VOICE in voices
     assert "sarina" not in voices
+
+
+def test_both_singers_prefer_orpheus(zeev):
+    """One engine for the whole song. Zeev on Orpheus against Sarina on Kokoro
+    sounded like two takes spliced together -- matched for neither room tone
+    nor level."""
+    assert set(zeev._ORPHEUS_FIRST) == {"daniel", zeev._DUET_SARINA_VOICE}
+    assert zeev._ORPHEUS_FIRST["daniel"] == "daniel"
+    assert zeev._ORPHEUS_FIRST[zeev._DUET_SARINA_VOICE] == "autumn"
+
+
+def test_speaking_sarina_is_not_routed_to_orpheus(zeev):
+    """The asymmetry is the whole point of a separate key: ordinary Sarina
+    still goes to the Kokoro daemon first."""
+    assert "sarina" not in zeev._ORPHEUS_FIRST
 
 
 def test_the_song_voice_is_a_persona_key_not_a_kokoro_name(zeev):

@@ -145,6 +145,11 @@ def test_dreams_do_not_touch_messages_or_facts(db):
     "did you dream?", "any dreams last night?", "what did you dream about?",
     "do you dream?", "tell me about your dreams", "did you sleep well?",
     "did you dream anything?",
+    # "have" is the verb here, not "dream" -- found live 2026-08-03 falling
+    # through to the LLM, which said it can't dream (true for a language
+    # model with no dream table, but wrong: the gate just never fired).
+    "did you have any dreams last night?", "do you have dreams?",
+    "did you ever have a dream?",
 ])
 def test_asking_them_about_dreams(zeev, text):
     assert zeev._DREAM_RE.search(text)

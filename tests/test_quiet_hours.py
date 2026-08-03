@@ -48,6 +48,30 @@ def test_quiet_volume_is_below_normal(zeev):
 
 
 # ---------------------------------------------------------------------------
+# Day/night volume schedule
+#
+# Before this, noon and 9pm played at the identical flat _STARTUP_VOLUME --
+# there was no daytime tier at all, only the nightly dip -- and it read as
+# the device being quiet all day (reported live 2026-08-03).
+# ---------------------------------------------------------------------------
+
+def test_day_volume_is_louder_than_baseline(zeev):
+    assert zeev._DAY_VOLUME > zeev._STARTUP_VOLUME
+
+
+@pytest.mark.parametrize("hour", [8, 9, 12, 17, 20, 21])
+def test_scheduled_volume_is_loud_during_the_day(zeev, hour):
+    assert zeev._scheduled_volume(hour) == zeev._DAY_VOLUME
+
+
+@pytest.mark.parametrize("hour", [22, 23, 0, 1, 3, 5, 7])
+def test_scheduled_volume_falls_back_overnight(zeev, hour):
+    """Overnight non-greeting turns (e.g. a 2am question) keep the pre-existing
+    _STARTUP_VOLUME baseline -- only the greeting dips further, to _QUIET_VOLUME."""
+    assert zeev._scheduled_volume(hour) == zeev._STARTUP_VOLUME
+
+
+# ---------------------------------------------------------------------------
 # Greeting bucket
 # ---------------------------------------------------------------------------
 

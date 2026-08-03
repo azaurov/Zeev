@@ -524,6 +524,13 @@ _DREAM_RE = re.compile(
     r"|\bwhat\s+(did|do)\s+you\s+dream\b"
     r"|\byour\s+dreams?\b"
     r"|\byou\s+dream(ed|t)?\s+(anything|about|of)\b"
+    # "did you have any dreams (last night)?" -- "have", not "dream", is the
+    # verb here, so the plain (did|do) you dream alternative above never
+    # fires. Found live 2026-08-03: this phrasing fell through to the LLM,
+    # which correctly (for a language model with no dream table) said it
+    # can't dream -- read as "Zeev doesn't know he dreams" when it was
+    # really just a missed gate.
+    r"|\b(did|do)\s+you\s+(ever\s+)?have\s+(any\s+|a\s+)?dreams?\b"
     r"|^\s*(any|remember\s+any)\s+dreams?\b",
     re.IGNORECASE,
 )
@@ -1201,6 +1208,19 @@ def _pct_to_raw(pct):
 _QUIET_START  = max(0, min(23, int(os.environ.get("ZEEV_QUIET_START", "22"))))
 _QUIET_END    = max(0, min(23, int(os.environ.get("ZEEV_QUIET_END", "8"))))
 _QUIET_VOLUME = max(0, min(100, int(os.environ.get("ZEEV_QUIET_VOLUME", "40"))))
+
+# Daytime is louder than the flat _STARTUP_VOLUME baseline. Before this, noon
+# and 9pm played at the identical 70% -- there was no "day" tier at all, only
+# the nightly dip above -- and it read as the device being quiet all day.
+# _DAY_VOLUME covers the same window quiet hours excludes (08:00-22:00 by
+# default); outside it (including the overnight non-greeting case, e.g. a
+# 2am question) _STARTUP_VOLUME is still the level, same as before this change.
+_DAY_VOLUME = max(0, min(100, int(os.environ.get("ZEEV_DAY_VOLUME", "85"))))
+
+
+def _scheduled_volume(hour=None):
+    """The volume the day/night schedule wants right now (startup or ongoing)."""
+    return _STARTUP_VOLUME if _in_quiet_hours(hour) else _DAY_VOLUME
 
 
 def _time_of_day(hour=None):
@@ -11190,7 +11210,7 @@ def handle_transcript(ctx, transcript, _depth=0):
 
 def run_device_mode():
     """Push-to-talk voice companion using the Whisplay HAT (LCD + WM8960 + button)."""
-    global _LAST_VOICE
+    global _LAST_VOICE, _VOLUME
     zeev_cleanup()   # clear any crash leftovers from a previous run
     _init_audio()
     sys.path.insert(0, str(Path.home() / "Whisplay" / "runtime"))
@@ -11220,13 +11240,14 @@ def run_device_mode():
     # booting inside quiet hours; _speak_greeting restores the normal level as
     # soon as it has finished, so the first real reply is at full volume.
     _quiet_greeting = ("--no-greeting" not in sys.argv) and _in_quiet_hours()
-    _startup_pct = _QUIET_VOLUME if _quiet_greeting else _STARTUP_VOLUME
+    _startup_pct = _QUIET_VOLUME if _quiet_greeting else _scheduled_volume()
     _startup_raw = _pct_to_raw(_startup_pct)
     try:
         subprocess.run(
             ["amixer", "-c", "wm8960soundcard", "sset", "Speaker", str(_startup_raw)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        _VOLUME = _startup_pct
         print(f"[audio] speaker volume {_startup_pct}% (raw {_startup_raw}/127)"
               + (f" — quiet hours {_QUIET_START:02d}:00–{_QUIET_END:02d}:00,"
                  f" greeting only (restores to {_STARTUP_VOLUME}%)"
@@ -12158,6 +12179,29 @@ def run_device_mode():
                     board.set_rgb(0, 0, 0)
 
     threading.Thread(target=_idle_sleep_watcher, daemon=True).start()
+
+    # The boot-time volume block above only fires once, but the device
+    # normally keeps running across the day/night boundary rather than
+    # rebooting -- without this, a device that booted at 3am stayed at the
+    # quiet-hours baseline all the way through the following afternoon.
+    # `last_applied` guards against fighting a manual "turn it down": if
+    # nobody has touched the volume since our own last automatic move, it's
+    # safe to move it again; if the live value has drifted from that, a
+    # person changed it and this leaves it alone until the next crossing.
+    _volume_schedule = {"last_applied": _VOLUME}
+
+    def _volume_schedule_loop():
+        global _VOLUME
+        while True:
+            time.sleep(300)
+            target = _scheduled_volume()
+            if _VOLUME == _volume_schedule["last_applied"] and _VOLUME != target:
+                set_volume(target)
+                print(f"[audio] schedule: speaker volume -> {target}%", flush=True)
+            _volume_schedule["last_applied"] = _VOLUME
+
+    threading.Thread(target=_volume_schedule_loop, daemon=True).start()
+
     # Dreams live in device mode because that is where idleness is known:
     # _last_activity is a closure here, so the loop is handed a reader for it
     # rather than reaching for a module global that does not exist.
@@ -12749,6 +12793,7 @@ def run_device_mode():
 
     if "--no-greeting" not in sys.argv:
         def _speak_greeting():
+            global _VOLUME
             _set_face("speaking", _greeting)
             board.set_rgb(*_LED_SPEAKING)
             # Both the volume restore and _greeting_done live in the finally.
@@ -12781,6 +12826,7 @@ def run_device_mode():
                              str(_pct_to_raw(_STARTUP_VOLUME))],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
+                        _VOLUME = _STARTUP_VOLUME
                         print(f"[audio] quiet-hours greeting done — volume back to "
                               f"{_STARTUP_VOLUME}%", flush=True)
                     except Exception as e:

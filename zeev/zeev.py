@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import wave
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
@@ -511,6 +511,22 @@ _GOODNIGHT_LINES = [
 # the happy birthday song." put "birthday" at character 67, so the window cut it
 # off three characters short and the song missed too. A request can carry a
 # preamble; what keeps this honest is the tool/call exclusions, not the window.
+# Asking about dreams. Needs a dream WORD plus a second-person cue, or "I had a
+# dream about my mother" -- Alex talking about his own night -- becomes Zeev
+# reporting his.
+_DREAM_RE = re.compile(
+    # EVERY alternative carries a "you"/"your", except the bare "any dreams?",
+    # which is only ever addressed to someone else. Without that, "I had a
+    # dream last night" -- Alex describing his own night -- made Zeev report
+    # his instead of listening.
+    r"\b(did|do)\s+you\s+(ever\s+)?dream\b"
+    r"|\bdid\s+you\s+sleep\s+well\b"
+    r"|\bwhat\s+(did|do)\s+you\s+dream\b"
+    r"|\byour\s+dreams?\b"
+    r"|\byou\s+dream(ed|t)?\s+(anything|about|of)\b"
+    r"|^\s*(any|remember\s+any)\s+dreams?\b",
+    re.IGNORECASE,
+)
 _BIRTHDAY_SONG_MAX_START = 120
 _BIRTHDAY_SONG_RE = re.compile(
     # Proximity, NOT same-sentence. Maria asked "Can you sing a song for me?
@@ -4083,6 +4099,31 @@ def _db() -> sqlite3.Connection:
                 interpretation TEXT    NOT NULL,
                 ts             TEXT    NOT NULL
             );
+            -- Dreams. Zeev and Sarina each dream on their own overnight; most
+            -- are dim and forgotten, a few are vivid and fully recalled.
+            --
+            -- Its OWN table, deliberately never `messages`: this is content an
+            -- LLM invented, and the camera-hallucination notes in CLAUDE.md
+            -- record what happens when fabricated text lands in `messages` --
+            -- _memory_maintenance_loop embeds it within 30 minutes and
+            -- retrieve_semantic serves it back under "Relevant past exchanges"
+            -- as though it happened.
+            --
+            -- UNIQUE(persona, night_date) because zeev-device restarts
+            -- overnight; without it a 2am restart gives the same night a
+            -- second dream. `vividness` is rolled ONCE, at dream time, and
+            -- recall is a pure function of it -- roll at question time and the
+            -- same dream flickers between remembered and forgotten.
+            CREATE TABLE IF NOT EXISTS dreams (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                persona    TEXT    NOT NULL,
+                night_date TEXT    NOT NULL,
+                content    TEXT    NOT NULL,
+                fragment   TEXT    NOT NULL,
+                vividness  REAL    NOT NULL,
+                ts         TEXT    NOT NULL,
+                UNIQUE(persona, night_date)
+            );
             CREATE TABLE IF NOT EXISTS reflections (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 period_start TEXT    NOT NULL,
@@ -4498,6 +4539,250 @@ def run_tool_calls(tool_calls):
         out.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                     "name": name, "content": result})
     return out
+
+
+
+# ---------------------------------------------------------------------------
+# Dreams
+#
+# Zeev and Sarina sleep while the device is idle overnight, and each dreams on
+# their own. Recall is modelled on the human version: most nights leave nothing,
+# some leave a fragment, and occasionally one comes back whole.
+#
+# The one rule that makes it feel real rather than random: ALL the chance is
+# spent at dream time and stored. Roll at question time and asking twice gives
+# "I don't remember" and then a full dream, which reads as a machine improvising
+# rather than a mind remembering.
+# ---------------------------------------------------------------------------
+
+_DREAM_PERSONAS = ("zeev", "sarina")
+# Nights that produce no dream at all. Distinct from a dream that is not
+# recalled -- "I don't think I dreamt" and "I did, but it's gone" are different
+# answers, and having both is most of the texture.
+_DREAM_CHANCE = float(os.environ.get("ZEEV_DREAM_CHANCE", "0.75"))
+# Skew toward the dim. u**2.2 puts ~12% of dreams above the vivid threshold and
+# leaves most below the fragment line, which is roughly how it actually goes.
+_DREAM_SKEW = 2.2
+_DREAM_VIVID_AT    = 0.75
+_DREAM_FRAGMENT_AT = 0.30
+# Dreams fade. A week on, even a vivid one is gone.
+_DREAM_DECAY_PER_DAY = 0.18
+_DREAM_IDLE_SEC = int(os.environ.get("ZEEV_DREAM_IDLE_SEC", "900"))   # 15 min
+
+
+def dream_night_date(now=None):
+    """The night a moment belongs to, as YYYY-MM-DD.
+
+    Nights straddle midnight, so 02:00 on the 3rd belongs to the night of the
+    2nd -- which is also what "last night" means to someone asking at breakfast.
+    """
+    now = now or datetime.now()
+    return (now - timedelta(hours=5)).strftime("%Y-%m-%d")
+
+
+def dream_recall(vividness, age_days):
+    """How well a dream is remembered: 'vivid', 'fragment' or 'none'. Pure.
+
+    Deterministic in both arguments on purpose -- see the module note above.
+    """
+    if vividness is None:
+        return "none"
+    faded = float(vividness) - _DREAM_DECAY_PER_DAY * max(0.0, float(age_days))
+    if faded >= _DREAM_VIVID_AT:
+        return "vivid"
+    if faded >= _DREAM_FRAGMENT_AT:
+        return "fragment"
+    return "none"
+
+
+def roll_dream_vividness(rng=None):
+    """One draw, at dream time, never again."""
+    rng = rng or random
+    return round(rng.random() ** _DREAM_SKEW, 4)
+
+
+_DREAM_SEEDS = {
+    "zeev": ("You are Zeev: contemplative, drawn to ancient philosophy, the "
+             "Talmud, and quantum interference. Your dreams are abstract and "
+             "symbolic — patterns, arguments with no one, places that are also "
+             "ideas."),
+    "sarina": ("You are Sarina, Zeev's composed secretary. Your dreams are "
+               "domestic and sensory — rooms, sounds, small tasks that will not "
+               "finish, the household moving around you."),
+}
+
+
+def _dream_material(limit=25):
+    """What the day left behind, as raw material to dream on."""
+    bits = []
+    try:
+        with _db_lock:
+            rows = _db().execute(
+                "SELECT content FROM messages WHERE ts >= ? ORDER BY id DESC LIMIT ?",
+                ((datetime.now() - timedelta(hours=20)).isoformat(), limit),
+            ).fetchall()
+        bits += [r["content"][:160] for r in rows]
+    except Exception as e:
+        print(f"[dream] material query failed: {e}", flush=True)
+    if USER_FACTS:
+        bits += list(USER_FACTS)[:6]
+    return "\n".join(f"- {b}" for b in bits[:30]) or "- a quiet day"
+
+
+def compose_dream(persona, material, llm=None):
+    """Ask the LLM for a dream. Returns (content, fragment) or (None, None).
+
+    Generated off-device: this runs on bosgame's llama3.2:1b with a Groq
+    fallback, the same route extract_memory takes, because a Pi Zero has
+    neither the RAM nor the core to spare at 3am.
+    """
+    seed = _DREAM_SEEDS.get(persona, _DREAM_SEEDS["zeev"])
+    prompt = (
+        f"{seed}\n\nYou are asleep. From the fragments below, write one short "
+        "dream — 2 or 3 sentences, present tense, first person. Dreamlike, not a "
+        "summary of the day: things blur, shift, and do not resolve. Then on a "
+        "new line write FRAGMENT: followed by ONE image or feeling from it, six "
+        "words at most.\n\n"
+        f"Fragments from the day:\n{material}\n\n"
+        "Dream:"
+    )
+    msgs = [{"role": "user", "content": prompt}]
+    text = None
+    if llm is not None:
+        text = llm(msgs)
+    else:
+        try:
+            text, _ = _bosgame_complete(msgs, max_tokens=220)
+        except Exception as e:
+            print(f"[dream] bosgame failed: {e}", flush=True)
+        if not text:
+            try:
+                text, _ = _llm_complete(msgs, MODELS["2"][0], max_tokens=220)
+            except Exception as e:
+                print(f"[dream] groq failed: {e}", flush=True)
+    if not text:
+        return None, None
+    text = _strip_stage_directions(text.strip())
+    frag = ""
+    m = re.search(r"FRAGMENT:\s*(.+)", text, re.IGNORECASE)
+    if m:
+        frag = m.group(1).strip().strip('".')
+        text = text[:m.start()].strip()
+    text = re.sub(r"^Dream:\s*", "", text, flags=re.IGNORECASE).strip()
+    if not text:
+        return None, None
+    if not frag:
+        # A fragment must be fragmentary. Falling back to the opening sentence
+        # would make partial recall read as a tidy summary, which is the one
+        # thing it should never sound like.
+        frag = " ".join(text.split()[:6])
+    return text, frag
+
+
+def save_dream(persona, night_date, content, fragment, vividness):
+    """Store one dream. Silently does nothing if that night is already dreamt."""
+    with _db_lock:
+        con = _db()
+        try:
+            con.execute(
+                "INSERT INTO dreams (persona, night_date, content, fragment, "
+                "vividness, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                (persona, night_date, content, fragment, float(vividness),
+                 datetime.now().isoformat()))
+            con.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False        # already dreamt this night — a restart, not a bug
+
+
+def latest_dream(persona, now=None):
+    """The most recent dream and how well it is recalled.
+
+    Returns (row_or_None, recall). `None` with 'none' means a dreamless night;
+    a row with 'none' means there WAS a dream and it is gone -- different
+    answers, and the difference is most of the texture.
+    """
+    now = now or datetime.now()
+    try:
+        with _db_lock:
+            row = _db().execute(
+                "SELECT night_date, content, fragment, vividness FROM dreams "
+                "WHERE persona = ? ORDER BY night_date DESC LIMIT 1",
+                (persona,)).fetchone()
+    except Exception as e:
+        print(f"[dream] lookup failed: {e}", flush=True)
+        return None, "none"
+    if not row:
+        return None, "none"
+    age = (datetime.strptime(dream_night_date(now), "%Y-%m-%d")
+           - datetime.strptime(row["night_date"], "%Y-%m-%d")).days
+    if age > 7:
+        return None, "none"     # too long ago to count as "last night" at all
+    return row, dream_recall(row["vividness"], age)
+
+
+def dream_reply(persona, now=None):
+    """What Zeev or Sarina says when asked whether they dreamt."""
+    row, recall = latest_dream(persona, now)
+    name = "Sarina" if persona == "sarina" else "Zeev"
+    if row is None:
+        return random.choice([
+            "I don't think I dreamt at all last night. Just quiet.",
+            "Nothing last night — I slept straight through.",
+        ])
+    if recall == "vivid":
+        return f"I did, and I remember it. {row['content']}"
+    if recall == "fragment":
+        return random.choice([
+            f"Only pieces. {row['fragment']}. The rest is gone.",
+            f"Something, yes — {row['fragment']} — but I can't hold on to it.",
+        ])
+    return random.choice([
+        "I think I did, but it's gone. Only the feeling of it is left.",
+        "I must have. I can't reach any of it now.",
+    ])
+
+
+def dream_once(persona, now=None, rng=None):
+    """One persona's shot at dreaming for the current night."""
+    night = dream_night_date(now)
+    rng = rng or random
+    if rng.random() > _DREAM_CHANCE:
+        return "dreamless"
+    content, frag = compose_dream(persona, _dream_material())
+    if not content:
+        return "failed"
+    if save_dream(persona, night, content, frag, roll_dream_vividness(rng)):
+        return "dreamt"
+    return "already"
+
+
+def _dream_loop(idle_secs_fn):
+    """Dream during the small hours, while nobody is talking.
+
+    Deliberately NO catch-up, unlike the systemd timers: a dream generated at
+    noon because the Pi slept through the night is not a dream. No sleep, no
+    dreams.
+    """
+    while True:
+        time.sleep(300)
+        try:
+            if _time_of_day() != "night":
+                continue
+            if idle_secs_fn() < _DREAM_IDLE_SEC:
+                continue        # someone is still up
+            night = dream_night_date()
+            for persona in _DREAM_PERSONAS:
+                with _db_lock:
+                    seen = _db().execute(
+                        "SELECT 1 FROM dreams WHERE persona = ? AND night_date = ?",
+                        (persona, night)).fetchone()
+                if seen:
+                    continue
+                outcome = dream_once(persona)
+                print(f"[dream] {persona} {night}: {outcome}", flush=True)
+        except Exception as e:
+            print(f"[dream] loop error: {e}", flush=True)
 
 
 def _reminder_loop():
@@ -9902,6 +10187,18 @@ def handle_transcript(ctx, transcript, _depth=0):
                     face=False, led=False, speak=False)
         return
 
+    # ── Dreams ───────────────────────────────────────────────────────────
+    # Whoever was woken is the one who answers about their own night: ask
+    # Sarina and you get Sarina's dream, not Zeev's.
+    if _DREAM_RE.search(transcript) and not _TOOL_INTENT_RE.search(transcript):
+        # _LAST_VOICE, not a local `voice` -- the turn's voice is resolved once
+        # at the top of handle_transcript and stored there.
+        persona = "sarina" if _LAST_VOICE == "sarina" else "zeev"
+        reply = dream_reply(persona)
+        print(f"[dream] asked {persona}: {reply[:60]}…", flush=True)
+        finish_turn(ctx, reply, user_text=transcript)
+        return
+
     # ── Birthday duet ────────────────────────────────────────────────────
     # Both voices, alternating. Sits with goodnight rather than below, because
     # every gate under here would take it away: "sing" reaches the music branch
@@ -11861,6 +12158,13 @@ def run_device_mode():
                     board.set_rgb(0, 0, 0)
 
     threading.Thread(target=_idle_sleep_watcher, daemon=True).start()
+    # Dreams live in device mode because that is where idleness is known:
+    # _last_activity is a closure here, so the loop is handed a reader for it
+    # rather than reaching for a module global that does not exist.
+    threading.Thread(
+        target=_dream_loop,
+        args=(lambda: time.time() - _last_activity[0],),
+        daemon=True).start()
 
     def _go_ready():
         _screen_wake()

@@ -91,7 +91,22 @@ def _open_db():
     return con
 
 
-def _fetch_messages(con, days):
+def _fetch_messages(con, days=7, since=None, until=None):
+    """Messages in a window. `since`/`until` are inclusive YYYY-MM-DD dates.
+
+    Without them this is "the last `days` days from now", which is all the cron
+    job ever needs -- but it makes a missed week unrecoverable, because the
+    window can only ever end at the present moment. An explicit range is what
+    lets a Sunday the Pi slept through be reflected on afterwards.
+    """
+    if since or until:
+        lo = f"{since}T00:00:00" if since else "0000"
+        hi = f"{until}T23:59:59" if until else "9999"
+        rows = con.execute(
+            "SELECT role, content, ts FROM messages WHERE ts >= ? AND ts <= ? ORDER BY id",
+            (lo, hi),
+        ).fetchall()
+        return rows
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     rows = con.execute(
         "SELECT role, content, ts FROM messages WHERE ts >= ? ORDER BY id",
@@ -196,12 +211,13 @@ def _synthesize(transcript, days):
 # Main
 # ---------------------------------------------------------------------------
 
-def run(days=7, verbose=True):
+def run(days=7, verbose=True, since=None, until=None):
     con = _open_db()
-    rows = _fetch_messages(con, days)
+    rows = _fetch_messages(con, days, since=since, until=until)
+    window = f"{since} → {until}" if (since or until) else f"the last {days} days"
 
     if len(rows) < MIN_MSGS:
-        print(f"Only {len(rows)} messages in the last {days} days (min {MIN_MSGS}) — skipping.")
+        print(f"Only {len(rows)} messages in {window} (min {MIN_MSGS}) — skipping.")
         con.close()
         return False
 
@@ -223,7 +239,11 @@ def run(days=7, verbose=True):
     if verbose:
         print("  Running LLM synthesis…", flush=True)
 
-    content, err = _synthesize(transcript, days)
+    span = days
+    if since and until:
+        span = (datetime.fromisoformat(until).date()
+                - datetime.fromisoformat(since).date()).days + 1
+    content, err = _synthesize(transcript, span)
     if err:
         print(f"  ERROR: {err}")
         con.close()
@@ -257,6 +277,8 @@ def show_latest(days=None):
 def main():
     parser = argparse.ArgumentParser(description="Zeev weekly reflection")
     parser.add_argument("--days", type=int, default=7, help="Days of history to synthesize (default 7)")
+    parser.add_argument("--since", help="Backfill: inclusive start date YYYY-MM-DD")
+    parser.add_argument("--until", help="Backfill: inclusive end date YYYY-MM-DD")
     parser.add_argument("--show", action="store_true", help="Print the latest stored reflection and exit")
     args = parser.parse_args()
 
@@ -264,8 +286,11 @@ def main():
         show_latest()
         return
 
-    print(f"Weekly reflection — last {args.days} days")
-    success = run(days=args.days)
+    if args.since or args.until:
+        print(f"Weekly reflection — backfill {args.since} → {args.until}")
+    else:
+        print(f"Weekly reflection — last {args.days} days")
+    success = run(days=args.days, since=args.since, until=args.until)
     sys.exit(0 if success else 1)
 
 

@@ -132,7 +132,7 @@ hasn't been run live yet — only the pure scoring/suggestion logic and the
 
 Tests: `tests/test_wake_enrollment.py`.
 
-## 4. Active learning loop from false-positive logs
+## 4. Active learning loop from false-positive logs — DONE 2026-08-04
 
 False wake-word triggers (e.g. TV audio scoring 0.96) are already logged via
 journalctl — see the openWakeWord section of CLAUDE.md. Auto-harvest those
@@ -140,3 +140,36 @@ as hard negatives for the next openWakeWord retraining round, closing the
 loop between production failures and training data. This is the direction
 the project's own docs already point at (`docs/wake-word-training.md`'s
 sample-count lever) — it just isn't automated yet.
+
+Implemented (`zeev/wake_harvest.py`): an interactive CLI that parses
+`journalctl -u zeev-device` for openWakeWord triggers and the transcript
+each one produced, walks a reviewer through the ones with no saved verdict
+yet, and exports the ones marked false as a JSON array of strings droppable
+straight into `custom_negative_strings` in the training notebook.
+
+- **Pairing a trigger with its transcript relies on a real property of the
+  log, not a guess**: `_wake_dispatch` prints nothing of its own between a
+  `[wake] ... trigger` line and the `You: ...`/`discarded noise transcript`
+  line that follows it (see CLAUDE.md's openWakeWord section), so the two
+  are adjacent in the normal case. Other threads (reminders, gcal, memory
+  maintenance) can interleave a few lines though, so pairing tolerates up to
+  `_MAX_LOOKAHEAD` (30) intervening lines rather than requiring adjacency —
+  and past that, or at end-of-log, a trigger with no transcript is dropped
+  (nothing to harvest) but *counted*, so the reported total doesn't silently
+  stop matching what's in the log.
+- **The noise-transcript branch parses a real Python repr, not a
+  quote-strip**: `[wake] discarded noise transcript: {text!r}` is logged via
+  `!r`, and repr changes quoting style on an apostrophe and escapes on a
+  backslash — a naive `strip('\'"')` breaks on exactly the transcripts this
+  tool exists to catch. `ast.literal_eval` parses it properly, falling back
+  to the raw text if the line ever stops being an actual repr.
+- **A transcript already saved, or already seen earlier in the same run, is
+  skipped without asking.** The same false wake recurs constantly (a TV ad
+  plays daily), and re-asking about a duplicate trains the reviewer to
+  rubber-stamp "y" without reading it — worse than skipping it outright.
+- Parsing (`parse_wake_triggers`), storage (`load_negatives`/
+  `save_negatives`) and the review loop (`review_triggers`, with `ask`
+  injectable in place of `input`) are separated so all of it is testable
+  without real journalctl or stdin.
+
+Tests: `tests/test_wake_harvest.py`.

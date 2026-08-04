@@ -38,7 +38,7 @@ Implemented in `retrieve_semantic()` and `retrieve_relevant()` (both in
 
 Tests: `tests/test_rag_reranking.py`.
 
-## 2. Cross-modal grounding via the LLM as the shared space
+## 2. Cross-modal grounding via the LLM as the shared space — DONE 2026-08-04
 
 Rather than training a joint audio/vision encoder, use natural language as
 the alignment layer that already exists: camera frames are described in text
@@ -46,6 +46,46 @@ via `vision_complete()`, and that text is already retrievable by the same
 semantic-search path as everything else. This gets a rough multimodal
 synergy for free — the alignment work is outsourced to a pretrained LLM
 instead of trained from scratch.
+
+The retrieval path already worked before this — a vision reply is just an
+assistant message, embedded and RAG-able like any other. What was missing,
+and is the actual content of this change, is that a resurfaced vision
+description was indistinguishable from a spoken fact. That's this project's
+most-repeated failure class (see the Wyze camera section of CLAUDE.md: a
+stale or hallucinated room description read back as current truth).
+
+Implemented (`zeev/zeev.py`):
+
+- `finish_turn(..., vision=True)` and the two non-`finish_turn` vision call
+  sites (web `/snap`, terminal `/look`) prefix the **DB-stored** copy of a
+  vision-derived reply with `_VISION_TAG`. Only the stored copy — what's
+  spoken and what's held in the live session (`ctx.session`) stays the plain
+  reply, so nothing audible or immediately re-read by the LLM changes.
+- `_build_system_prompt` strips the tag from any RAG hit that carries it and
+  appends "(This was a camera observation from a past moment, not a
+  standing fact — the room may look different now.)" — the model can still
+  use the memory, just not as settled present-tense fact.
+- Applied at all 6 places a vision reply reaches storage: the 4 device-mode
+  `finish_turn` sites (local Pi camera, single named Wyze camera, "check all
+  cameras" sweep, named-subject sweep — each only when a frame was actually
+  inspected, not on a bare "couldn't get a picture") plus web `/snap` and
+  terminal `/look`.
+
+**Live-verified limitation, not a regression**: `retrieve_semantic` anchors
+on the embedding of the *user's trigger phrase* ("check the basement cam"),
+not the vision description itself (`message_vecs` is keyed by user-role
+messages; see "History RAG" in CLAUDE.md). Measured live: a later question
+phrased like the original trigger ("what did you see in the basement
+earlier") scored 0.72 similarity and surfaced the hit; one phrased around
+the *content* instead ("is the cat still on the couch") scored only 0.48,
+below `min_sim` (0.55), and surfaced nothing. This ceiling predates this
+change — it's true of the whole RAG path, for every kind of exchange, not
+specific to vision — but it bounds how "grounded" this actually is: recall
+depends on rephrasing the question, not just on the fact being true.
+Embedding the assistant's reply as a second index would close this gap; out
+of scope here.
+
+Tests: `tests/test_vision_grounding.py`.
 
 ## 3. Few-shot wake-word personalization
 

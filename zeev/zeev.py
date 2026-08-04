@@ -7547,7 +7547,20 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     if hits:
         rag_lines = []
         for u, a in hits:
-            rag_lines.append(f"User: {u[:300]}\nZeev: {a[:300]}")
+            # Cross-modal grounding (docs/research-directions.md #2): a hit
+            # whose stored reply carries _VISION_TAG came from vision_complete(),
+            # not conversation -- it describes a moment, not a standing fact
+            # (the exact failure class the Wyze camera section of CLAUDE.md
+            # documents repeatedly: a stale room description read back as
+            # current truth). Strip the tag from what's shown and say so.
+            is_vision = a.startswith(_VISION_TAG)
+            if is_vision:
+                a = a[len(_VISION_TAG):]
+            line = f"User: {u[:300]}\nZeev: {a[:300]}"
+            if is_vision:
+                line += ("\n(This was a camera observation from a past moment, "
+                         "not a standing fact -- the room may look different now.)")
+            rag_lines.append(line)
         parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
         # The keyword index was ASCII-only, so Hebrew/Russian/Spanish history
         # could never surface here. Semantic retrieval reaches it, which is the
@@ -9669,7 +9682,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         session.append({"role": "user", "content": f"[camera] {q_text}"})
                         session.append({"role": "assistant", "content": snap_reply})
                         append_message("user", f"[camera] {q_text}")
-                        append_message("assistant", snap_reply)
+                        # Tag the STORED copy only -- see _VISION_TAG / finish_turn's
+                        # vision= flag. The session copy above stays plain so nothing
+                        # spoken or shown in this reply changes.
+                        append_message("assistant", _VISION_TAG + snap_reply)
                         if len(session) > 60:
                             session[:] = session[-60:]
                 return
@@ -10068,8 +10084,21 @@ class _DeviceCtx:
     )
 
 
+# Cross-modal grounding (docs/research-directions.md #2): a camera
+# description is already retrievable by the same RAG path as any other
+# exchange (see "History RAG" in CLAUDE.md) -- the alignment work is
+# outsourced to vision_complete()'s pretrained LLM, not trained from
+# scratch. What that gets wrong for free is staleness: unlike a spoken
+# fact, "there's a cat on the couch" describes a moment, not a standing
+# truth, and this project has hit that exact failure class repeatedly (see
+# the Wyze camera section of CLAUDE.md). This tag marks a *stored* reply
+# (never the spoken/session copy) as vision-derived so _build_system_prompt
+# can attach a staleness caveat when RAG resurfaces it later.
+_VISION_TAG = "[camera observation] "
+
+
 def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None,
-                speak=True):
+                speak=True, vision=False):
     """Record `reply`, speak it, and return the device to ready/idle.
 
     Every intent branch hand-rolled this tail. They are NOT all identical --
@@ -10086,12 +10115,18 @@ def finish_turn(ctx, reply, user_text=None, face=True, led=True, voice=None,
     user-turn record (see the `ctx.session.append` for "user" further down);
     everything after that point must leave it None or the turn is stored
     twice.
+
+    `vision=True` prefixes the DB-stored copy with `_VISION_TAG` -- and ONLY
+    the stored copy. What's spoken and what goes into ctx.session (this
+    turn's live context) stays the plain `reply`, so nothing audible or
+    immediately re-read by the LLM changes. The tag only matters to a later
+    session's RAG hit or a post-restart `load_prior()`.
     """
     if user_text is not None:
         ctx.session.append({"role": "user", "content": user_text})
         append_message("user", user_text)
     ctx.session.append({"role": "assistant", "content": reply})
-    append_message("assistant", reply)
+    append_message("assistant", (_VISION_TAG + reply) if vision else reply)
     if led:
         ctx.board.set_rgb(*ctx._LED_SPEAKING)
     if face:
@@ -10638,7 +10673,11 @@ def handle_transcript(ctx, transcript, _depth=0):
         # Every other branch prints its reply; this one didn't, so the first
         # live sweep left a journal that showed both verdicts and no answer.
         print(f"Zeev [subject/{name}]: {reply}\n", flush=True)
-        finish_turn(ctx, reply)
+        # vision=True whenever at least one camera actually returned a frame
+        # that got inspected -- a clean "not there" is still a point-in-time
+        # visual read, not just a canned failure message like "asleep or
+        # offline" (frames == 0).
+        finish_turn(ctx, reply, vision=bool(frames))
         return
     # ─────────────────────────────────────────────────────────────────────
 
@@ -10744,7 +10783,7 @@ def handle_transcript(ctx, transcript, _depth=0):
                 reply = (f"I couldn't get a picture from the {where} just "
                          "now — they may be asleep or offline.")
             print(f"Zeev [wyze/sweep]: {reply}\n", flush=True)
-            finish_turn(ctx, reply)
+            finish_turn(ctx, reply, vision=bool(seen_parts))
             return
         if not stream:
             # Ask instead of picking one. A confidently described wrong room is
@@ -10806,7 +10845,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         clean = _strip_stage_directions(reply).strip()
         reply = clean or (f"I looked at the {wyze_cam_label(stream)}, but I couldn't "
                           "make anything out clearly.")
-        finish_turn(ctx, reply)
+        finish_turn(ctx, reply, vision=True)
         return
     # ─────────────────────────────────────────────────────────────────────
 
@@ -10838,7 +10877,7 @@ def handle_transcript(ctx, transcript, _depth=0):
             ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
             return
         print(f"Zeev [vision]: {reply}\n")
-        finish_turn(ctx, reply)
+        finish_turn(ctx, reply, vision=True)
         return
     # ─────────────────────────────────────────────────────────────────────
 
@@ -13563,7 +13602,7 @@ def main():
                 session.append({"role": "user", "content": f"[camera] {q_text}"})
                 session.append({"role": "assistant", "content": full_reply})
                 append_message("user", f"[camera] {q_text}")
-                append_message("assistant", full_reply)
+                append_message("assistant", _VISION_TAG + full_reply)
                 if tts_on:
                     speak_terminal(full_reply)
             continue

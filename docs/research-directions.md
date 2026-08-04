@@ -9,13 +9,34 @@ infra and no paired/labeled datasets exist anywhere in this project).
 These four are ordered roughly by how close they are to buildable with what
 already exists.
 
-## 1. Retrieval-augmented personalization (no training needed)
+## 1. Retrieval-augmented personalization (no training needed) — DONE 2026-08-04
 
 Semantic memory (`embed_text()` / `message_vecs`, see CLAUDE.md "History RAG")
 already retrieves by embedding similarity using a frozen pretrained model.
 Instead of fine-tuning that model, improve retrieval quality directly:
 re-ranking, recency-weighting, per-topic clustering of past exchanges. Zero
 new infrastructure — just better use of vectors already being computed.
+
+Implemented in `retrieve_semantic()` and `retrieve_relevant()` (both in
+`zeev/zeev.py`):
+
+- **Recency-weighting**: `_recency_factor(ts)` returns an exponential decay
+  (half-life `RAG_RECENCY_HALFLIFE_DAYS`, default 30) blended into ranking as
+  `sim + RAG_RECENCY_WEIGHT * recency`. It's a *nudge*, not a filter —
+  `min_sim`/`min_score` still gate on the raw similarity/keyword-overlap
+  score, never the blended one, so recency can only reorder among
+  already-relevant hits, never admit an irrelevant-but-recent one. Fails
+  open (factor 1.0, no penalty) on a missing or unparseable timestamp.
+- **Dedup re-ranking**: `retrieve_semantic` skips any candidate whose vector
+  is a near-duplicate (cosine ≥ `RAG_DEDUP_SIM`, default 0.97) of a hit
+  already picked, so asking the same question on two different days doesn't
+  spend the whole `k` budget on the same answer twice.
+- Per-topic clustering was considered and dropped for now — at the message
+  counts this project actually has (hundreds, not millions), a clustering
+  pass would add real complexity for a benefit the dedup pass already
+  covers most of.
+
+Tests: `tests/test_rag_reranking.py`.
 
 ## 2. Cross-modal grounding via the LLM as the shared space
 

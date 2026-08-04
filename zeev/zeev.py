@@ -4939,6 +4939,32 @@ def _cosine(a, b):
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+# Recency weighting and dedup for RAG re-ranking (both retrieve_semantic and
+# the keyword fallback). Pure re-ranking of what's already retrieved -- no
+# new infra, no fine-tuning; see docs/research-directions.md #1.
+_RAG_RECENCY_HALFLIFE_DAYS = float(os.environ.get("RAG_RECENCY_HALFLIFE_DAYS", 30))
+_RAG_RECENCY_WEIGHT        = float(os.environ.get("RAG_RECENCY_WEIGHT", 0.15))
+_RAG_DEDUP_SIM             = float(os.environ.get("RAG_DEDUP_SIM", 0.97))
+
+
+def _recency_factor(ts_str, half_life_days=_RAG_RECENCY_HALFLIFE_DAYS):
+    """1.0 for "now", decaying by half every `half_life_days`. Fails open
+
+    (returns 1.0, i.e. no penalty) on an unparseable timestamp -- a ranking
+    nudge must never turn into a hard exclusion just because a ts is missing.
+    """
+    if not ts_str:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(ts_str)
+    except ValueError:
+        return 1.0
+    age_days = (datetime.now() - ts).total_seconds() / 86400.0
+    if age_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
+
+
 def index_message_vec(message_id, content):
     """Embed one message and cache the vector. Safe to call in a background thread."""
     vec = embed_text(content)
@@ -4989,6 +5015,16 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
     Unlike the keyword index this is not limited to the last 500 messages and
     is not ASCII-only, so Hebrew/Russian/Spanish history is reachable for the
     first time -- _tokenize's \\b[a-z]{3,} pattern never matched any of it.
+
+    Ranking is similarity blended with a recency bonus (`_recency_factor`),
+    not raw cosine order -- two exchanges about the same topic should not
+    rank identically regardless of whether one was yesterday or ten months
+    ago. `min_sim` still gates on the RAW similarity, never the blended
+    score, so recency can only reorder among already-relevant hits, never
+    admit an irrelevant-but-recent one. A lightweight dedup re-rank then
+    skips any candidate whose vector is a near-duplicate of one already
+    picked (`_RAG_DEDUP_SIM`), so k isn't spent twice on the same question
+    asked on two different days.
     """
     qv = embed_text(query)
     if not qv:
@@ -4996,7 +5032,7 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
     try:
         with _db_lock:
             rows = _db().execute(
-                "SELECT v.message_id, v.dim, v.vec, m.role, m.content "
+                "SELECT v.message_id, v.dim, v.vec, m.role, m.content, m.ts "
                 "FROM message_vecs v JOIN messages m ON m.id = v.message_id "
                 "WHERE m.role = 'user'"
             ).fetchall()
@@ -5008,15 +5044,23 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
     for r in rows:
         if r["dim"] != len(qv):
             continue          # model changed; stale vectors are simply skipped
-        scored.append((_cosine(qv, _vec_unpack(r["vec"], r["dim"])), r["message_id"], r["content"]))
+        vec = _vec_unpack(r["vec"], r["dim"])
+        sim = _cosine(qv, vec)
+        blended = sim + _RAG_RECENCY_WEIGHT * _recency_factor(r["ts"])
+        scored.append((blended, sim, r["message_id"], r["content"], vec))
     if not scored:
         return []
-    scored.sort(reverse=True)
+    scored.sort(key=lambda t: t[0], reverse=True)
 
     pairs = []
-    for sim, mid, content in scored[:k * 3]:
-        if sim < min_sim or len(pairs) >= k:
+    picked_vecs = []
+    for blended, sim, mid, content, vec in scored[:k * 5]:
+        if len(pairs) >= k:
             break
+        if sim < min_sim:
+            continue
+        if any(_cosine(vec, pv) >= _RAG_DEDUP_SIM for pv in picked_vecs):
+            continue
         with _db_lock:
             nxt = _db().execute(
                 "SELECT content FROM messages WHERE id > ? AND role = 'assistant' "
@@ -5024,11 +5068,19 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
             ).fetchone()
         if nxt:
             pairs.append((content, nxt["content"]))
+            picked_vecs.append(vec)
     return pairs
 
 
 def retrieve_relevant(query, k=2, min_score=2):
-    """Return up to k (user_msg, assistant_reply) pairs most relevant to query."""
+    """Return up to k (user_msg, assistant_reply) pairs most relevant to query.
+
+    Ranked by keyword-overlap count blended with recency (`_recency_factor`),
+    the same nudge `retrieve_semantic` applies -- see
+    docs/research-directions.md #1. `min_score` still gates on the raw
+    overlap count, never the blended one, so recency only reorders among
+    already-relevant hits.
+    """
     if not _HISTORY_INDEX or not _HISTORY_ENTRIES:
         return []
     scores = {}
@@ -5037,13 +5089,17 @@ def retrieve_relevant(query, k=2, min_score=2):
             scores[idx] = scores.get(idx, 0) + 1
     if not scores:
         return []
-    ranked = sorted(scores, key=lambda i: -scores[i])
+    ranked = sorted(
+        scores,
+        key=lambda i: scores[i] + _RAG_RECENCY_WEIGHT * _recency_factor(_HISTORY_ENTRIES[i].get("ts")),
+        reverse=True,
+    )
     pairs = []
     seen = set()
     for idx in ranked:
-        if scores[idx] < min_score or len(pairs) >= k:
+        if len(pairs) >= k:
             break
-        if idx in seen:
+        if scores[idx] < min_score or idx in seen:
             continue
         entry = _HISTORY_ENTRIES[idx]
         role  = entry.get("role")

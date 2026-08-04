@@ -9654,6 +9654,17 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                            f"Center {summary['center']}°C, hotspot at row {summary['hotspot_row']} "
                            f"col {summary['hotspot_col']} (32×24 grid). {question}")
                     model_id = route_model(question)
+                    # Same override as /chat, stream_reply, and device mode: a
+                    # thermal question can still ask about Torah/parsha content
+                    # (e.g. "warm enough in here for shabbat?"), and _build_system_prompt
+                    # injects the same large Torah text block regardless of which
+                    # path called it. Without this, the request stayed on 8B and
+                    # its 6k TPM limit, and the token cap below stayed at 600 --
+                    # the exact truncation failure class documented at length in
+                    # CLAUDE.md's Torah RAG section, just reachable from an
+                    # un-gated fourth call site.
+                    if needs_parsha_reading(ctx) or needs_torah(ctx):
+                        model_id = MODELS["2"][0]
                     thermal_sse({"model": model_label(model_id)})
 
                     def on_search(q):
@@ -9663,9 +9674,17 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     with lock:
                         snapshot = list(session) + [{"role": "user", "content": ctx}]
                     payload = [{"role": "system", "content": sys_prompt}] + snapshot
+                    if needs_parsha_reading(ctx):
+                        tok_limit = 1600
+                    elif needs_torah(ctx):
+                        tok_limit = 1200
+                    elif model_id in (MODELS["3"][0], MODELS["2"][0]):
+                        tok_limit = 1200
+                    else:
+                        tok_limit = 600
                     thermal_reply = ""
                     try:
-                        resp, err = _groq_post_with_fallback(payload, model_id, max_tokens=600)
+                        resp, err = _groq_post_with_fallback(payload, model_id, max_tokens=tok_limit)
                         if err:
                             thermal_sse({"error": err})
                         else:
@@ -13705,6 +13724,14 @@ def main():
                        f"Center {summary['center']}°C, hotspot at row {summary['hotspot_row']} "
                        f"col {summary['hotspot_col']} (32×24 grid). {question}")
                 model_id = locked_model if locked_model else route_model(question)
+                # Same override the main chat loop applies to plain input --
+                # stream_reply() independently raises its OWN token cap for
+                # Torah/parsha content (it re-checks messages[-1]["content"],
+                # which is `ctx` here), but the model itself stayed unrouted:
+                # 8B still hits its 6k TPM limit on a full Torah passage
+                # regardless of how high max_tokens is set.
+                if locked_model is None and (needs_parsha_reading(ctx) or needs_torah(ctx)):
+                    model_id = MODELS["2"][0]
                 if locked_model is None:
                     print(f"{DIM}[auto → {model_label(model_id)}]{RESET}", flush=True)
                 session.append({"role": "user", "content": ctx})

@@ -7,7 +7,7 @@ Commit staged changes (never include data/*.json), push to origin, then ssh to t
 
 After a successful deploy:
 1. Update `/home/azaurov/Zeev/CLAUDE.md` to reflect any architectural changes made in this session (new functions, changed behaviour, updated constants, new endpoints, etc.).
-   - **Hard limit: CLAUDE.md must stay under 25 000 characters.** Check with `wc -c` after editing.
+   - **Hard limit: CLAUDE.md must stay under 120 000 characters.** Check with `wc -c` after editing. (Raised 2026-08-04 from a stale 25 000 — the file was already at ~100 000 from accumulated incident write-ups, so the old number flagged on every deploy regardless of what changed.)
    - If adding new content would exceed the limit, trim or compress existing sections first — remove obvious/redundant detail, shorten verbose descriptions, compress bullet lists. Never just append.
    - Only document non-obvious constraints, gotchas, and decision rationale. Omit anything obvious from reading the code or function names.
 2. Update `/home/azaurov/Zeev/README.md` to reflect the same changes for a public audience — what Zeev is, how to run it, key features, and any new capabilities added this session. Commit both files together in a single `docs:` commit and push.

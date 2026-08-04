@@ -43,7 +43,7 @@ def test_daily_habit_block_is_not_an_event(zeev):
 def test_fortnightly_recurrence_survives(zeev):
     """Recycling collection recurs but 3x in 45 days -- and putting the bins
     out is exactly the kind of thing worth being told about."""
-    e = _timed("Recycling collection at Canton", _soon(), recurringEventId="r2")
+    e = _timed("Recycling collection at Fairview", _soon(), recurringEventId="r2")
     assert zeev.gcal_event_category(e, set()) is not None
 
 
@@ -376,10 +376,10 @@ def test_today_and_tomorrow_merge_into_one_breath(zeev):
     """With a birthday most days these two collide at the same 9 AM."""
     d5 = (dt.date.today() + dt.timedelta(days=5)).isoformat()
     d6 = (dt.date.today() + dt.timedelta(days=6)).isoformat()
-    texts = _plan_texts(zeev, [_bday("Ols Beqari", d5), _bday("Rachel Zaurov", d6)])
+    texts = _plan_texts(zeev, [_bday("Ols Baran", d5), _bday("Rachel Winters", d6)])
     merged = [t for t in texts if "today" in t and "tomorrow" in t]
     assert len(merged) == 1, texts
-    assert merged[0] == "Ols Beqari's Birthday is today. And tomorrow: Rachel Zaurov."
+    assert merged[0] == "Ols Baran's Birthday is today. And tomorrow: Rachel Winters."
 
 
 def test_single_birthday_keeps_its_plain_phrasing(zeev):
@@ -423,7 +423,7 @@ def test_pulled_forward_group_keeps_a_stable_key(zeev):
     for the rest of the day. Keyed on the scheduled time it is stable."""
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
     now = time.time()
-    events = [_bday("Sabrina Escalante", tomorrow)]
+    events = [_bday("Sabrina Cole", tomorrow)]
     k1 = {k for k, _, _, _ in zeev.gcal_plan_all(events, now, set())}
     k2 = {k for k, _, _, _ in zeev.gcal_plan_all(events, now + 1800, set())}
     assert k1 and k1 == k2
@@ -434,8 +434,8 @@ def test_birthday_scan_is_idempotent_across_polls(scan_db, monkeypatch):
     z = scan_db
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
     later = (dt.date.today() + dt.timedelta(days=4)).isoformat()
-    ev = [_bday("Sabrina Escalante", tomorrow), _bday("Nathan Is", tomorrow),
-          _bday("RJ Megesi", later)]
+    ev = [_bday("Sabrina Cole", tomorrow), _bday("Nathan Kwan", tomorrow),
+          _bday("RJ Tanaka", later)]
     assert _drive(z, monkeypatch, ev)[0] > 0
     assert _drive(z, monkeypatch, ev) == (0, 0, 0)
     assert _drive(z, monkeypatch, ev) == (0, 0, 0)
@@ -470,8 +470,8 @@ def _bday_at(name, date_obj):
 
 def test_a_fired_group_is_not_reissued_for_its_remaining_member(scan_db, monkeypatch):
     """Live 2026-08-02: the 09:00 bucket announced "Two birthdays today:
-    Sabrina Escalante and Nathan Is. And tomorrow: RJ Megesi", then the 09:09
-    scan announced "RJ Megesi's Birthday is tomorrow" all over again.
+    Sabrina Cole and Nathan Kwan. And tomorrow: RJ Tanaka", then the 09:09
+    scan announced "RJ Tanaka's Birthday is tomorrow" all over again.
 
     Sabrina and Nathan had dropped out of the bucket's digest the moment their
     own 9 AM passed, minting a new key for the same bucket -- membership drifted

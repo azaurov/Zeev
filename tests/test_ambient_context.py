@@ -42,7 +42,7 @@ def test_clock_is_in_every_prompt(zeev):
 # was blind to where it was on every other turn. Two properties matter: the read
 # path must never trigger a scan (a cold gps_locate measured 1.27s on the Pi,
 # plus the rescan wait), and a coarse fix must not assert a city -- an IP fix is
-# ~25 km and named Braintree/Brockton for a device sitting in Canton.
+# ~25 km and named Ashcroft/Millbrook for a device sitting in Fairview.
 
 import pytest
 
@@ -58,7 +58,7 @@ def _gps(zeev):
 
 def _fix(zeev, gps, **kw):
     loc = {"lat": 42.14, "lon": -71.11, "accuracy": 11, "method": "wifi+google",
-           "city": "Canton", "regionName": "Massachusetts", "country": "United States"}
+           "city": "Fairview", "regionName": "Massachusetts", "country": "United States"}
     loc.update(kw)
     gps["result"] = loc
     gps["ts"] = __import__("time").time()
@@ -67,14 +67,14 @@ def _fix(zeev, gps, **kw):
 
 def test_precise_fix_gives_city(zeev, _gps):
     _fix(zeev, _gps)
-    assert zeev.ambient_place() == "Canton, Massachusetts, United States"
+    assert zeev.ambient_place() == "Fairview, Massachusetts, United States"
 
 
 def test_coarse_fix_drops_the_city(zeev, _gps):
     """An IP fix names the wrong town; region is true, a wrong city is not."""
-    _fix(zeev, _gps, accuracy=25000, method="ip", city="Braintree")
+    _fix(zeev, _gps, accuracy=25000, method="ip", city="Ashcroft")
     place = zeev.ambient_place()
-    assert "Braintree" not in place
+    assert "Ashcroft" not in place
     assert place == "Massachusetts, United States"
 
 
@@ -82,7 +82,7 @@ def test_ambient_block_omits_coordinates(zeev, _gps):
     """Coarse name only -- this goes to third-party LLM providers every turn."""
     _fix(zeev, _gps)
     p = zeev._build_system_prompt("hello")
-    assert "## Approximate location: Canton" in p
+    assert "## Approximate location: Fairview" in p
     assert "42.14" not in p and "-71.11" not in p
     assert "wifi+google" not in p
 

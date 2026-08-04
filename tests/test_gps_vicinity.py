@@ -54,10 +54,10 @@ def test_outside_home_radius_falls_through_to_road(zeev, _home):
 
 
 def test_gps_summary_includes_vicinity(zeev):
-    loc = _loc(road="Lincoln Street", city="Canton", regionName="Massachusetts",
+    loc = _loc(road="Lincoln Street", city="Fairview", regionName="Massachusetts",
                country="United States", method="wifi+google")
     s = zeev.gps_summary(loc)
-    assert s.startswith("approximately on Lincoln Street, Canton")
+    assert s.startswith("approximately on Lincoln Street, Fairview")
 
 
 def test_gate_matches_street_and_home_phrasing(zeev):

@@ -6024,8 +6024,8 @@ def ambient_place(loc: dict | None = None) -> str:
     which includes coordinates, stays behind the `needs_gps` gate where the user
     actually asked to be located.
 
-    An IP fix is ~25 km and names the wrong town -- measured Braintree and
-    Brockton for a device sitting in Canton -- so anything coarser than
+    An IP fix is ~25 km and names the wrong town -- measured Ashcroft and
+    Millbrook for a device sitting in Fairview -- so anything coarser than
     `_AMBIENT_CITY_MAX_ACC` reports region only. Asserting a wrong city is worse
     than saying less, because the model repeats it as fact.
     """
@@ -6618,8 +6618,8 @@ def gcal_plan_all(events, now, routine_titles=None):
         #
         # It must therefore change ONLY when the calendar changes. Live
         # 2026-08-02: the 09:00 bucket announced "Two birthdays today: Sabrina
-        # and Nathan. And tomorrow: RJ Megesi", and the 09:09 scan announced
-        # "RJ Megesi's Birthday is tomorrow" all over again -- because Sabrina
+        # and Nathan. And tomorrow: RJ Tanaka", and the 09:09 scan announced
+        # "RJ Tanaka's Birthday is tomorrow" all over again -- because Sabrina
         # and Nathan had dropped out of the digest once their own 9 AM passed,
         # minting a new key for the same bucket. Membership is date-based and
         # survives the day; only the dues expire.

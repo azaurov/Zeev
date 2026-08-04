@@ -215,6 +215,80 @@ def oww_best(scores):
     return best_name, best
 
 
+# Few-shot wake-word personalization (docs/research-directions.md #3): a
+# handful of enrollment clips of the actual household voice/mic combo, used
+# to find a per-stem threshold that reliably fires for THIS setup -- instead
+# of the ~90-minute Colab retrain in docs/wake-word-training.md. See
+# zeev/wake_enroll.py, the CLI that drives these on the Pi.
+def oww_score_pcm(model, pcm, frame_samples=1280):
+    """Feed one clip of 16kHz mono S16LE PCM through `model` frame-by-frame
+    and return the max score seen per stem across the whole clip.
+
+    `model.predict()` scores a *rolling* buffer (see `_wake_loop_oww`), so a
+    single call only reflects one 80ms frame -- finding how strongly a clip
+    matches means feeding it frame-by-frame and taking the peak.
+    `model.reset()` runs first so a previous clip's buffer state can't bleed
+    into this one, the same reset `_wake_loop_oww` does between turns.
+    """
+    import numpy as np
+    model.reset()
+    frame_bytes = frame_samples * 2
+    best = {}
+    for i in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+        frame = np.frombuffer(pcm[i:i + frame_bytes], dtype=np.int16)
+        for stem, score in (model.predict(frame) or {}).items():
+            score = float(score)
+            if score > best.get(stem, -1.0):
+                best[stem] = score
+    return best
+
+
+OWW_ENROLL_FLOOR      = float(os.environ.get("OWW_ENROLL_FLOOR", "0.2"))
+OWW_ENROLL_MARGIN     = float(os.environ.get("OWW_ENROLL_MARGIN", "0.85"))
+OWW_ENROLL_MIN_VIABLE = float(os.environ.get("OWW_ENROLL_MIN_VIABLE", "0.15"))
+
+
+def enroll_suggest_threshold(stem, clip_scores, current=None):
+    """Suggest a personalized OWW_THRESHOLDS value for `stem` from a few
+    enrollment clips. Returns (suggested, warning) -- exactly one is None.
+
+    `clip_scores` is one max-score-per-clip list for this stem (one
+    `oww_score_pcm` call per recorded clip) -- a handful of genuine "Alex
+    says the wake phrase" samples, not a training set. The weakest clip is
+    the binding constraint: a threshold above it means that very utterance
+    would not have fired. `OWW_ENROLL_MARGIN` (0.85) keeps the suggestion a
+    safety margin below that minimum, since a real-world utterance can be
+    quieter than a deliberate enrollment recording.
+
+    This can only ever LOWER the threshold, never raise it: enrollment
+    proves genuine wakes score at least this high, but says nothing about
+    false positives on other audio -- raising the bar needs negative
+    examples, which is direction #4 (active learning from false-positive
+    logs), not this. The result is capped at `current` (or the effective
+    default via `oww_threshold`).
+
+    Below `OWW_ENROLL_MIN_VIABLE` (0.15) a threshold change can't help: the
+    model just isn't recognizing this phrase from this voice/mic well
+    enough, and lowering the bar that far would let ambient noise through
+    too. The right fix at that point is retraining
+    (docs/wake-word-training.md), so this returns a warning instead of a
+    dangerously low number.
+    """
+    if not clip_scores:
+        return None, "no scored clips"
+    weakest = min(clip_scores)
+    if weakest < OWW_ENROLL_MIN_VIABLE:
+        return None, (
+            f"weakest enrollment score ({weakest:.2f}) is below "
+            f"{OWW_ENROLL_MIN_VIABLE:.2f} -- lowering the threshold this far "
+            "would let ambient noise through too. Retraining is the real fix "
+            "here, see docs/wake-word-training.md."
+        )
+    ceiling = oww_threshold(stem) if current is None else current
+    suggested = min(max(OWW_ENROLL_FLOOR, weakest * OWW_ENROLL_MARGIN), ceiling)
+    return round(suggested, 2), None
+
+
 OWW_COOLDOWN   = float(os.environ.get("OWW_COOLDOWN",  "2.0"))
 # Quiet period after a turn ends before the mic re-arms. The speaker is inches
 # from the mic with no echo cancellation, so without this the tail of Zeev's

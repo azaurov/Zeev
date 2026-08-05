@@ -8429,6 +8429,41 @@ def stream_reply(messages, model):
     sys_prompt = _build_system_prompt(user_text, on_search, messages)
     payload_msgs = [{"role": "system", "content": sys_prompt}] + messages
 
+    # ── Tool use ─────────────────────────────────────────────────────────
+    # Same gate/round-trip as device mode's handle_transcript and the web
+    # /chat handler (zeev.py ~line 11124 / ~9898) -- stream_reply is the one
+    # function both terminal call sites go through, so patching it here covers
+    # the terminal REPL in one place. Without this, "what are my reminders?"
+    # in the terminal had no way to see real reminder data either, for the
+    # same reason as the web /chat bug: _build_system_prompt never injects
+    # live reminders, so the model fabricated an answer.
+    if _TOOL_INTENT_RE.search(user_text):
+        tool_model = MODELS["2"][0]
+        tool_sys = sys_prompt + (
+            f"\n\nCurrent local time: {datetime.now().strftime('%A %Y-%m-%d %H:%M')}. "
+            "Use the tools when the user asks to be reminded, to set a timer, "
+            "to save a note, or to list or cancel reminders. Resolve relative "
+            "times against the current time above and pass ISO-8601. After a "
+            "tool runs, confirm in one short sentence."
+        )
+        tool_msgs = [{"role": "system", "content": tool_sys}] + messages
+        tresp, terr = _groq_post(tool_msgs, tool_model, stream=False,
+                                 max_tokens=400, tools=_TOOLS)
+        if terr is None and tresp is not None and tresp.status_code == 200:
+            try:
+                tmsg = tresp.json()["choices"][0]["message"]
+            except Exception as e:
+                print(f"[tools] bad tool response: {e}", flush=True)
+                tmsg = {}
+            calls = tmsg.get("tool_calls") or []
+            if calls:
+                results = run_tool_calls(calls)
+                payload_msgs = tool_msgs + [tmsg] + results
+                model = tool_model
+        else:
+            status = tresp.status_code if tresp is not None else terr
+            print(f"[tools] tool call failed ({status}) — plain chat", flush=True)
+
     if needs_parsha_reading(user_text):
         tok_limit = 1600
     elif needs_torah(user_text):

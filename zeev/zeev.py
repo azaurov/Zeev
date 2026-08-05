@@ -7690,6 +7690,20 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                         f"{torah_excerpt_he(he, en, user_text, budget, focus)}")
             torah_lines = "\n".join(_lines)
             parts.append(f"\n\n## Relevant Torah/Talmud passages:\n{torah_lines}")
+            # SYSTEM_PROMPT casts Zeev as drawn to "the beautiful intersection
+            # of ancient wisdom and quantum science" -- fine for open-ended
+            # reflection, but it bled an unprompted "quantum entanglement"
+            # analogy into a factual explanation of Hagigah 20a's impurity
+            # laws (found live via rag_probe.py, 2026-08-05): the passage
+            # above said nothing about quantum mechanics, so the analogy was
+            # invented, not retrieved. Scoped here rather than removed from
+            # SYSTEM_PROMPT, since the trait itself is wanted elsewhere.
+            parts.append(
+                "\n\n## Instruction: When explaining the passage(s) above, "
+                "stick to what they actually say. Save connections to quantum "
+                "science or other outside disciplines for open-ended reflection "
+                "-- do not present them as part of what this specific text teaches."
+            )
             if focus:
                 # Retrieval was already working when this was added: live
                 # 2026-07-31 the angels invocation was in the prompt and the 70B

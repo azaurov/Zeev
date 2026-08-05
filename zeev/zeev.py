@@ -9890,6 +9890,43 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             sys_prompt = _build_system_prompt(user_msg, on_search, session)
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
+
+            # ── Tool use ─────────────────────────────────────────────────
+            # Same gate/round-trip as device mode's handle_transcript (zeev.py
+            # ~line 11124) -- this path was missing here entirely, so asking
+            # "what are my reminders?" over the web UI had no way to ever see
+            # real reminder data and the model fabricated an answer instead
+            # (found via rag_probe.py's first live run, CLAUDE.md). Reminders
+            # in particular have no other grounding path: _build_system_prompt
+            # never injects them, only the separate _reminder_loop announces
+            # them proactively.
+            if _TOOL_INTENT_RE.search(user_msg):
+                tool_model = MODELS["2"][0]
+                tool_sys = sys_prompt + (
+                    f"\n\nCurrent local time: {datetime.now().strftime('%A %Y-%m-%d %H:%M')}. "
+                    "Use the tools when the user asks to be reminded, to set a timer, "
+                    "to save a note, or to list or cancel reminders. Resolve relative "
+                    "times against the current time above and pass ISO-8601. After a "
+                    "tool runs, confirm in one short sentence."
+                )
+                tool_msgs = [{"role": "system", "content": tool_sys}] + snapshot
+                tresp, terr = _groq_post(tool_msgs, tool_model, stream=False,
+                                         max_tokens=400, tools=_TOOLS)
+                if terr is None and tresp is not None and tresp.status_code == 200:
+                    try:
+                        tmsg = tresp.json()["choices"][0]["message"]
+                    except Exception as e:
+                        print(f"[tools] bad tool response: {e}", flush=True)
+                        tmsg = {}
+                    calls = tmsg.get("tool_calls") or []
+                    if calls:
+                        results = run_tool_calls(calls)
+                        payload_msgs = tool_msgs + [tmsg] + results
+                        model = tool_model
+                else:
+                    status = tresp.status_code if tresp is not None else terr
+                    print(f"[tools] tool call failed ({status}) — plain chat", flush=True)
+
             if needs_parsha_reading(user_msg):
                 tok_limit = 1600
             elif needs_torah(user_msg):

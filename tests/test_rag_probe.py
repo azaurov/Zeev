@@ -282,6 +282,84 @@ def test_history_block_extraction_stops_before_language_guard_note():
     assert text == "User: what is up\nZeev: שלום עום"
 
 
+def test_history_retrieval_merges_concurrently_triggered_torah_block():
+    """A question can land a history hit AND trip needs_torah() in the real
+    prompt (e.g. "help with the bedtime angel prayer") -- the answer may be
+    grounded in the Torah block instead of the history block. Live 2026-08-05:
+    grading only the history slice flagged a correct, Torah-sourced answer as
+    UNGROUNDED."""
+    sys_prompt = (
+        "## Relevant past exchanges:\n"
+        "User: what is up\nZeev: not much\n\n"
+        "## Relevant Torah/Talmud passages:\n"
+        "Psalms 91: He who dwells in the shelter of the Most High.\n\n"
+        "Reply in English only."
+    )
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("what is up", "not much")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return [("Psalms 91", "He who dwells in the shelter of the Most High.", "")]
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (7, 'user', 'what is up')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert ref == "7, Psalms 91"
+    assert "not much" in text
+    assert "He who dwells in the shelter of the Most High." in text
+
+
+def test_history_retrieval_no_torah_block_unaffected():
+    """No concurrent Torah block -- output must match the pre-merge behavior
+    exactly (empty torah ref/text contributes nothing)."""
+    sys_prompt = "## Relevant past exchanges:\nUser: hi\nZeev: hello\n\nReply in English only."
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("hi", "hello")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return []
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (1, 'user', 'hi')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert ref == "1"
+    assert text == "User: hi\nZeev: hello"
+
+
 # ---------------------------------------------------------------------------
 # Report stats (pure)
 # ---------------------------------------------------------------------------

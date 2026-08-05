@@ -229,7 +229,22 @@ def _history_retrieval(zeev_mod, question, sys_prompt):
                 ).fetchone()
                 if row:
                     ids.append(str(row["id"]))
-    return ", ".join(ids), m.group(1).strip()
+    ref, text = ", ".join(ids), m.group(1).strip()
+
+    # A question that lands a history hit can ALSO trigger needs_torah() --
+    # the two gates are independent -- so the real system prompt can carry
+    # both blocks at once. Found live 2026-08-05: "help with the bedtime angel
+    # prayer" correctly answered from the injected Torah/Siddur passage, but
+    # this function only ever extracted the history block, so the grader saw
+    # an irrelevant slice of context and flagged a well-grounded answer as
+    # UNGROUNDED. Merge in any concurrently-triggered Torah block so the
+    # grader sees everything the answer could legitimately have drawn from.
+    torah_ref, torah_text = _torah_retrieval(zeev_mod, question, sys_prompt)
+    if torah_text:
+        ref = ", ".join(p for p in (ref, torah_ref) if p)
+        text = "\n\n".join(p for p in (text, torah_text) if p)
+
+    return ref, text
 
 
 # ---------------------------------------------------------------------------

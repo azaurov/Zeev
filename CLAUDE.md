@@ -317,10 +317,7 @@ FTS5 DB: `data/torah.db`. Sources: Tanakh, Mishna, Talmud, Apocrypha, Siddur/Hag
 - **Torah probes** seed a question from a random `passages` row without ever telling the generator the ref, so it can't leak what it was never given; **history probes** sample a real past user-role message (noise-filtered the same way the wake-word follow-up guard is) so faithfulness is measured against actual traffic, not invented questions.
 - A probe whose generated/sampled question triggers no retrieval at all is rerolled, not logged — there's nothing to grade faithfulness against.
 - `--report` prints the rolling 30-day grounded rate by source plus the most recent UNGROUNDED rows with their grader note — each one is a candidate real bug, the same failure class as the hallucination bugs already documented above.
-- **Not wired into a live crontab from this cloud checkout** — `data/zeev.db`/`data/torah.db` are git-ignored and only populated on the Pi, and this agent has no SSH/physical access to it. Suggested entry, staggered from `quantum_daily.py`'s `0 6 * * *` and `weekly_reflection.py`'s `0 7 * * 0`:
-  ```
-  30 6 * * *  cd /home/ragnar/Zeev && python3 zeev/rag_probe.py --n 8 >> data/rag_probe.log 2>&1
-  ```
+- **Wired up on the Pi via systemd** (`zeev-rag-probe.service` + `.timer`), the same mechanism `zeev-quantum-daily`/`zeev-weekly-reflection` use rather than literal cron — `Persistent=true` catches a missed 06:30 firing on next boot instead of losing it the way plain cron would if the Pi was asleep. Staggered between quantum-daily's 06:00 and weekly-reflection's Sunday 07:00. Logs to `zeev/data/rag_probe.log`.
 - Out of scope on purpose: no fine-tuning export, no changes to any live request-handling path — this is a read-only-against-production dashboard. Pinned by `tests/test_rag_probe.py` (grading parsing, question-prompt construction, DB round-trip, retrieval-block extraction — all with `_llm_complete` stubbed, no real network calls).
 
 ### Quantum reasoning

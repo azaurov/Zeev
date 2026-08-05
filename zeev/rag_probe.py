@@ -24,11 +24,11 @@ Usage:
     python3 zeev/rag_probe.py --report               # rolling 30-day faithfulness report
     python3 zeev/rag_probe.py --report --report-days 7
 
-Suggested crontab entry (add on the Pi -- data/*.db is git-ignored and only
-lives there; this cloud checkout has neither file populated). Staggered from
-quantum_daily.py's 0 6 * * * and weekly_reflection.py's 0 7 * * 0:
-
-    30 6 * * *  cd /home/ragnar/Zeev && python3 zeev/rag_probe.py --n 8 >> data/rag_probe.log 2>&1
+Scheduled on the Pi via systemd (zeev-rag-probe.service + .timer), the same
+mechanism quantum_daily.py/weekly_reflection.py use rather than literal cron --
+a Pi asleep at the scheduled time loses a plain cron firing outright, while a
+systemd timer with Persistent=true catches up on next boot. Staggered 06:30,
+between quantum_daily's 06:00 and weekly_reflection's Sunday 07:00.
 """
 
 import argparse

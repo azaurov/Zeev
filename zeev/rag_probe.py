@@ -259,6 +259,13 @@ CONTEXT:
 ANSWER:
 {answer}
 
+Note: the assistant is named Zeev, but its spoken words are voiced by a
+secretary persona named Sarina, so the answer may be labelled "Sarina:" or
+speak in Sarina's voice even when the retrieved context only says "Zeev:" (or
+vice versa). Do not count that alone as ungrounded -- it is the same speaker
+under two names, not an invented character. Judge groundedness only on the
+answer's actual factual claims.
+
 Does this answer state anything not supported by the passage/context above? Reply GROUNDED, UNGROUNDED, or UNSURE on the first line, then one line explaining why."""
 
 _UNGROUNDED_RE = re.compile(r"\bUNGROUNDED\b", re.I)

@@ -40,6 +40,17 @@ def test_parse_grade_ungrounded_wins_over_substring_match():
     assert grounded == 0
 
 
+def test_grade_prompt_exempts_sarina_persona_naming():
+    """The grader has no other way to know Sarina is a real persona (Zeev's
+    spoken-word voice, see zeev.py's SYSTEM_PROMPT) -- live 2026-08-05, five
+    separate probes were flagged UNGROUNDED purely because the answer said
+    "Sarina:" where the retrieved context only said "Zeev:". The prompt must
+    tell the grader these are the same speaker."""
+    prompt = rag_probe._GRADE_PROMPT.format(context="Zeev: hello", answer="Sarina: hello")
+    assert "Sarina" in prompt and "Zeev" in prompt
+    assert "same speaker" in prompt.lower() or "two names" in prompt.lower()
+
+
 def test_parse_grade_note_is_second_line():
     _grounded, note = rag_probe.parse_grade("GROUNDED\nThe reply only restates the passage.")
     assert note == "The reply only restates the passage."

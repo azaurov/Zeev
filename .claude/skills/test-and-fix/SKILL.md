@@ -135,7 +135,22 @@ SSH to `ragnar@ragnarok` and run:
    "
    ```
 
-5. **needs_* function matrix** — verify each detection function fires correctly for representative queries:
+5. **RAG-faithfulness probe findings** — query the `rag_probes` table (populated by `zeev/rag_probe.py`) for recent UNGROUNDED rows and cross-check against `docs/rag-probe-findings.md`, which documents every finding investigated so far (probe-grading gaps already fixed: Torah/location/persona-block merges; genuine production bugs already fixed: fabricated reminders, unscoped quantum-analogy bleed, stale-conversation-as-current). Any UNGROUNDED row not already covered there is a candidate real bug or a new probe-grading gap — investigate the same way the existing entries were: check whether the answer is actually grounded in something the grader wasn't shown (another always-injected prompt block, broader history) before concluding it's a genuine fabrication.
+   ```
+   ssh ragnar@ragnarok "cd ~/Zeev && python3 -c \"
+   import sys
+   sys.path.insert(0, 'zeev')
+   import zeev
+   con = zeev._db()
+   rows = con.execute('SELECT ts, source, question, grader_note FROM rag_probes WHERE grounded=0 ORDER BY ts DESC LIMIT 15').fetchall()
+   for r in rows:
+       print(r['ts'], r['source'], repr(r['question'])[:80])
+       print('  ', r['grader_note'][:150])
+   \""
+   ```
+   **Known pending lead (2026-08-06, not yet confirmed or fixed)**: a torah probe on "What does it mean when the Talmud says that Rabbi Ami rescinds a sale because it was a 'mistaken transaction'?" was flagged UNGROUNDED — the seed passage check passed (so `_run_torah_probe`'s reroll-on-mismatch guard didn't catch it), but the shown excerpt (Bekhorot 13b, idol-purchase/vessel-pulling rules) doesn't obviously contain "Rabbi Ami" or "mistaken transaction" in what's shown. Possible that `_gen_torah_question` is inventing terms not actually in its own seed passage's excerpt, or that the full daf (untruncated) does contain it and the excerpt is just cut short — check this first before broader static analysis.
+
+6. **needs_* function matrix** — verify each detection function fires correctly for representative queries:
    ```
    python3 -c "
    import os, sys
@@ -179,6 +194,7 @@ Common bugs to look for and how to fix them:
 - **Old `idle_timeout` value**: change any `_collect_piper_audio(p)` call without explicit `idle_timeout` to pass `idle_timeout=8.0`.
 - **`needs_parsha_reading` not gating model/token overrides in web/terminal path**: ensure the `stream_reply` path also forces 70B when `needs_parsha_reading()`.
 - **Bare `except: pass` in TTS/LLM path**: at minimum log the error with `print(f"[warn] {e}", flush=True)`.
+- **RAG probe-grading gap** (`rag_probe.py`): a `rag_probes` UNGROUNDED finding where the answer is actually grounded in a prompt block `_history_retrieval`/`_torah_retrieval` doesn't show the grader. Check whether `_build_system_prompt` injects something unconditionally (Torah, `## Approximate location:`, `SYSTEM_PROMPT` itself — all three were missed at different points) that a new merge function needs to surface, following the existing `_torah_retrieval`/`_location_retrieval`/`_persona_context` pattern in `zeev/rag_probe.py`.
 
 ## Phase 4 — Commit and deploy
 
@@ -186,7 +202,7 @@ After all fixes are applied and re-checks pass:
 
 1. Run the deploy skill: commit changes with a `fix:` prefix message listing each bug, push, SSH pull, restart `zeev-device`, tail logs to confirm clean startup.
 2. Run the Phase 2 live checks again to confirm all fixes hold on the Pi.
-3. Update `CLAUDE.md` to document any behaviour changes (constants, function signatures, detection logic). Do not pad — only document what changed.
+3. Update `CLAUDE.md` to document any behaviour changes (constants, function signatures, detection logic). Do not pad — only document what changed. **RAG-faithfulness probe findings specifically go in `docs/rag-probe-findings.md`** (the full findings history now lives there, not inline in CLAUDE.md — see its own header note), with at most a one-line summary update in CLAUDE.md's "RAG-faithfulness dashboard" section if the current-state summary itself needs to change.
 
 ## Output format
 

@@ -4299,6 +4299,25 @@ def _db() -> sqlite3.Connection:
                 dim        INTEGER NOT NULL,
                 vec        BLOB    NOT NULL
             );
+            -- Per-completion finish_reason from Groq/OpenAI-compatible chat
+            -- completions ("stop" natural, "length" hit max_tokens, ...).
+            -- Read-only instrumentation, added 2026-08-06 to measure which
+            -- model/path actually hits its token ceiling most often -- before
+            -- this the only truncation signal anywhere was device mode's
+            -- _last_complete_sentence() punctuation heuristic, which infers
+            -- truncation from the spoken text rather than reading the API's
+            -- own answer. Logged only from the highest-traffic chat paths
+            -- (device_chat, web_chat, terminal_chat) to start narrow; see
+            -- _log_llm_finish call sites if this expands to more paths.
+            CREATE TABLE IF NOT EXISTS llm_finish_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            REAL    NOT NULL,
+                path          TEXT    NOT NULL,
+                model         TEXT    NOT NULL,
+                max_tokens    INTEGER NOT NULL,
+                finish_reason TEXT    NOT NULL,
+                reply_chars   INTEGER NOT NULL
+            );
         """)
         _db_con.commit()
     return _db_con
@@ -7280,14 +7299,23 @@ def _get_litellm_router():
     return _litellm_router
 
 
-def _iter_llm_tokens(resp, provider):
-    """Yield text tokens from a streaming response for the given provider."""
+def _iter_llm_tokens(resp, provider, on_finish=None):
+    """Yield text tokens from a streaming response for the given provider.
+
+    If given, on_finish(reason) fires once when the API reports why generation
+    stopped ("stop" naturally, "length" hit max_tokens, ...). Read-only
+    instrumentation for the truncation-rate research question (see CLAUDE.md
+    "Truncated is inferred" note) -- does not change what is yielded or when.
+    """
     if provider == "litellm":
         for chunk in resp:
             try:
-                content = chunk.choices[0].delta.content
+                choice = chunk.choices[0]
+                content = choice.delta.content
                 if content:
                     yield content
+                if on_finish and getattr(choice, "finish_reason", None):
+                    on_finish(choice.finish_reason)
             except (AttributeError, IndexError):
                 pass
     elif provider in ("groq", "openai", "openrouter"):
@@ -7298,7 +7326,10 @@ def _iter_llm_tokens(resp, provider):
             if data == b"[DONE]":
                 break
             try:
-                yield json.loads(data)["choices"][0]["delta"].get("content", "")
+                choice = json.loads(data)["choices"][0]
+                yield choice.get("delta", {}).get("content", "")
+                if on_finish and choice.get("finish_reason"):
+                    on_finish(choice["finish_reason"])
             except (json.JSONDecodeError, KeyError, IndexError):
                 pass
     elif provider == "anthropic":
@@ -7334,6 +7365,21 @@ def _iter_llm_tokens(resp, provider):
                     break
             except (json.JSONDecodeError, KeyError):
                 pass
+
+
+def _log_llm_finish(path, model, max_tokens, finish_reason, reply_chars):
+    """Read-only: records why a chat completion stopped, for the truncation-
+    rate research question. Never raises into a live turn on a DB hiccup."""
+    try:
+        with _db_lock:
+            _db().execute(
+                "INSERT INTO llm_finish_log (ts, path, model, max_tokens, "
+                "finish_reason, reply_chars) VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), path, model, max_tokens, finish_reason, reply_chars),
+            )
+            _db().commit()
+    except Exception as e:
+        print(f"[llm_finish_log] {e}", flush=True)
 
 
 def _apply_language_suffix(msgs):
@@ -8643,10 +8689,13 @@ def stream_reply(messages, model):
 
     print(f"\n{CYAN}{BOLD}Zeev:{RESET} ", end="", flush=True)
     full = ""
-    for delta in _iter_llm_tokens(resp, provider):
+    _finish = [None]
+    for delta in _iter_llm_tokens(resp, provider, on_finish=lambda r: _finish.__setitem__(0, r)):
         if delta:
             full += delta
             print(delta, end="", flush=True)
+    if _finish[0]:
+        _log_llm_finish("terminal_chat", model, tok_limit, _finish[0], len(full))
 
     has_hebrew = any('֐' <= c <= '׿' for c in full)
     if has_hebrew and shutil.which("fribidi"):
@@ -10134,6 +10183,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             else:
                 tok_limit = 600
             full_reply = ""
+            finish_reason = None
             try:
                 resp, err = _groq_post_with_fallback(payload_msgs, model, max_tokens=tok_limit)
                 if err:
@@ -10149,10 +10199,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     if chunk == b"[DONE]":
                         break
                     try:
-                        delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
+                        choice = json.loads(chunk)["choices"][0]
+                        delta = choice.get("delta", {}).get("content", "")
                         if delta:
                             full_reply += delta
                             sse({"token": delta})
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
                     except (json.JSONDecodeError, KeyError, IndexError):
                         pass
 
@@ -10161,6 +10214,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
 
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            if finish_reason:
+                _log_llm_finish("web_chat", model, tok_limit, finish_reason, len(full_reply))
 
             if full_reply:
                 with lock:
@@ -11469,10 +11524,14 @@ def handle_transcript(ctx, transcript, _depth=0):
         def _mark_first():
             print(f"[+{time.perf_counter()-t0:.1f}s] First audio", flush=True)
 
+        _finish = [None]
         try:
             reply = ctx._stream_speak(resp, "groq", voice=_LAST_VOICE,
-                                  on_first=_mark_first).strip()
+                                  on_first=_mark_first,
+                                  on_finish=lambda r: _finish.__setitem__(0, r)).strip()
             streamed = bool(reply)
+            if _finish[0]:
+                _log_llm_finish("device_chat", model_id, tok_limit, _finish[0], len(reply))
         except Exception as e:
             print(f"[stream] failed, falling back to buffered: {e}", flush=True)
             reply, streamed = "", False
@@ -12076,7 +12135,7 @@ def run_device_mode():
 
     _speak_cancel = threading.Event()
 
-    def _stream_speak(resp, provider, voice="sarina", min_chars=45, on_first=None):
+    def _stream_speak(resp, provider, voice="sarina", min_chars=45, on_first=None, on_finish=None):
         """Speak the reply as it is generated, returning the full text.
 
         Device mode used to wait for the whole completion before saying a word,
@@ -12094,7 +12153,7 @@ def run_device_mode():
 
         def _produce():
             try:
-                for tok in _iter_llm_tokens(resp, provider):
+                for tok in _iter_llm_tokens(resp, provider, on_finish=on_finish):
                     if _speak_cancel.is_set():
                         break
                     if tok:

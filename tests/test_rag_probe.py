@@ -278,6 +278,7 @@ def test_history_block_extraction_stops_before_language_guard_note():
 
     class FakeZeev:
         _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
 
         @staticmethod
         def retrieve_semantic(q, **kw):
@@ -299,7 +300,10 @@ def test_history_block_extraction_stops_before_language_guard_note():
     ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
     assert ref == "42"
     assert "Note: the past exchanges" not in text
-    assert text == "User: what is up\nZeev: שלום עום"
+    assert text == (
+        "User: what is up\nZeev: שלום עום\n\n"
+        "Zeev's persona/system instructions (present on every turn): TEST_PERSONA"
+    )
 
 
 def test_history_retrieval_merges_concurrently_triggered_torah_block():
@@ -318,6 +322,7 @@ def test_history_retrieval_merges_concurrently_triggered_torah_block():
 
     class FakeZeev:
         _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
 
         @staticmethod
         def retrieve_semantic(q, **kw):
@@ -364,6 +369,7 @@ def test_history_retrieval_merges_concurrently_injected_location_block():
 
     class FakeZeev:
         _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
 
         @staticmethod
         def retrieve_semantic(q, **kw):
@@ -393,13 +399,55 @@ def test_history_retrieval_merges_concurrently_injected_location_block():
     assert "Ambient location (real-time, not retrieved history):" in text
 
 
-def test_history_retrieval_no_torah_block_unaffected():
-    """No concurrent Torah block -- output must match the pre-merge behavior
-    exactly (empty torah ref/text contributes nothing)."""
+def test_history_retrieval_always_merges_persona():
+    """SYSTEM_PROMPT is present on every real turn unconditionally -- unlike
+    the torah/location merges, this one needs no presence check in sys_prompt
+    itself. Live 2026-08-06: an answer musing about "quantum science and
+    ancient philosophy" (verbatim in SYSTEM_PROMPT) and another correcting a
+    name to "Sarina" (the device-mode secretary persona, also only in
+    SYSTEM_PROMPT) both got flagged UNGROUNDED because neither fact lives in
+    history RAG, Torah retrieval, or the location block."""
     sys_prompt = "## Relevant past exchanges:\nUser: hi\nZeev: hello\n\nReply in English only."
 
     class FakeZeev:
         _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "You are Zeev. Your secretary is Sarina."
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("hi", "hello")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return []
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (1, 'user', 'hi')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert "Your secretary is Sarina." in text
+    assert "Zeev's persona/system instructions" in text
+
+
+def test_history_retrieval_no_torah_block_unaffected():
+    """No concurrent Torah/location block -- output must match the pre-merge
+    history text plus the always-appended persona block (empty torah/location
+    text contributes nothing beyond that)."""
+    sys_prompt = "## Relevant past exchanges:\nUser: hi\nZeev: hello\n\nReply in English only."
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
 
         @staticmethod
         def retrieve_semantic(q, **kw):
@@ -424,7 +472,10 @@ def test_history_retrieval_no_torah_block_unaffected():
 
     ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
     assert ref == "1"
-    assert text == "User: hi\nZeev: hello"
+    assert text == (
+        "User: hi\nZeev: hello\n\n"
+        "Zeev's persona/system instructions (present on every turn): TEST_PERSONA"
+    )
 
 
 # ---------------------------------------------------------------------------

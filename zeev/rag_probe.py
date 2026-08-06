@@ -230,6 +230,19 @@ def _location_retrieval(sys_prompt):
     return "Ambient location (real-time, not retrieved history): " + m.group(1).strip()
 
 
+def _persona_context(zeev_mod):
+    """SYSTEM_PROMPT itself -- the one block present on EVERY turn
+    unconditionally, that this function never showed the grader at all.
+    Found live 2026-08-06, two fresh UNGROUNDED findings in one run: an
+    answer musing about "quantum science and ancient philosophy" (Zeev's
+    stated persona interests, verbatim in SYSTEM_PROMPT) and an answer
+    correcting a name to "Sarina" (the documented device-mode secretary
+    persona, also only in SYSTEM_PROMPT) both got flagged, because neither
+    fact lives in history RAG, Torah retrieval, or the location block --
+    only in the base persona text every single call actually receives."""
+    return "Zeev's persona/system instructions (present on every turn): " + zeev_mod.SYSTEM_PROMPT
+
+
 def _history_retrieval(zeev_mod, question, sys_prompt):
     m = _HISTORY_BLOCK_RE.search(sys_prompt)
     if not m:
@@ -266,6 +279,10 @@ def _history_retrieval(zeev_mod, question, sys_prompt):
     loc_text = _location_retrieval(sys_prompt)
     if loc_text:
         text = "\n\n".join(p for p in (text, loc_text) if p)
+
+    # SYSTEM_PROMPT is unconditional -- always merge it, no presence check
+    # needed (unlike torah/location, which are conditionally injected).
+    text = "\n\n".join(p for p in (text, _persona_context(zeev_mod)) if p)
 
     return ref, text
 

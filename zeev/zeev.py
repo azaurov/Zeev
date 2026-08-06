@@ -5148,6 +5148,24 @@ def backfill_message_vecs(limit=200, verbose=False):
     return done
 
 
+def _message_date_str(content):
+    """Best-effort calendar date ("YYYY-MM-DD") for a retrieved user message,
+    by looking up its original timestamp. None if the message can't be found
+    or its ts is unparseable -- a staleness annotation is a nice-to-have and
+    must never block retrieval or raise into a live turn."""
+    try:
+        with _db_lock:
+            row = _db().execute(
+                "SELECT ts FROM messages WHERE role='user' AND content=? "
+                "ORDER BY id DESC LIMIT 1", (content,),
+            ).fetchone()
+        if not row:
+            return None
+        return datetime.fromisoformat(row["ts"]).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
 def retrieve_semantic(query, k=2, min_sim=0.55):
     """Semantic counterpart to retrieve_relevant, over the cached vectors.
 
@@ -7815,6 +7833,7 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     hits = retrieve_semantic(user_text) or retrieve_relevant(user_text)
     if hits:
         rag_lines = []
+        today_str = datetime.now().strftime("%Y-%m-%d")
         for u, a in hits:
             # Cross-modal grounding (docs/research-directions.md #2): a hit
             # whose stored reply carries _VISION_TAG came from vision_complete(),
@@ -7829,6 +7848,19 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             if is_vision:
                 line += ("\n(This was a camera observation from a past moment, "
                          "not a standing fact -- the room may look different now.)")
+            # Same staleness class as the vision tag above, but for ordinary
+            # conversation describing a temporary state ("visiting X",
+            # "currently at Y"). Found live 2026-08-06 via rag_probe.py: a
+            # month-old, already-concluded "visiting Uncle Sasha" exchange
+            # got retrieved and stitched into a present-tense answer to "what
+            # are your coordinates" as if still true. The model already has
+            # today's date from the "## Right now" block above, so a bare
+            # date lets it judge currency itself rather than baking in a
+            # possibly-wrong "N days ago" phrasing here.
+            elif (date_str := _message_date_str(u)) and date_str != today_str:
+                line += (f"\n(This exchange took place on {date_str} -- it may "
+                          "describe a temporary or since-changed situation, "
+                          "not a current fact.)")
             rag_lines.append(line)
         parts.append("\n\n## Relevant past exchanges:\n" + "\n---\n".join(rag_lines))
         # The keyword index was ASCII-only, so Hebrew/Russian/Spanish history

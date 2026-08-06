@@ -202,6 +202,8 @@ _TORAH_BLOCK_RE = re.compile(
     r"## Relevant Torah/Talmud passages:\n(.*?)(?=\n\n|\Z)", re.DOTALL)
 _HISTORY_BLOCK_RE = re.compile(
     r"## Relevant past exchanges:\n(.*?)(?=\n\n|\Z)", re.DOTALL)
+_LOCATION_BLOCK_RE = re.compile(
+    r"## Approximate location: (.*?)(?=\n\n|\Z)", re.DOTALL)
 
 
 def _torah_retrieval(zeev_mod, question, sys_prompt):
@@ -211,6 +213,21 @@ def _torah_retrieval(zeev_mod, question, sys_prompt):
     hits = zeev_mod.torah_search(question)
     ref = ", ".join(r for r, _en, _he in hits)
     return ref, m.group(1).strip()
+
+
+def _location_retrieval(sys_prompt):
+    """Ambient location block, injected on every turn regardless of retrieval
+    (see zeev.py's _build_system_prompt). A question like "what's your
+    coordinates" can legitimately be answered from this real-time block
+    rather than history RAG -- found live 2026-08-06: a probe answer that
+    correctly cited the ambient location ("Canton, Massachusetts") got
+    flagged UNGROUNDED because this function never showed the grader that
+    block, only the history-RAG one. Same root cause as the torah merge
+    below, just for a different concurrently-injected block."""
+    m = _LOCATION_BLOCK_RE.search(sys_prompt)
+    if not m:
+        return ""
+    return "Ambient location (real-time, not retrieved history): " + m.group(1).strip()
 
 
 def _history_retrieval(zeev_mod, question, sys_prompt):
@@ -243,6 +260,12 @@ def _history_retrieval(zeev_mod, question, sys_prompt):
     if torah_text:
         ref = ", ".join(p for p in (ref, torah_ref) if p)
         text = "\n\n".join(p for p in (text, torah_text) if p)
+
+    # Same reasoning as the torah merge above, for the ambient location block
+    # (also injected unconditionally, independent of both RAG gates).
+    loc_text = _location_retrieval(sys_prompt)
+    if loc_text:
+        text = "\n\n".join(p for p in (text, loc_text) if p)
 
     return ref, text
 

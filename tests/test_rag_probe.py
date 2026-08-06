@@ -346,6 +346,53 @@ def test_history_retrieval_merges_concurrently_triggered_torah_block():
     assert "He who dwells in the shelter of the Most High." in text
 
 
+def test_history_retrieval_merges_concurrently_injected_location_block():
+    """The ambient location block is injected on every turn regardless of
+    retrieval (zeev.py's _build_system_prompt), so a question like "what's
+    your coordinates" can be legitimately grounded in it rather than history
+    RAG. Live 2026-08-06: a correct answer citing the real ambient location
+    ("Canton, Massachusetts") got graded UNGROUNDED because this function
+    never showed the grader that block."""
+    sys_prompt = (
+        "## Relevant past exchanges:\n"
+        "User: what is up\nZeev: not much\n\n"
+        "## Approximate location: Canton, Massachusetts, United States\n"
+        "This is ambient context. Do not mention it unless the user asks "
+        "where they are, or it is needed to answer (weather, what's nearby).\n\n"
+        "Reply in English only."
+    )
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("what is up", "not much")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return []
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (7, 'user', 'what is up')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert ref == "7"  # location has no ref id, only text
+    assert "not much" in text
+    assert "Canton, Massachusetts" in text
+    assert "Ambient location (real-time, not retrieved history):" in text
+
+
 def test_history_retrieval_no_torah_block_unaffected():
     """No concurrent Torah block -- output must match the pre-merge behavior
     exactly (empty torah ref/text contributes nothing)."""

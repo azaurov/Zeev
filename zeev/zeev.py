@@ -3775,7 +3775,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
                  call_intent: str = "",
                  persona: str = "assistant",
-                 lang: str = "en") -> None:
+                 lang: str = "en",
+                 dialed_number: str = "") -> None:
     """
     Run the Zeev conversation loop over an active HFP call.
     speak_fn — unused (kept for backward-compat call signature); outgoing speech
@@ -3787,6 +3788,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     call_intent — why Alex is making this call (injected into IVR/voicemail context)
     persona — voice persona from _CALL_VOICES ('assistant', 'friendly', 'professional', 'calm')
     lang — non-English calls route TTS through bt_speak_sco's ElevenLabs/gTTS path
+    dialed_number — for log_call_outcome(); purely descriptive, plays no role
+    in placing the call (already dialed by the time this runs)
     """
     global _IN_CALL
     _IN_CALL = True
@@ -3852,6 +3855,9 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             print(f"[call] Piper pre-warm failed: {e}", flush=True)
 
     call_type = "unknown"
+    # Set at whichever exit point the loop actually takes; logged at the end
+    # via log_call_outcome() regardless of which break fires below.
+    _outcome = "call ended unexpectedly with no clear outcome"
     ivr_context = ""
     live_context = (
         f"You are Zeev, Alex's AI assistant, on a phone call. {call_intent} "
@@ -3886,6 +3892,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance."
             print(f"[call] Zeev (voicemail/timeout): {msg}", flush=True)
             _sco_speak(msg)
+            _outcome = "no answer within 25s, assumed voicemail and left a message"
             _IN_CALL = False
             bt_call_hangup()
             break
@@ -3897,6 +3904,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if not pcm:
                 if _hangup_detected():
                     print("[call] Call ended (hangup detected)", flush=True)
+                    _outcome = "call ended before anyone spoke (no answer / immediate hangup)"
                     _IN_CALL = False
                     break
                 continue
@@ -3919,6 +3927,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if not pcm:
                 if _hangup_detected():
                     print("[call] Call ended (hangup detected)", flush=True)
+                    _outcome = (f"spoke with a live person ({len(call_log)} exchange"
+                                f"{'s' if len(call_log) != 1 else ''}), then they hung up")
                     _IN_CALL = False
                     break
                 continue
@@ -3986,6 +3996,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 if record_dir:
                     with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                         lf.write(f"[voicemail detected]\nGreeting: {transcript}\nMessage left: {msg}\n")
+                _outcome = "reached voicemail and left a message"
                 _IN_CALL = False
                 bt_call_hangup()
                 break
@@ -4032,6 +4043,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if record_dir:
                 with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                     lf.write(f"[voicemail detected at turn {turn}]\nGreeting: {transcript}\nMessage: {msg}\n")
+            _outcome = "reached voicemail (after a live-sounding greeting) and left a message"
             _IN_CALL = False
             bt_call_hangup()
             break
@@ -4041,6 +4053,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             r"\b(bye|goodbye|hang up|gotta go|talk later)\b", transcript, re.IGNORECASE
         ):
             _sco_speak("Goodbye!")
+            _outcome = (f"spoke with a live person ({len(call_log)} exchange"
+                        f"{'s' if len(call_log) != 1 else ''}), call ended normally")
             _IN_CALL = False
             bt_call_hangup()
             break
@@ -4117,6 +4131,12 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
     if _IN_CALL:  # not already hung up via break path
         _IN_CALL = False
         bt_call_hangup()
+        _outcome = "call ended (hung up from elsewhere, e.g. voice command)"
+
+    try:
+        log_call_outcome(dialed_number, _outcome)
+    except Exception as e:
+        print(f"[call] log_call_outcome failed: {e}", flush=True)
 
 
 SYSTEM_PROMPT = (
@@ -4248,6 +4268,24 @@ def _db() -> sqlite3.Connection:
                 start_ts    REAL    NOT NULL,
                 reminder_id INTEGER,
                 created_ts  REAL    NOT NULL
+            );
+            -- Outcome of each outbound HFP call bt_call_loop runs. Its OWN
+            -- table, deliberately never `messages` -- same reasoning as
+            -- `dreams` above: bt_call_loop's actual result (voicemail/live/
+            -- hung up/no answer) never reached any later chat turn at all,
+            -- so a follow-up "did you get to make the call?" had nothing
+            -- true to draw on and the model fabricated a confident answer
+            -- (found live 2026-08-05, both a false "yes, connected, had a
+            -- pleasant conversation" and, once caught, a false "I can't
+            -- physically make calls" -- neither grounded in anything).
+            -- Surfaced ambiently in _build_system_prompt while recent,
+            -- not written into `messages` where a fabricated one could get
+            -- embedded and served back later as fact.
+            CREATE TABLE IF NOT EXISTS call_outcomes (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                number  TEXT    NOT NULL,
+                outcome TEXT    NOT NULL,
+                ts      REAL    NOT NULL
             );
             -- Semantic index over `messages`. Vectors are computed remotely on
             -- bosgame (the Pi has neither the RAM nor the core to embed) and
@@ -5683,6 +5721,41 @@ def load_quantum_insights(k=3):
             (k,),
         ).fetchall()
     return [{"idea": r["idea"], "interpretation": r["interpretation"]} for r in rows]
+
+
+# Recent outbound-call outcome is surfaced for this long -- long enough to
+# cover "did you get to make the call?" as a natural follow-up, short enough
+# that it doesn't linger into an unrelated later conversation.
+_CALL_OUTCOME_AMBIENT_WINDOW = 1800  # 30 minutes
+
+
+def log_call_outcome(number, outcome):
+    with _db_lock:
+        _db().execute(
+            "INSERT INTO call_outcomes (number, outcome, ts) VALUES (?, ?, ?)",
+            (number, outcome, time.time()),
+        )
+        _db().commit()
+
+
+def recent_call_outcome(max_age=_CALL_OUTCOME_AMBIENT_WINDOW):
+    """The most recent call outcome, or None if there isn't one or it's stale.
+
+    Called from _build_system_prompt on every turn, so a DB error here (e.g.
+    a test fixture's hand-built schema without call_outcomes) must not take
+    down the whole prompt -- same reasoning as torah_search's try/except.
+    """
+    try:
+        with _db_lock:
+            row = _db().execute(
+                "SELECT number, outcome, ts FROM call_outcomes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    except Exception as e:
+        print(f"[db] recent_call_outcome failed: {e}", flush=True)
+        return None
+    if row is None or (time.time() - row["ts"]) > max_age:
+        return None
+    return {"number": row["number"], "outcome": row["outcome"]}
 
 
 def load_latest_reflection():
@@ -7600,6 +7673,26 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 "This is ambient context. Do not mention it unless the user asks "
                 "where they are, or it is needed to answer (weather, what's nearby)."
             )
+
+    # Ambient recent-call outcome. bt_call_loop runs in a background thread and
+    # never wrote its result anywhere a later chat turn could see -- a
+    # follow-up like "did you get to make the call?" had nothing true to draw
+    # on, and the model fabricated a confident answer (found live 2026-08-05:
+    # a false "yes, connected, had a pleasant conversation", then, once
+    # caught, a false "I can't physically make calls" -- neither grounded in
+    # anything). Surfaced here rather than gated behind a keyword regex,
+    # since "did it work?" is too open-ended to reliably match, the same
+    # reasoning as the ambient location/time blocks above. Expires after
+    # _CALL_OUTCOME_AMBIENT_WINDOW so it doesn't linger into an unrelated
+    # later conversation.
+    _call_outcome = recent_call_outcome()
+    if _call_outcome:
+        parts.append(
+            f"\n\n## Recent phone call: dialed {_call_outcome['number']} — {_call_outcome['outcome']}\n"
+            "This is the real, verified outcome of the most recent outbound call. "
+            "If asked whether/how a call went, answer from this, not from memory "
+            "or by guessing — you have no other way to know what happened on a call."
+        )
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
@@ -10735,7 +10828,8 @@ def handle_transcript(ctx, transcript, _depth=0):
                         target=bt_call_loop,
                         args=(ctx._speak_device, _stt_from_pcm, _llm_reply, phone_mac),
                         kwargs={"record_dir": record_dir, "call_intent": intent_text,
-                                "persona": extract_call_persona(intent_text)},
+                                "persona": extract_call_persona(intent_text),
+                                "dialed_number": number},
                         daemon=True,
                     )
                     _call_thread.start()
@@ -13428,7 +13522,8 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
                      record_dir=record_dir,
                      call_intent=intent,
                      persona=persona,
-                     lang=lang)
+                     lang=lang,
+                     dialed_number=number)
     except SystemExit:
         raise
     except Exception as e:
@@ -14209,7 +14304,8 @@ def main():
                             target=bt_call_loop,
                             args=(_term_speak, _term_stt, _term_llm, phone_mac),
                             kwargs={"record_dir": record_dir, "call_intent": intent_text,
-                                    "persona": extract_call_persona(intent_text)},
+                                    "persona": extract_call_persona(intent_text),
+                                    "dialed_number": number},
                             daemon=True,
                         )
                         _call_thread.start()

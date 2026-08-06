@@ -72,6 +72,10 @@ OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL",       "llama3.2")
 BOSGAME_URL        = os.environ.get("BOSGAME_URL",        "")   # e.g. https://sogdiana-gematria.net/ollama
 BOSGAME_MODEL      = os.environ.get("BOSGAME_MODEL",      "llama3.1:8b")
 BOSGAME_KEY        = os.environ.get("BOSGAME_KEY",        "")
+# feiergente01's Ollama, direct LAN (no public proxy) — testing qwen2.5 on its
+# Iris Xe iGPU for background paths only. Empty by default: opt-in via .env.
+FEIERGENTE_URL     = os.environ.get("FEIERGENTE_URL",     "")   # e.g. http://10.0.0.208:11434
+FEIERGENTE_MODEL   = os.environ.get("FEIERGENTE_MODEL",   "qwen2.5:7b-instruct-q4_K_M")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
@@ -4373,8 +4377,12 @@ def extract_memory(session_msgs):
         {"role": "system", "content": "You are a data extractor. Output only valid JSON."},
         {"role": "user", "content": user_prompt},
     ]
-    # Prefer bosgame (free local CPU) for background extraction; fall back to Groq.
-    text, err = _bosgame_complete(msgs, max_tokens=300, json_mode=True)
+    # Testing: try feiergente01's qwen2.5 first (better extraction quality than
+    # bosgame's 1B) — skips itself when feiergente's TTS is busy or unconfigured,
+    # falling through silently to the existing bosgame -> Groq chain either way.
+    text, err = _feiergente_complete(msgs, max_tokens=300, json_mode=True)
+    if err:
+        text, err = _bosgame_complete(msgs, max_tokens=300, json_mode=True)
     if err:
         print(f"[bosgame] {err} — falling back to Groq", flush=True)
         text, err = _llm_complete(msgs, MODELS["1"][0], max_tokens=300, json_mode=True)
@@ -7513,6 +7521,54 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
         return text, None
 
     return None, f"unknown provider: {provider}"
+
+
+_FEIERGENTE_LOCK = "/tmp/zeev-feiergente-busy.lock"
+_FEIERGENTE_LOCK_STALE_S = 30  # crashed-daemon guard — see zeev-audio's markFeiergenteBusy
+
+
+def _feiergente_busy():
+    """True if zeev-audio's speakPiper has a live TTS request in flight to
+    feiergente01 right now. Both TTS and qwen2.5 share that box's one Iris Xe
+    iGPU — measured concurrent qwen2.5 generation more than doubling Kokoro
+    TTS latency there (3.6s -> up to 8.1s) — so background callers skip it
+    rather than degrade a real user's in-progress reply."""
+    try:
+        age = time.time() - os.path.getmtime(_FEIERGENTE_LOCK)
+        return 0 <= age < _FEIERGENTE_LOCK_STALE_S
+    except OSError:
+        return False
+
+
+def _feiergente_complete(msgs, max_tokens=300, json_mode=False):
+    """Non-streaming completion via Ollama on feiergente01 (qwen2.5, Iris Xe
+    iGPU). Testing path for background-only callers (extract_memory, weekly
+    reflection) — never for anything in a live turn. Returns (text, err)."""
+    if not FEIERGENTE_URL:
+        return None, "FEIERGENTE_URL not set"
+    if _feiergente_busy():
+        return None, "feiergente TTS busy"
+    body = {
+        "model": FEIERGENTE_MODEL,
+        "messages": msgs,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    try:
+        r = requests.post(
+            f"{FEIERGENTE_URL}/v1/chat/completions",
+            json=body,
+            timeout=120,
+        )
+        if r.status_code == 429:
+            return None, "rate-limited"
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"], None
+    except Exception as e:
+        return None, str(e)
 
 
 def _bosgame_complete(msgs, max_tokens=300, json_mode=False):

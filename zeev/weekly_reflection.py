@@ -16,6 +16,7 @@ import argparse
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +37,13 @@ GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
 BOSGAME_URL   = os.environ.get("BOSGAME_URL", "")
 BOSGAME_KEY   = os.environ.get("BOSGAME_KEY", "")
 BOSGAME_MODEL = os.environ.get("BOSGAME_MODEL", "llama3.2:1b")
+# feiergente01's Ollama, direct LAN — testing qwen2.5 on its Iris Xe iGPU.
+# Empty by default: opt-in via .env. See zeev.py's _feiergente_complete for
+# why this shares a busy-lock with zeev-audio's speakPiper.
+FEIERGENTE_URL   = os.environ.get("FEIERGENTE_URL", "")
+FEIERGENTE_MODEL = os.environ.get("FEIERGENTE_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+_FEIERGENTE_LOCK = "/tmp/zeev-feiergente-busy.lock"
+_FEIERGENTE_LOCK_STALE_S = 30
 
 if not GROQ_API_KEY:
     print("ERROR: GROQ_API_KEY not set", file=sys.stderr)
@@ -153,6 +161,36 @@ def _count_reflections(con):
 # LLM — bosgame first (free), Groq 70B fallback
 # ---------------------------------------------------------------------------
 
+def _feiergente_busy():
+    try:
+        age = time.time() - os.path.getmtime(_FEIERGENTE_LOCK)
+        return 0 <= age < _FEIERGENTE_LOCK_STALE_S
+    except OSError:
+        return False
+
+
+def _call_feiergente(prompt):
+    if not FEIERGENTE_URL:
+        return None, "feiergente not configured"
+    if _feiergente_busy():
+        return None, "feiergente TTS busy"
+    try:
+        r = requests.post(
+            f"{FEIERGENTE_URL}/v1/chat/completions",
+            json={
+                "model": FEIERGENTE_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 400,
+                "temperature": 0.7,
+            },
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip(), None
+    except Exception as e:
+        return None, str(e)
+
+
 def _call_bosgame(prompt):
     if not BOSGAME_URL or not BOSGAME_KEY:
         return None, "bosgame not configured"
@@ -195,6 +233,10 @@ def _call_groq(prompt):
 
 def _synthesize(transcript, days):
     prompt = REFLECTION_PROMPT.format(days=days, transcript=transcript)
+    content, err = _call_feiergente(prompt)
+    if content:
+        print("  [LLM: feiergente qwen2.5]")
+        return content, None
     content, err = _call_bosgame(prompt)
     if content:
         print("  [LLM: bosgame]")

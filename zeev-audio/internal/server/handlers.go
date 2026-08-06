@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +23,24 @@ import (
 	"github.com/azaurov/zeev-audio/internal/proto"
 	"github.com/azaurov/zeev-audio/internal/record"
 )
+
+// feiergenteLockPath signals feiergente01's Ollama background jobs (qwen2.5
+// via extract_memory/weekly_reflection in the Python app — see CLAUDE.md's
+// Kokoro TTS section) that a real, user-facing TTS request is in flight on
+// the same Iris Xe iGPU, so they can skip/fall back instead of competing for
+// it. Measured live: concurrent qwen2.5 generation more than doubled Kokoro
+// TTS latency there (3.6s -> up to 8.1s). Best-effort file lock, not a mutex
+// — a crashed daemon leaves a stale file, so readers (Python side) treat
+// anything older than ~30s as gone.
+const feiergenteLockPath = "/tmp/zeev-feiergente-busy.lock"
+
+// markFeiergenteBusy touches the lock file and returns a cleanup func to
+// defer; call as `defer markFeiergenteBusy()()` so the touch happens
+// immediately and the removal happens on return.
+func markFeiergenteBusy() func() {
+	_ = os.WriteFile(feiergenteLockPath, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0644)
+	return func() { _ = os.Remove(feiergenteLockPath) }
+}
 
 // State shared across handlers, set once at startup.
 type State struct {
@@ -316,6 +336,9 @@ func (s *Server) remotePiperSynth(text string, voiceOverride ...string) (pcm []b
 // instead of Kokoro (which doesn't support Russian) — see server-side
 // tts_server.py for the dispatch logic.
 func (s *Server) remotePiperSynthAt(url, key, text, voice, lang string) (pcm []byte, rate int, err error) {
+	if url != "" && url == s.state.RemotePiperURL2 {
+		defer markFeiergenteBusy()()
+	}
 	escaped := strings.ReplaceAll(text, `"`, `\"`)
 	fields := []string{`"text":"` + escaped + `"`}
 	if voice != "" {

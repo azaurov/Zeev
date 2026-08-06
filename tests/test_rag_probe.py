@@ -51,6 +51,15 @@ def test_grade_prompt_exempts_sarina_persona_naming():
     assert "same speaker" in prompt.lower() or "two names" in prompt.lower()
 
 
+def test_grade_prompt_instructs_checking_for_verbatim_quotes():
+    """Live 2026-08-05: an answer that verbatim-matched a line in the context
+    was still graded UNGROUNDED by the grader LLM -- a plain misjudgment, not
+    a persona-naming false positive. The prompt now explicitly tells the
+    grader to check for exact/near-exact quotes before flagging a claim."""
+    prompt = rag_probe._GRADE_PROMPT.format(context="c", answer="a")
+    assert "verbatim" in prompt.lower() or "quote" in prompt.lower()
+
+
 def test_parse_grade_note_is_second_line():
     _grounded, note = rag_probe.parse_grade("GROUNDED\nThe reply only restates the passage.")
     assert note == "The reply only restates the passage."
@@ -416,6 +425,41 @@ def test_torah_probe_rerolls_when_generated_question_gets_no_retrieval(zeev, tmp
     monkeypatch.setattr(zeev, "_llm_complete",
                          lambda msgs, model, max_tokens=300, json_mode=False:
                              ("what happened first", None))
+
+    result = rag_probe._run_torah_probe(zeev, verbose=False, max_attempts=2)
+    assert result is None
+
+
+def test_torah_probe_rerolls_when_retrieval_misses_seed_passage(zeev, tmp_path, monkeypatch):
+    """The generated question is seeded from one passage, but at grading time
+    torah_search(question) is a SEPARATE, independent FTS5 call that can
+    return an entirely different passage. Live 2026-08-05: this produced an
+    honest 'the passage doesn't mention that' answer that got graded as a
+    hallucination, because it was graded against unrelated retrieved content
+    instead of the seed passage. Must reroll, not log, when retrieval misses
+    the seed ref."""
+    con = _fresh_zeev_db(tmp_path)
+    con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, ts TEXT)")
+    con.commit()
+    monkeypatch.setattr(zeev, "_db", lambda: con)
+
+    torah_db = tmp_path / "torah.db"
+    tcon = sqlite3.connect(torah_db)
+    tcon.execute("CREATE TABLE passages (source TEXT, ref TEXT, en TEXT, he TEXT)")
+    tcon.execute("INSERT INTO passages VALUES ('Tanakh', 'Genesis 1', ?, '')",
+                 ("In the beginning God created the heaven and the earth. " * 5,))
+    tcon.commit()
+    tcon.close()
+    monkeypatch.setattr(zeev, "TORAH_DB", torah_db)
+
+    # Question generator emits Torah-vocabulary text so needs_torah() fires,
+    # but torah_search is stubbed to return an UNRELATED ref -- simulating a
+    # retrieval miss on the seed passage (Genesis 1).
+    monkeypatch.setattr(zeev, "_llm_complete",
+                         lambda msgs, model, max_tokens=300, json_mode=False:
+                             ("What does the Torah say about this passage?", None))
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: [("Exodus 3", "And Moses said unto God, Who am I.", "")])
 
     result = rag_probe._run_torah_probe(zeev, verbose=False, max_attempts=2)
     assert result is None

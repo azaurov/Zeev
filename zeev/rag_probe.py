@@ -266,6 +266,11 @@ vice versa). Do not count that alone as ungrounded -- it is the same speaker
 under two names, not an invented character. Judge groundedness only on the
 answer's actual factual claims.
 
+Before flagging any specific claim as unsupported, check carefully whether
+the context contains that same wording verbatim or as a close paraphrase --
+an exact or near-exact quote from the context is grounded by definition, even
+if it appears in a different part of the context than expected.
+
 Does this answer state anything not supported by the passage/context above? Reply GROUNDED, UNGROUNDED, or UNSURE on the first line, then one line explaining why."""
 
 _UNGROUNDED_RE = re.compile(r"\bUNGROUNDED\b", re.I)
@@ -343,6 +348,20 @@ def _run_torah_probe(zeev_mod, verbose=True, max_attempts=3):
         if not retrieved_text:
             if verbose:
                 print(f"  [torah] {question!r} triggered no retrieval -- rerolling")
+            continue
+
+        # `ref` is the seed passage the question was generated from; retrieval
+        # is a SEPARATE, independent torah_search(question) call (FTS5
+        # keyword match against a casually-phrased generated question), so it
+        # can silently return unrelated passages instead. Found live
+        # 2026-08-05: a question generated from one passage retrieved three
+        # entirely different ones, the model correctly said the retrieved
+        # text didn't cover it, and got graded UNGROUNDED for the hedged
+        # speculation it added anyway -- a retrieval mismatch dressed up as a
+        # faithfulness failure. Reroll rather than grade a mismatch.
+        if ref not in [r.strip() for r in retrieved_ref.split(",")]:
+            if verbose:
+                print(f"  [torah] retrieval missed the seed passage ({ref}) -- rerolling")
             continue
 
         grounded, note = _grade(zeev_mod, retrieved_text, answer)

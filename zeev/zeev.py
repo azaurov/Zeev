@@ -7933,7 +7933,10 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 "\n\n## Instruction: When explaining the passage(s) above, "
                 "stick to what they actually say. Save connections to quantum "
                 "science or other outside disciplines for open-ended reflection "
-                "-- do not present them as part of what this specific text teaches."
+                "-- do not present them as part of what this specific text teaches. "
+                "If the passage states a ruling or outcome without explaining the "
+                "reasoning behind it, say that the reasoning isn't given here rather "
+                "than inventing a plausible-sounding explanation."
             )
             if focus:
                 # Retrieval was already working when this was added: live
@@ -10964,7 +10967,21 @@ def handle_transcript(ctx, transcript, _depth=0):
                         msgs = [{"role": "system", "content": _build_system_prompt(text, False, session=ctx.session)}]
                         msgs += ctx.session[-10:]
                         msgs.append({"role": "user", "content": text})
-                        resp, err, _ = _llm_post(msgs, route_model(text), stream=False, max_tokens=200)
+                        # Same override every other _build_system_prompt call site needs
+                        # (CLAUDE.md "Torah RAG"): _build_system_prompt injects a full
+                        # Torah/parsha block regardless of caller, and 8B's 6k TPM limit
+                        # can't carry one -- a sixth call site (this one, live in-call
+                        # conversation) had never gotten the fix the other five did.
+                        call_model = route_model(text)
+                        if needs_parsha_reading(text) or needs_torah(text):
+                            call_model = MODELS["2"][0]
+                        if needs_parsha_reading(text):
+                            tok_limit = 1600
+                        elif needs_torah(text):
+                            tok_limit = 1200
+                        else:
+                            tok_limit = 200
+                        resp, err, _ = _llm_post(msgs, call_model, stream=False, max_tokens=tok_limit)
                         if err or resp is None or resp.status_code != 200:
                             print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
                             return ""

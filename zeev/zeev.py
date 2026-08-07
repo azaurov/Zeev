@@ -7098,11 +7098,24 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
     return None, last_err
 
 
-_OPENROUTER_FALLBACK_MODEL = {
-    "llama-3.1-8b-instant":   "openrouter/free",
-    "llama-3.3-70b-versatile": "openrouter/free",
-    "openai/gpt-oss-120b":     "openrouter/free",
-}
+# Specific, general-purpose chat models to try in order -- deliberately NOT
+# "openrouter/free" (the random-selection router across OpenRouter's entire
+# free catalog). Live 2026-08-06: that router picked a free-tier model whose
+# job is content-safety classification, not chat, and its "User Safety:
+# safe / Response Safety: safe" classifier output got returned and spoken to
+# Alex as if it were a real answer to "tell me the story about Ezekiel" --
+# syntactically a valid completion, so nothing caught it. A specific pinned
+# slug isn't durable either: this project has already lost two rounds of
+# hardcoded free-tier slugs to OpenRouter retiring them (see git history on
+# _OPENROUTER_FALLBACK_MODEL) -- an ordered list of a few currently-verified
+# chat-capable models, tried in sequence, survives any ONE of them going
+# stale or hitting its shared-pool rate limit (measured live: 2 of 4
+# reasonable candidates were already 429'd at write time) without ever
+# falling back to the full random catalog.
+_OPENROUTER_FREE_CANDIDATES = [
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+]
 
 
 def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
@@ -7112,14 +7125,23 @@ def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
     rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
     if rate_limited and OPENROUTER_API_KEY:
-        or_model = _OPENROUTER_FALLBACK_MODEL.get(model, "openrouter/free")
-        print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
-        or_resp, or_err = _openai_compat_post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
-        )
-        if not or_err:
-            return or_resp, or_err
+        for or_model in _OPENROUTER_FREE_CANDIDATES:
+            print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
+            or_resp, or_err = _openai_compat_post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
+            )
+            # A provider-side error (rate limit, model unavailable, ...)
+            # comes back as (resp, None) with a non-200 status, not as
+            # `or_err` -- `or_err` alone only ever catches a connection-level
+            # failure. Checking `not or_err` here used to accept a 429 body
+            # as if it were a successful completion and hand it to the
+            # caller, which would then try to parse an error payload as a
+            # streamed reply.
+            if not or_err and or_resp is not None and or_resp.status_code == 200:
+                return or_resp, or_err
+            status = or_resp.status_code if or_resp is not None else or_err
+            print(f"[llm] OpenRouter {or_model} failed ({status}) — trying next candidate", flush=True)
     return resp, err
 
 
@@ -7526,7 +7548,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
         return resp, err, "ollama"
 
     if provider == "openrouter":
-        or_model = model if model and not model.startswith("llama") else "openrouter/free"
+        # Not "openrouter/free" -- see _OPENROUTER_FREE_CANDIDATES above.
+        or_model = model if model and not model.startswith("llama") else _OPENROUTER_FREE_CANDIDATES[0]
         resp, err = _openai_compat_post(
             "https://openrouter.ai/api/v1/chat/completions",
             OPENROUTER_API_KEY, msgs, or_model, stream, max_tokens,
@@ -7576,7 +7599,8 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
             model = model if model and not model.startswith("llama") else "gpt-4o-mini"
         else:
             url, key = "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
-            model = model if model and not model.startswith("llama") else "openrouter/free"
+            # Not "openrouter/free" -- see _OPENROUTER_FREE_CANDIDATES above.
+            model = model if model and not model.startswith("llama") else _OPENROUTER_FREE_CANDIDATES[0]
         body = {"model": model, "messages": msgs,
                 "temperature": 0.1, "max_tokens": max_tokens, "stream": False}
         if json_mode:

@@ -4412,6 +4412,13 @@ def extract_memory(session_msgs):
         "source about the user and can be wrong or invented. Only credit "
         "something Zeev said if the USER's own words in this transcript "
         "independently confirm it.\n"
+        "Only extract DURABLE facts that stay true going forward: identity, "
+        "relationships, preferences, possessions, skills, standing habits. Do "
+        "NOT extract one-time events, current activities, or anything framed "
+        "as temporary or tied to a specific day (\"today\", \"this weekend\", "
+        "\"currently\", \"right now\") -- those describe a moment, not a "
+        "standing fact, and this list has no timestamps, so a temporary state "
+        "stored here reads as permanently true forever after.\n"
         "Focus on: location, job, preferences, hobbies, relationships, goals, habits.\n"
         'Output a JSON object: {"facts": ["...", "..."]}. If nothing new: {"facts": []}'
     )

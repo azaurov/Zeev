@@ -45,6 +45,35 @@ def test_prompt_scopes_extraction_to_user_statements(zeev):
     assert "Zeev's own replies are not a reliable source" in prompt
 
 
+def test_prompt_excludes_temporary_states(zeev):
+    """Found live 2026-08-07: `facts` has no timestamp column, so a genuinely
+    real but temporary state ("visiting Uncle Sasha for the summer... leaving
+    today", from 2026-07-12) was still sitting in USER_FACTS a month later
+    with no staleness signal, and got read back as if still current when
+    Zeev was asked to clarify an unrelated prior reply -- inventing "Uncle
+    Sasha and the summer visitors... heading back home today" out of nothing.
+    The extraction prompt must steer away from storing one-time/temporary
+    states as if they were durable facts in the first place, since there's
+    nowhere to record when they stop being true."""
+    captured = {}
+
+    def fake_feiergente(msgs, **kw):
+        captured["prompt"] = msgs[-1]["content"]
+        return None, "not configured"
+
+    with patch.object(zeev, "_feiergente_complete", fake_feiergente), \
+         patch.object(zeev, "_bosgame_complete", return_value=(None, "no bosgame")), \
+         patch.object(zeev, "_llm_complete", return_value=(json.dumps({"facts": []}), None)):
+        zeev.extract_memory([
+            {"role": "user", "content": "I'm visiting my uncle this weekend"},
+            {"role": "assistant", "content": "Have a great time!"},
+        ])
+
+    prompt = captured["prompt"]
+    assert "DURABLE facts" in prompt
+    assert "no timestamps" in prompt
+
+
 def test_fact_key_normalizes_subject_phrasing(zeev):
     """The actual dedup bug: 'Alex's nieces live in New Rochelle' and 'The
     user's nieces live in New Rochelle' must collapse to the same key."""

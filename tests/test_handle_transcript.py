@@ -877,6 +877,43 @@ def test_no_offer_when_the_reply_finished_cleanly(zeev, monkeypatch, ctx):
     assert not any("Want to hear more?" in s for s in ctx.spoke), ctx.spoke
 
 
+def test_pending_detail_topic_does_not_compound_on_repeated_failure(zeev, monkeypatch, ctx):
+    """Live 2026-08-06: two consecutive failed pre-generations (OpenRouter
+    free-tier candidate rate-limited) produced "<topic> Give me more detail
+    on that. Give me more detail on that." -- the fallback re-ask rewrites
+    `transcript` for THIS turn's own routing, and that rewritten value was
+    being stored as the NEXT round's topic too, so the suffix compounded
+    every consecutive failure. The stored topic must stay clean regardless
+    of how many rounds fail in a row."""
+    monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
+    # This turn's own reply also ends in "Want to hear more?" so a NEW
+    # pending-detail round gets armed after the fallback re-ask completes.
+    reply = "Ezekiel saw a vision of a divine chariot. Want to hear more?"
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback",
+                        lambda *a, **k: (_FakeResp(reply), None))
+    monkeypatch.setattr(zeev, "_groq_post",
+                        lambda *a, **k: (_FakeResp(reply), None))
+
+    # Simulate: pre-generation already failed once for a prior "want to hear
+    # more?" offer on this clean topic (mirrors _prefetch_detail's failure
+    # path -- pending[0] stays None, ready is set so the wait doesn't block).
+    ctx._pending_detail[0] = None
+    ctx._pending_detail_source[0] = "tell me about ezekiel"
+    ctx._pending_detail_ready.set()
+    # None (not a lambda returning "") so `getattr(ctx, "_followup_listen",
+    # None)` is falsy and the end-of-turn follow-up-listen block is skipped
+    # entirely -- that block correctly clears pending state on a non-answer,
+    # which would otherwise mask the actual thing under test: the value
+    # _pending_detail_source[0] gets set to earlier in this same turn.
+    ctx._followup_listen = None
+
+    zeev.handle_transcript(ctx, "yes")
+
+    assert ctx._pending_detail_source[0] == "tell me about ezekiel", (
+        f"topic drifted to {ctx._pending_detail_source[0]!r}"
+    )
+
+
 def test_model_supplied_offer_is_not_duplicated(zeev, monkeypatch, ctx):
     """When the model does comply, the offer must not be appended twice."""
     _run_llm_turn(zeev, monkeypatch, ctx,

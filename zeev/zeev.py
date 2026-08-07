@@ -10716,6 +10716,16 @@ def handle_transcript(ctx, transcript, _depth=0):
     # session lives on ctx
     global _LAST_VOICE
     t0 = time.perf_counter()
+    # The clean topic, kept separate from `transcript` -- which the pending-
+    # detail fallback below rewrites into "<topic> Give me more detail on
+    # that." for THIS turn's own routing/LLM call. That rewrite must not
+    # become the *next* round's stored topic, or repeated pre-generation
+    # failures compound the suffix every round: "<topic> Give me more detail
+    # on that. Give me more detail on that. ..." -- found live 2026-08-06,
+    # two consecutive failed pre-generations (OpenRouter free-tier candidate
+    # rate-limited) produced exactly that, and the model's replies to the
+    # near-identical, ever-longer prompt were near-duplicates of each other.
+    topic_for_pending = transcript
     # Cleared here, not just before speaking: a press during "thinking"
     # sets this while the LLM request is still in flight, and clearing it
     # later erased the interrupt so the reply spoke in full.
@@ -10886,6 +10896,9 @@ def handle_transcript(ctx, transcript, _depth=0):
         # keywords still apply instead of silently losing context
         print(f"[detail] pending detail unavailable — re-asking original topic", flush=True)
         transcript = f"{source} Give me more detail on that."
+        # `source` is already clean (it's exactly what a prior round stored
+        # here) -- reaffirm it, don't let it drift to the suffixed `transcript`.
+        topic_for_pending = source
     else:
         ctx._pending_detail[0] = None  # any other input clears pending
         ctx._pending_detail_source[0] = None
@@ -11732,7 +11745,10 @@ def handle_transcript(ctx, transcript, _depth=0):
         if ctx.session and ctx.session[-1].get("role") == "assistant":
             ctx.session[-1]["content"] = speak_text
     if _WANT_MORE_RE.search(speak_text) and not ctx._speak_cancel.is_set():
-        ctx._pending_detail_source[0] = transcript
+        # topic_for_pending, not transcript: see the comment at the top of
+        # this function for why using transcript here compounds a "Give me
+        # more detail on that." suffix on every consecutive pre-gen failure.
+        ctx._pending_detail_source[0] = topic_for_pending
         ctx._pending_detail_ready.clear()
 
         def _prefetch_detail():

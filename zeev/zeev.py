@@ -4379,6 +4379,20 @@ def save_memory(facts):
             raise
 
 
+def _fact_key(f):
+    """Normalize a fact string for dedup comparison. "Alex's nieces live in
+    New Rochelle" and "The user's nieces live in New Rochelle" are the same
+    fact under two different subject phrasings -- found live 2026-08-06:
+    USER_FACTS had accumulated 91 rows, ~35-40 of them unique, because the
+    old merge check was exact-string membership and re-extraction routinely
+    reworded the subject. Storage still keeps the original wording (this is
+    only used for the comparison), and facts.fact stays UNIQUE at the DB
+    level regardless."""
+    k = f.strip().rstrip(".").lower()
+    k = re.sub(r"^(alex'?s?|the user'?s?)\b", "<subject>", k)
+    return k
+
+
 def extract_memory(session_msgs):
     """Extract new user facts from session_msgs via the active LLM. Updates USER_FACTS in-place."""
     global USER_FACTS
@@ -4392,7 +4406,12 @@ def extract_memory(session_msgs):
     user_prompt = (
         f"Conversation transcript:\n{transcript}\n\n"
         f"Already known facts about the user:\n{existing_str}\n\n"
-        "List NEW facts revealed about the USER in this transcript. "
+        "List NEW facts revealed about the USER in this transcript, extracted "
+        "ONLY from what the USER themselves said. Do NOT extract a fact just "
+        "because ZEEV asserted it -- Zeev's own replies are not a reliable "
+        "source about the user and can be wrong or invented. Only credit "
+        "something Zeev said if the USER's own words in this transcript "
+        "independently confirm it.\n"
         "Focus on: location, job, preferences, hobbies, relationships, goals, habits.\n"
         'Output a JSON object: {"facts": ["...", "..."]}. If nothing new: {"facts": []}'
     )
@@ -4417,9 +4436,14 @@ def extract_memory(session_msgs):
         new_facts = json.loads(text).get("facts", [])
         if isinstance(new_facts, list):
             merged = list(USER_FACTS)
+            existing_keys = {_fact_key(m) for m in merged}
             for f in new_facts:
-                if isinstance(f, str) and f.strip() and f.strip() not in merged:
+                if not isinstance(f, str) or not f.strip():
+                    continue
+                key = _fact_key(f)
+                if key not in existing_keys:
                     merged.append(f.strip())
+                    existing_keys.add(key)
             USER_FACTS = merged
             save_memory(USER_FACTS)
     except (json.JSONDecodeError, ValueError):

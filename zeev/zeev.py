@@ -7797,7 +7797,30 @@ def _bosgame_stream(msgs, max_tokens=600):
 
 
 def detect_active_speaker(user_text, session=None):
-    """Scan user_text and session history to detect if the active speaker is Alex or Maria."""
+    """Scan user_text and recent session history to detect if the active
+    speaker is Alex or Maria. Only ever trusts a USER's own words -- never
+    Zeev's.
+
+    Found live 2026-08-07: a since-removed branch also scanned ASSISTANT
+    replies for a bare "maria, "/" maria." substring, on the theory that if
+    Zeev just addressed Maria, she must be the one talking. That's a
+    category error, and it self-reinforces: the goodnight branch
+    deliberately names the whole household in every reply ("Goodnight,
+    Alex... and to Maria and Leo too"), so ONE goodnight turn planted
+    "Maria" in session history, the next turn's scan found it and
+    misattributed the speaker as Maria, Zeev then addressed Alex as Maria
+    ("thanks for asking, Maria"), which planted ANOTHER "Maria" mention for
+    the *next* scan to find -- a loop that, once triggered, never
+    self-corrects, because nothing in the loop is the user's own words.
+    Checked the real message history for this incident: there was no
+    genuine Maria self-identification anywhere, only Alex talking ABOUT his
+    wife (birthday songs, calendar events, the household goodnight lines).
+
+    Also bounded to the last few USER turns (not the entire session) --
+    even a genuine "this is Maria" self-identification shouldn't keep
+    reassigning the speaker dozens of turns later, after Alex has plainly
+    resumed talking without saying so.
+    """
     maria_patterns = [
         r"\b(?:this is|i'm|i am|it's|here is|here's)\s+maria\b",
         r"\bmaria\s+(?:speaking|here)\b",
@@ -7808,7 +7831,7 @@ def detect_active_speaker(user_text, session=None):
         r"\balex\s+(?:speaking|here)\b",
         r"\b(?:my name is|call me)\s+alex\b"
     ]
-    
+
     text_lower = user_text.lower()
     for p in maria_patterns:
         if re.search(p, text_lower):
@@ -7816,22 +7839,16 @@ def detect_active_speaker(user_text, session=None):
     for p in alex_patterns:
         if re.search(p, text_lower):
             return "Alex"
-            
+
     if session:
-        for msg in reversed(session):
+        user_msgs = [m for m in reversed(session) if m.get("role") == "user"]
+        for msg in user_msgs[:6]:
             content = msg.get("content", "").lower()
-            role = msg.get("role", "")
-            if role == "user":
-                for p in maria_patterns:
-                    if re.search(p, content):
-                        return "Maria"
-                for p in alex_patterns:
-                    if re.search(p, content):
-                        return "Alex"
-            elif role == "assistant":
-                if "hello maria" in content or "hi maria" in content or "thanks maria" in content or "thank you maria" in content or "maria, " in content or " maria." in content:
+            for p in maria_patterns:
+                if re.search(p, content):
                     return "Maria"
-                if "hello alex" in content or "hi alex" in content or "thanks alex" in content or "thank you alex" in content or "alex, " in content or " alex." in content:
+            for p in alex_patterns:
+                if re.search(p, content):
                     return "Alex"
     return "Alex"
 

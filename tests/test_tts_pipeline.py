@@ -744,18 +744,38 @@ def test_detect_active_speaker(zeev):
     assert zeev.detect_active_speaker("I am Maria") == "Maria"
     assert zeev.detect_active_speaker("I'm Alex") == "Alex"
 
-    # 2. History-based detection
+    # 2. History-based detection -- only a USER's own self-identification
+    # counts, never Zeev's word choice in its own reply.
     session = [
         {"role": "user", "content": "I am Maria"},
         {"role": "assistant", "content": "Hello Maria, how are you?"}
     ]
     assert zeev.detect_active_speaker("how is the weather?", session) == "Maria"
 
-    # 3. Assistant address detection
-    session2 = [
-        {"role": "user", "content": "how is the weather?"},
-        {"role": "assistant", "content": "It's nice. Hello Alex!"}
+
+def test_assistant_addressing_maria_does_not_misattribute_speaker(zeev):
+    """Live 2026-08-07: a goodnight reply that deliberately names the whole
+    household ("Goodnight, Alex... and to Maria and Leo too") planted
+    "Maria" in session history. The since-removed assistant-scanning branch
+    then read that as evidence Maria was speaking, and every subsequent
+    reply addressed Alex as Maria -- a loop that never self-corrected,
+    since nothing in it was ever the user's own words. Checked the real
+    message history for this incident: there was no genuine Maria
+    self-identification anywhere, only Alex talking ABOUT his wife."""
+    session = [
+        {"role": "user", "content": "goodnight"},
+        {"role": "assistant", "content": "You're welcome, Alex, Maria, and family. Goodnight."},
     ]
-    assert zeev.detect_active_speaker("cool", session2) == "Alex"
+    assert zeev.detect_active_speaker("how is your day going?", session) == "Alex"
+
+
+def test_stale_speaker_identification_does_not_persist_indefinitely(zeev):
+    """A genuine self-identification many turns back shouldn't keep
+    reassigning the speaker long after the user has plainly resumed
+    talking without saying so again."""
+    old_maria_id = {"role": "user", "content": "hi, this is Maria"}
+    filler = [{"role": "user", "content": f"question {i}"} for i in range(10)]
+    session = [old_maria_id] + filler
+    assert zeev.detect_active_speaker("what's the weather", session) == "Alex"
 
 

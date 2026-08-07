@@ -134,14 +134,23 @@ class AudioClient:
         """Fire-and-forget TTS — returns immediately (daemon synthesises async)."""
         self._call_safe({}, cmd="speak", text=text, lang=lang, dev=dev, voice=voice)
 
-    def speak_sync(self, text: str, lang: str = "en", dev: str = "", voice: str = "") -> bool:
+    def speak_sync(self, text: str, lang: str = "en", dev: str = "", voice: str = "",
+                    skip_espeak: bool = False) -> bool:
         """Blocking TTS — waits for audio to finish before returning. Returns
         True on success so callers can fall back to a different TTS path on
-        failure (e.g. Russian: remote Piper on bosgame -> local Piper -> gTTS)."""
+        failure (e.g. Russian: remote Piper on bosgame -> local Piper -> gTTS).
+
+        skip_espeak: suppress the daemon's own espeak-ng fallback on failure.
+        Without it, a Kokoro failure gets masked as success by the daemon
+        re-speaking the whole text via espeak-ng -- which on a long reply can
+        run past this call's own 180s timeout and trigger a full duplicate
+        retry (observed live as a repeating "loop"). Set this when the caller
+        has a better fallback of its own (e.g. Groq Orpheus)."""
         # Long passages (e.g. Torah/parsha readings) can take well over a
         # minute to synthesize + play; give this far more headroom than the
         # default so it isn't mistaken for a wedged connection mid-speech.
-        r = self._call_safe({}, _timeout=180.0, cmd="speak_sync", text=text, lang=lang, dev=dev, voice=voice)
+        r = self._call_safe({}, _timeout=180.0, cmd="speak_sync", text=text, lang=lang, dev=dev,
+                             voice=voice, skip_espeak=skip_espeak)
         return bool(r.get("ok"))
 
     def get_volume(self) -> int:

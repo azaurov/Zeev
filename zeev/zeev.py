@@ -12678,9 +12678,15 @@ def run_device_mode():
             try:
                 if _audio and _audio.available:
                     # Delegate to the Go daemon: handles persistent process, BT one-shot,
-                    # ffmpeg resampling, and aplay — all in Go.
-                    _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice)
-                    return
+                    # ffmpeg resampling, and aplay — all in Go. skip_espeak=True: on
+                    # failure fall through to Orpheus below instead of letting the
+                    # daemon mask it with an espeak-ng re-speak of the whole text,
+                    # which (on a long reply) can run past this call's own 180s
+                    # timeout and trigger a full duplicate retry — observed live as
+                    # a repeating "Kokoro fails, espeak takes over" loop.
+                    if _audio.speak_sync(clean, lang=lang, dev=adev, voice=daemon_voice, skip_espeak=True):
+                        return
+                    print("[tts] Kokoro daemon failed — falling through to Orpheus", flush=True)
                 elif model and _piper_direct(model, clean, adev):
                     return
             except Exception as e:

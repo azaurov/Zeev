@@ -119,6 +119,11 @@ func (s *Server) handle(req proto.Request) proto.Response {
 			// falling back here would re-speak the entire reply.
 			log.Printf("speak: cancelled")
 			err = nil
+		} else if err != nil && req.SkipEspeak {
+			// Caller has its own fallback (e.g. Groq Orpheus) and asked to skip
+			// ours -- return the error as-is rather than masking it with an
+			// espeak-ng re-speak of the whole text.
+			log.Printf("speak: piper failed (%v); skip_espeak set, returning error", err)
 		} else if err != nil {
 			// Fallback: espeak-ng → aplay
 			log.Printf("speak: piper failed (%v), falling back to espeak-ng", err)

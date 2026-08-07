@@ -29,6 +29,13 @@ type Request struct {
 	// measure it itself, since the mic only opens once the user is already
 	// mid-utterance. 0 → fall back to the built-in default.
 	SilenceRMS float64 `json:"silence_rms,omitempty"`
+	// SkipEspeak suppresses the daemon's own espeak-ng fallback on speak/
+	// speak_sync failure, returning the error to the caller instead. Used by
+	// callers that have a better fallback of their own (e.g. Groq Orpheus) --
+	// without it, a Kokoro failure mid-reply gets masked as success by an
+	// espeak-ng re-speak of the *whole* text, which on a long reply can run
+	// past the caller's own timeout and trigger a full duplicate retry.
+	SkipEspeak bool `json:"skip_espeak,omitempty"`
 }
 
 // Response is sent back from Go → Python for each request.

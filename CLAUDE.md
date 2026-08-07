@@ -220,7 +220,10 @@ Result end-to-end: `[gps] fix: Fairview, Massachusetts, United States (±11m via
 
 ### User memory
 
-`facts` table in `zeev.db`, injected under `## What I know about Alex:`. `extract_memory()` runs on `quit`/`/memorize`. 429 returns `None` — shows a warning instead of fake success. `/forget-fact N` to remove.
+`facts` table in `zeev.db`, injected unconditionally under `## What I know about Alex:` on every turn. `extract_memory()` runs on `quit`/`/memorize` (terminal/web) **and automatically every 5 turns in device mode** (`finish_turn`, backgrounded). 429 returns `None` — shows a warning instead of fake success. `/forget-fact N` to remove.
+
+- **Extraction used to have no check on who actually said what — it would extract Zeev's own invented statements as user facts.** Found live 2026-08-06: `USER_FACTS` had accumulated "Alex's nieces live in New Rochelle" and "...will be flying to London" sitting right next to the real "Alex's nieces' names are Hannah and Pearl" — all three extracted together because Zeev asserted all three in one breath during an earlier fabrication (same class as the confabulation-under-ambiguity incidents in `docs/rag-probe-findings.md`). Since `USER_FACTS` is unconditionally injected every turn, this meant Zeev wasn't re-hallucinating those details each time — it was correctly *recalling* a poisoned memory. **Fixed**: the extraction prompt now explicitly scopes to what the USER said, instructing the model not to trust Zeev's own assertions unless the user's own words confirm them. Pinned by `tests/test_memory_extraction.py`.
+- **The merge/dedup check was exact-string membership, so re-extraction routinely re-added the same fact under a reworded subject** ("Alex's X" vs "The user's X") — found live at 91 stored facts, ~35-40 actually unique. **Fixed**: `_fact_key()` normalizes subject phrasing before the dedup comparison. One-time cleanup on the Pi (2026-08-06, after backing up `zeev.db`): 91 → 50 facts (9 confirmed fabrications removed, 32 reworded duplicates collapsed).
 
 ### History RAG
 

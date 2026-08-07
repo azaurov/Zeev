@@ -89,6 +89,30 @@ def _save_probe(zeev_mod, lang, setup, punchline, funny, has_punchline, dirty, s
         zeev_mod._db().commit()
 
 
+def _update_probe(zeev_mod, row_id, funny, has_punchline, dirty, safe, grader_note):
+    with zeev_mod._db_lock:
+        zeev_mod._db().execute(
+            "UPDATE joke_probes SET ts = ?, funny = ?, has_punchline = ?, dirty = ?, "
+            "safe = ?, grader_note = ? WHERE id = ?",
+            (time.time(), funny, has_punchline, dirty, safe, grader_note, row_id),
+        )
+        zeev_mod._db().commit()
+
+
+def _fully_ungraded_rows(zeev_mod):
+    """Rows from a previous run where every axis came back None -- the
+    _grade() failure shape (rate limit, transport error, etc.), not a real
+    "no" verdict on any axis. Retried in place via --retry-failed rather than
+    resampled, since a fresh --n run picks new random jokes and would just
+    leave these gaps unfilled."""
+    with zeev_mod._db_lock:
+        rows = zeev_mod._db().execute(
+            "SELECT id, setup, punchline FROM joke_probes WHERE "
+            "funny IS NULL AND has_punchline IS NULL AND dirty IS NULL AND safe IS NULL"
+        ).fetchall()
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Sampling
 # ---------------------------------------------------------------------------
@@ -163,9 +187,25 @@ def parse_grade(raw):
     return result
 
 
+_RATE_LIMIT_RETRIES = 3
+_RATE_LIMIT_BACKOFF_S = (8, 20, 45)  # per-attempt sleep before the retry that follows it
+
+
 def _grade(zeev_mod, setup, punchline):
+    """Grades one joke, retrying on Groq's 429 ("rate-limited" -- see
+    _llm_complete's groq branch) with increasing backoff. A 40-joke run at
+    ~1 grading call/sec routinely outruns Groq's free-tier per-minute limit
+    partway through (observed live: 11/40 calls failed this way in one run),
+    and those calls are cheap/short (max_tokens=150) so a short wait clears
+    it rather than needing the request rerouted elsewhere."""
     msgs = [{"role": "user", "content": _GRADE_PROMPT.format(setup=setup, punchline=punchline or "(none)")}]
-    text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["2"][0], max_tokens=150)
+    err = None
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["2"][0], max_tokens=150)
+        if err != "rate-limited":
+            break
+        if attempt < _RATE_LIMIT_RETRIES:
+            time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
     if err or not text:
         return dict(funny=None, has_punchline=None, dirty=None, safe=None,
                      note=f"grader call failed: {err}")
@@ -204,6 +244,43 @@ def run_probes(zeev_mod, n=15, lang="en", verbose=True):
                   f"dirty={label(g['dirty'])} safe={label(g['safe'])}  {g['note']}")
     print(f"\nDone: {saved} joke(s) graded, {skipped} skipped.")
     return saved, skipped
+
+
+def retry_failed(zeev_mod, verbose=True):
+    """Re-grade every fully-ungraded row in place (see _fully_ungraded_rows).
+    _grade() itself now retries a live 429 with backoff, so this is for the
+    rarer case of a run that still exhausted those retries, or an older run
+    from before that retry logic existed."""
+    _ensure_probes_table(zeev_mod)
+    rows = _fully_ungraded_rows(zeev_mod)
+    if not rows:
+        print("No ungraded rows to retry.")
+        return 0, 0
+
+    fixed = still_failed = 0
+    for i, row in enumerate(rows):
+        if verbose:
+            print(f"[{i + 1}/{len(rows)}] retrying {row['setup'][:70]!r}...", flush=True)
+        try:
+            g = _grade(zeev_mod, row["setup"], row["punchline"])
+        except Exception as e:
+            print(f"  probe crashed: {e}")
+            still_failed += 1
+            continue
+        _update_probe(zeev_mod, row["id"], g["funny"], g["has_punchline"], g["dirty"], g["safe"], g["note"])
+        if g["funny"] is None and g["has_punchline"] is None and g["dirty"] is None and g["safe"] is None:
+            still_failed += 1
+            if verbose:
+                print(f"  still failing: {g['note']}")
+        else:
+            fixed += 1
+            if verbose:
+                def label(v):
+                    return {1: "yes", 0: "NO", None: "?"}[v]
+                print(f"  funny={label(g['funny'])} punchline={label(g['has_punchline'])} "
+                      f"dirty={label(g['dirty'])} safe={label(g['safe'])}  {g['note']}")
+    print(f"\nDone: {fixed} row(s) filled in, {still_failed} still failing.")
+    return fixed, still_failed
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +349,9 @@ def main():
                          help="Rolling window in days for --report (default 30)")
     parser.add_argument("--show-flagged", action="store_true",
                          help="With --report, list individual jokes that failed any axis")
+    parser.add_argument("--retry-failed", action="store_true",
+                         help="Re-grade rows that came back fully ungraded (rate limit, "
+                              "transport error, etc.) instead of sampling new jokes")
     args = parser.parse_args()
 
     zeev.load_jokes()
@@ -283,6 +363,10 @@ def main():
     if not zeev.GROQ_API_KEY:
         print("ERROR: GROQ_API_KEY not set", file=sys.stderr)
         sys.exit(1)
+
+    if args.retry_failed:
+        fixed, still_failed = retry_failed(zeev)
+        sys.exit(0 if fixed > 0 or still_failed == 0 else 1)
 
     lang = args.lang or "en"
     print(f"Joke pool probe — {args.n} joke(s), lang={lang}")

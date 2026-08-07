@@ -399,6 +399,53 @@ def test_history_retrieval_merges_concurrently_injected_location_block():
     assert "Ambient location (real-time, not retrieved history):" in text
 
 
+def test_history_retrieval_merges_concurrently_injected_facts_block():
+    """`## What I know about Alex:` (USER_FACTS) is injected whenever any
+    facts are stored, independent of both RAG gates -- same class as the
+    Torah/location merges above. Live 2026-08-06: "Can you tell me more
+    about myself?" correctly drew on real, retained USER_FACTS entries
+    (guitar, jazz, the thermal camera wearable interpreter) that were never
+    shown to the grader, only the narrow history-RAG slice."""
+    sys_prompt = (
+        "## Relevant past exchanges:\n"
+        "User: what is up\nZeev: not much\n\n"
+        "## What I know about Alex:\n"
+        "- Alex enjoys jazz music in the evenings and is learning to play guitar\n\n"
+        "Reply in English only."
+    )
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("what is up", "not much")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return []
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (7, 'user', 'what is up')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert ref == "7"  # facts block has no ref id, only text
+    assert "not much" in text
+    assert "learning to play guitar" in text
+    assert "What Zeev has stored about Alex (not retrieved history):" in text
+
+
 def test_history_retrieval_always_merges_persona():
     """SYSTEM_PROMPT is present on every real turn unconditionally -- unlike
     the torah/location merges, this one needs no presence check in sys_prompt

@@ -204,6 +204,8 @@ _HISTORY_BLOCK_RE = re.compile(
     r"## Relevant past exchanges:\n(.*?)(?=\n\n|\Z)", re.DOTALL)
 _LOCATION_BLOCK_RE = re.compile(
     r"## Approximate location: (.*?)(?=\n\n|\Z)", re.DOTALL)
+_FACTS_BLOCK_RE = re.compile(
+    r"## What I know about Alex:\n(.*?)(?=\n\n|\Z)", re.DOTALL)
 
 
 def _torah_retrieval(zeev_mod, question, sys_prompt):
@@ -228,6 +230,21 @@ def _location_retrieval(sys_prompt):
     if not m:
         return ""
     return "Ambient location (real-time, not retrieved history): " + m.group(1).strip()
+
+
+def _facts_retrieval(sys_prompt):
+    """`## What I know about Alex:` (USER_FACTS) -- injected on every turn
+    whenever any facts are stored, independent of both RAG gates. Fourth
+    instance of the same probe-grading gap found live 2026-08-06: two
+    UNGROUNDED answers ("Can you tell me more about myself?", "talk to me
+    with") both correctly drew on real, retained USER_FACTS entries (guitar,
+    jazz, the thermal camera wearable interpreter; leaving Uncle Sasha's
+    today) that were never shown to the grader, only the narrow history-RAG
+    slice. Same fix shape as the Torah/location/persona merges above."""
+    m = _FACTS_BLOCK_RE.search(sys_prompt)
+    if not m:
+        return ""
+    return "What Zeev has stored about Alex (not retrieved history): " + m.group(1).strip()
 
 
 def _persona_context(zeev_mod):
@@ -280,8 +297,14 @@ def _history_retrieval(zeev_mod, question, sys_prompt):
     if loc_text:
         text = "\n\n".join(p for p in (text, loc_text) if p)
 
+    # Same reasoning again, for USER_FACTS -- conditionally injected (only
+    # when facts are stored), so needs the same presence check as torah/location.
+    facts_text = _facts_retrieval(sys_prompt)
+    if facts_text:
+        text = "\n\n".join(p for p in (text, facts_text) if p)
+
     # SYSTEM_PROMPT is unconditional -- always merge it, no presence check
-    # needed (unlike torah/location, which are conditionally injected).
+    # needed (unlike torah/location/facts, which are conditionally injected).
     text = "\n\n".join(p for p in (text, _persona_context(zeev_mod)) if p)
 
     return ref, text

@@ -7678,16 +7678,24 @@ def _feiergente_busy():
         return False
 
 
-def _feiergente_complete(msgs, max_tokens=300, json_mode=False):
-    """Non-streaming completion via Ollama on feiergente01 (qwen2.5, Iris Xe
-    iGPU). Testing path for background-only callers (extract_memory, weekly
-    reflection) — never for anything in a live turn. Returns (text, err)."""
+def _feiergente_complete(msgs, max_tokens=300, json_mode=False, model=None):
+    """Non-streaming completion via Ollama on feiergente01 (qwen2.5 by
+    default, Iris Xe iGPU). Testing path for background-only callers
+    (extract_memory, weekly reflection, joke_probe.py) — never for anything
+    in a live turn. Returns (text, err).
+
+    model: overrides FEIERGENTE_MODEL for this call. joke_probe.py passes
+    "dolphin3:8b" (also installed on feiergente01) -- an uncensored fine-tune
+    that grades adult-content jokes without the spurious refusals a
+    heavily-aligned model can produce on this material, and with no shared
+    daily token quota the way Groq's free tier has (found live 2026-08-07:
+    llama-3.3-70b-versatile's 100k-token/day budget ran out mid-audit)."""
     if not FEIERGENTE_URL:
         return None, "FEIERGENTE_URL not set"
     if _feiergente_busy():
         return None, "feiergente TTS busy"
     body = {
-        "model": FEIERGENTE_MODEL,
+        "model": model or FEIERGENTE_MODEL,
         "messages": msgs,
         "temperature": 0.1,
         "max_tokens": max_tokens,

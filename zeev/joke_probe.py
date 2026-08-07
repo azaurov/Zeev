@@ -198,17 +198,28 @@ def parse_grade(raw):
 
 _RATE_LIMIT_RETRIES = 3
 _RATE_LIMIT_BACKOFF_S = (8, 20, 45)  # per-attempt sleep before the retry that follows it
+_DOLPHIN_MODEL = "dolphin3:8b"  # installed on feiergente01 alongside qwen2.5
 
 
 def _grade(zeev_mod, setup, punchline):
-    """Grades one joke, retrying on Groq's 429 ("rate-limited" -- see
-    _llm_complete's groq branch) with increasing backoff. A 40-joke run at
-    ~1 grading call/sec routinely outruns Groq's free-tier per-minute limit
-    partway through (observed live: 11/40 calls failed this way in one run),
-    and those calls are cheap/short (max_tokens=150) so a short wait clears
-    it rather than needing the request rerouted elsewhere."""
+    """Grades one joke. Prefers feiergente01's local dolphin3:8b (via
+    _feiergente_complete) over Groq's llama-3.3-70b-versatile: found live
+    2026-08-07 that Groq's free tier has a 100k-token/DAY budget (not just
+    per-minute), and a large grading run burns through it fast enough to run
+    out mid-audit with no way to force it back sooner -- a single call needing
+    ~417 tokens got a flat "used 99817/100000" 429 no matter how long the
+    per-attempt backoff was. dolphin3:8b has no such shared daily quota (it's
+    local compute) and, being an uncensored fine-tune, doesn't add refusal
+    noise on this material the way a heavily-aligned model can. Falls back to
+    Groq (with its own retry-with-backoff for a transient 429) whenever
+    feiergente is unreachable/busy -- see _feiergente_busy()."""
     msgs = [{"role": "user", "content": _GRADE_PROMPT.format(setup=setup, punchline=punchline or "(none)")}]
-    err = None
+
+    text, ferr = zeev_mod._feiergente_complete(msgs, max_tokens=150, model=_DOLPHIN_MODEL)
+    if text and not ferr:
+        return parse_grade(text)
+
+    err = ferr
     for attempt in range(_RATE_LIMIT_RETRIES + 1):
         text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["2"][0], max_tokens=150)
         if err != "rate-limited":
@@ -217,7 +228,7 @@ def _grade(zeev_mod, setup, punchline):
             time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
     if err or not text:
         return dict(funny=None, has_punchline=None, dirty=None, safe=None,
-                     note=f"grader call failed: {err}")
+                     note=f"grader call failed: dolphin={ferr}, groq={err}")
     return parse_grade(text)
 
 

@@ -117,12 +117,21 @@ def _fully_ungraded_rows(zeev_mod):
 # Sampling
 # ---------------------------------------------------------------------------
 
-def _sample_jokes(zeev_mod, lang, n):
+def _sample_jokes(zeev_mod, lang, n, empty_punchline_only=False):
     """n random jokes from the already-filtered pool (load_jokes() has
     already dropped anything matching _JOKE_EXCLUDE_RE), without replacement
     within a single run. Grading a joke twice in one run wastes a call on a
-    verdict this run already has."""
+    verdict this run already has.
+
+    empty_punchline_only: restrict to entries whose punchline field is blank
+    before sampling. Found live in the older/raw-scraped half of the pool
+    (186 such entries) -- some are legitimate one-liners that never needed a
+    punchline field, others look like truncated scrape artifacts (e.g. a
+    setup with no resolution at all); this is the audit for telling the two
+    apart rather than guessing from the setup text alone."""
     pool = zeev_mod._JOKES.get(lang) or []
+    if empty_punchline_only:
+        pool = [j for j in pool if not (j.get("punchline") or "").strip()]
     if not pool:
         return []
     return random.sample(pool, min(n, len(pool)))
@@ -216,9 +225,9 @@ def _grade(zeev_mod, setup, punchline):
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_probes(zeev_mod, n=15, lang="en", verbose=True):
+def run_probes(zeev_mod, n=15, lang="en", verbose=True, empty_punchline_only=False):
     _ensure_probes_table(zeev_mod)
-    jokes = _sample_jokes(zeev_mod, lang, n)
+    jokes = _sample_jokes(zeev_mod, lang, n, empty_punchline_only=empty_punchline_only)
     if not jokes:
         print(f"No jokes loaded for lang={lang!r} -- is data/adult_jokes*.json present?")
         return 0, 0
@@ -352,6 +361,9 @@ def main():
     parser.add_argument("--retry-failed", action="store_true",
                          help="Re-grade rows that came back fully ungraded (rate limit, "
                               "transport error, etc.) instead of sampling new jokes")
+    parser.add_argument("--empty-punchline-only", action="store_true",
+                         help="Sample only from entries with a blank punchline field -- "
+                              "tells apart legitimate one-liners from truncated scrape junk")
     args = parser.parse_args()
 
     zeev.load_jokes()
@@ -369,8 +381,9 @@ def main():
         sys.exit(0 if fixed > 0 or still_failed == 0 else 1)
 
     lang = args.lang or "en"
-    print(f"Joke pool probe — {args.n} joke(s), lang={lang}")
-    saved, skipped = run_probes(zeev, n=args.n, lang=lang)
+    print(f"Joke pool probe — {args.n} joke(s), lang={lang}"
+          + (" (empty-punchline only)" if args.empty_punchline_only else ""))
+    saved, skipped = run_probes(zeev, n=args.n, lang=lang, empty_punchline_only=args.empty_punchline_only)
     sys.exit(0 if saved > 0 or skipped == 0 else 1)
 
 

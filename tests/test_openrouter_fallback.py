@@ -64,12 +64,15 @@ def test_fallback_rejects_non_200_and_tries_next_candidate(zeev):
             resp.status_code = 200
         return resp, None
 
-    with patch.object(zeev, "_groq_post", side_effect=_groq_429_then_none), \
+    # Candidate count is independent of this test -- it exercises the loop
+    # logic itself, not how many real candidates happen to be configured.
+    with patch.object(zeev, "_OPENROUTER_FREE_CANDIDATES", ["model-a", "model-b"]), \
+         patch.object(zeev, "_groq_post", side_effect=_groq_429_then_none), \
          patch.object(zeev, "_openai_compat_post", side_effect=fake_openai_compat_post), \
          patch.object(zeev, "OPENROUTER_API_KEY", "fake-key"):
         resp, err = zeev._groq_post_with_fallback([{"role": "user", "content": "hi"}], "llama-3.3-70b-versatile")
 
-    assert len(calls) >= 2, "must move on to a second candidate after a 429"
+    assert len(calls) == 2, "must move on to a second candidate after a 429"
     assert resp.status_code == 200
 
 
@@ -105,3 +108,22 @@ def test_fallback_returns_groq_response_when_all_candidates_fail(zeev):
         resp, err = zeev._groq_post_with_fallback([{"role": "user", "content": "hi"}], "llama-3.3-70b-versatile")
 
     assert resp is groq_resp
+
+
+def test_candidate_list_excludes_known_reasoning_only_models(zeev):
+    """Regression guard: nvidia/nemotron-nano-9b-v2:free (and cousins from
+    the same reasoning-model family) stream their entire output under
+    `delta.reasoning`, leaving `delta.content` permanently empty --
+    _iter_llm_tokens only reads `delta.content`, so this produces a silent
+    empty reply. Found live 2026-08-06. Don't re-add it (or any other
+    unverified reasoning-shaped model) without checking a raw streaming
+    response first, not just a non-streaming one."""
+    known_broken = {
+        "nvidia/nemotron-nano-9b-v2:free",
+        "openai/gpt-oss-20b:free",
+        "cohere/north-mini-code:free",
+        "inclusionai/ling-3.0-tiny:free",
+        "poolside/laguna-s-2.1:free",
+    }
+    assert not (known_broken & set(zeev._OPENROUTER_FREE_CANDIDATES))
+    assert len(zeev._OPENROUTER_FREE_CANDIDATES) >= 1

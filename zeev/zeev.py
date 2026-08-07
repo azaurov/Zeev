@@ -7109,12 +7109,27 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
 # hardcoded free-tier slugs to OpenRouter retiring them (see git history on
 # _OPENROUTER_FALLBACK_MODEL) -- an ordered list of a few currently-verified
 # chat-capable models, tried in sequence, survives any ONE of them going
-# stale or hitting its shared-pool rate limit (measured live: 2 of 4
-# reasonable candidates were already 429'd at write time) without ever
-# falling back to the full random catalog.
+# stale or hitting its shared-pool rate limit.
+#
+# EVERY CANDIDATE MUST BE VERIFIED FOR ITS STREAMING SHAPE, NOT JUST
+# CORRECTNESS, before being added here. Found live the same night this list
+# was first written: a second candidate (nvidia/nemotron-nano-9b-v2:free)
+# answered correctly when tested non-streaming, but in streaming mode -- the
+# mode device mode actually uses -- it puts its entire output under a
+# `delta.reasoning` field and leaves `delta.content` permanently empty.
+# _iter_llm_tokens only ever reads `delta.content`, so this produced a
+# silent empty reply ("[stream] empty stream — no reply text") on a live
+# turn. Spot-checked several other free models the same way afterward:
+# cohere/north-mini-code, inclusionai/ling-3.0-tiny, poolside/laguna-s-2.1,
+# and openai/gpt-oss-20b are ALL the same reasoning-only shape -- the
+# free-tier catalog currently skews heavily toward reasoning models. Only
+# google/gemma-4-26b-a4b-it:free has been directly confirmed (via a raw
+# streaming curl, not just a non-streaming test) to stream real text in
+# `delta.content`. Left as a single-entry list rather than guessing a second
+# one; add one back only after checking its streaming response shape the
+# same way.
 _OPENROUTER_FREE_CANDIDATES = [
     "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-nano-9b-v2:free",
 ]
 
 

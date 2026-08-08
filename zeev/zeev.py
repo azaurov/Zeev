@@ -8162,6 +8162,30 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "Do not claim the call has been placed either: if you are "
             "generating a reply, it has not been.")
 
+    # Vision, unconditionally (not phrasing-gated). Found live 2026-08-08:
+    # asked "do you feel like you have a better understanding of the world
+    # now that you have vision?" -- not camera-shaped (no "camera"/"cam"
+    # word), so it missed every regex below and reached the LLM with nothing
+    # to correct it. The 8B fell back to trained-assistant boilerplate: "No,
+    # Alex, I don't have vision... I'm still a conversational AI, and I
+    # don't have the capability to see or perceive the world around you" --
+    # flatly false (it had just described the room via the webcam minutes
+    # earlier) and a straight violation of the "never give generic AI
+    # disclaimers" persona rule above, just in a shape that rule's own
+    # examples didn't anticipate. Reflective/philosophical questions about a
+    # capability are exactly the unbounded phrasing the calling guard's
+    # comment warns an allowlist regex can't cover, so this one is not
+    # gated on user_text at all -- only on CAMERA_AVAILABLE, which is cheap
+    # and already the authority on whether a camera is actually attached.
+    if CAMERA_AVAILABLE:
+        parts.append(
+            "\n\n## Vision: you DO have vision. A camera is attached to this "
+            "device and you have used it to see and describe the room. Never "
+            "say you lack vision, cannot see, or are 'just a conversational "
+            "AI' with no senses — that is false on this device. If asked "
+            "reflectively about having vision or what you can see, answer "
+            "from that ability, not from a generic disclaimer.")
+
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
             or _CAMERA_RE.search(user_text) or _subj_named):
         if WYZE_CAMERAS:

@@ -26,10 +26,13 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 - **Voice-triggered visual effects** — say "show me some fire" or "do the matrix effect" and Zeev runs demoscene-style fire/matrix/psychedelic/liquid/tunnel/plasma/cartoon animations on the LCD
 - **GPS / geolocation** — WiFi-triangulated location via Google Geolocation API (10–100m accuracy when `GOOGLE_GEOLOC_KEY` set), beacondb as free fallback, IP geolocation as last resort; reverse-geocoded via Nominatim to city/region for ambient context on every turn, and to street/POI/home level ("approximately on Lincoln Street", "near Main Plaza", "at home") when asked directly ("what street am I on?", "am I home?") — home is opt-in via `ZEEV_HOME_LAT`/`ZEEV_HOME_LON`; `/gps` terminal command; `GET /gps` web endpoint
 - **SQLite storage** — all runtime state (messages, memory facts, notes, settings, quantum insights, weekly reflections) in a single WAL-mode `zeev.db`; no flat files
+- **Adult joke mode** (opt-in, off by default topic) — a private, pre-curated joke pool with its own quality/safety audit tooling (`joke_probe.py`), which grades sampled entries via an LLM judge and logs results for human review before anything gets pruned. Voice-routed by how you ask: a plain request draws from general crude/adult humor, while explicitly asking for something "extra"/"super" dirty draws from a separate sexual-content subset — nothing sexual is served unless asked for that specifically
 
 ## zeev-audio daemon
 
 A Go daemon (`zeev-audio/`) handles all latency-sensitive audio operations. It keeps Piper's ONNX model warm (loaded once at startup, not per call), manages Bluetooth detection and reconnect, runs the WM8960 keepalive, handles music playback, and provides SCO call-audio synthesis for phone calls. `zeev.py` delegates to it via a thin Python adapter (`zeev/audio_client.py`) over a Unix socket; falls back to its own subprocess implementations if the daemon is unavailable. Bluetooth control calls (`pair`/`connect`/`disconnect`) are bounded by a 10s timeout so a wedged adapter can't hang the daemon or leak processes.
+
+If the remote Kokoro TTS backend fails partway through a reply, the daemon reports the failure back to Zeev immediately (via an opt-in `skip_espeak` flag) rather than silently re-speaking the whole reply through a lower-quality local fallback — Zeev then retries through Groq's cloud TTS instead, so a backend hiccup degrades gracefully to a different voice rather than repeating itself.
 
 **Start the daemon** (already set up as a systemd service on the Pi):
 ```bash

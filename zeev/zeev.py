@@ -991,7 +991,13 @@ _CAMERA_RE = re.compile(
     r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
     r"|\bwhat('?s| is) (in front of you|around you|there)\b"
     r"|\b(describe|show me) what('?s| is) (there|in front|around)\b"
-    r"|\bcan you see (anything|something|what'?s|me)\b",
+    r"|\bcan you see (anything|something|what'?s|me)\b"
+    # Bare "look at ... camera", singular, no room noun -- "look at the wood
+    # in the camera"/"look at the attached camera". _WYZE_CAM_RE's own "look
+    # at ... camera(s)" phrasing is near-identical, so this only ever gets a
+    # turn once the Wyze gate above has declined it (no room resolved and a
+    # local camera is attached) -- see the gate at CAMERA_AVAILABLE below.
+    r"|\blook at\b.{0,30}\bcamera\b",
     re.IGNORECASE,
 )
 # A house camera is asked about differently from the Pi's own eye: "what's going
@@ -11366,9 +11372,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # It is gated on `not CAMERA_AVAILABLE` because this branch sits above the
     # Pi's own camera: with a camera attached, "take a picture with the camera"
     # says "camera" without naming a room, and would otherwise be answered with
-    # "Which camera?" instead of a photo. Nothing observes that today -- the
-    # board has no camera -- which is exactly why it would surprise someone
-    # later.
+    # "Which camera?" instead of a photo.
     # The fourth arm exists because Whisper mangles the trigger, not the noun.
     # Live 2026-07-30 it heard "check all cameras" as "checko cameras": no verb
     # survived, so the turn reached the LLM, which repeated the *previous*
@@ -11377,8 +11381,21 @@ def handle_transcript(ctx, transcript, _depth=0):
     # a camera request on this device, so it routes here and ends in a frame or
     # a question. _TOOL_INTENT_RE is excluded for the same reason
     # resolve_subject excludes it: "remind me to buy a camera" is a reminder.
+    #
+    # The first arm (_WYZE_CAM_RE alone) used to have no CAMERA_AVAILABLE
+    # guard at all, unlike every other arm here -- so once the Pi gained a
+    # real attached camera (the USB UVC fallback), "look at the wood in the
+    # camera"/"look at the attached camera" still matched _WYZE_CAM_RE's own
+    # "look at ... camera" phrasing and got routed to the house-camera picker
+    # ("no camera matched; asking") instead of the Pi's own eye, even though
+    # the webcam was live and had just answered a near-identical request
+    # (found live 2026-08-08). Now it only preempts the local camera when a
+    # specific room/camera name actually resolves; a bare "look at the
+    # camera" with no resolvable room falls through to _CAMERA_RE's matching
+    # "look at ... camera" arm below, which is itself gated on CAMERA_AVAILABLE.
     if WYZE_CAMERAS and (
-            _WYZE_CAM_RE.search(transcript)
+            (_WYZE_CAM_RE.search(transcript)
+             and (not CAMERA_AVAILABLE or resolve_wyze_cam(transcript)[0]))
             or (_CAMERA_RE.search(transcript)
                 and (resolve_wyze_cam(transcript)[0]
                      or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))

@@ -8255,9 +8255,10 @@ def init_camera():
         cam.close()
         CAMERA_AVAILABLE = True
         CAMERA_KIND = "picam"
+        print(f"[camera] detected via picamera2/libcamera", flush=True)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[camera] picamera2 probe failed: {e}", flush=True)
     CAMERA_AVAILABLE = False
     CAMERA_KIND = None
     if os.path.exists(USB_CAMERA_DEV) and shutil.which("ffmpeg"):
@@ -8276,8 +8277,15 @@ def init_camera():
             if r.returncode == 0:
                 CAMERA_AVAILABLE = True
                 CAMERA_KIND = "usb"
+                print(f"[camera] detected via USB/v4l2 at {USB_CAMERA_DEV}", flush=True)
+            else:
+                print(f"[camera] USB webcam probe returned {r.returncode}", flush=True)
         except Exception as e:
             print(f"[camera] USB webcam probe failed: {e}", flush=True)
+    else:
+        print(f"[camera] no CSI or USB camera found "
+              f"(exists={os.path.exists(USB_CAMERA_DEV)}, ffmpeg={bool(shutil.which('ffmpeg'))})",
+              flush=True)
 
 
 def init_thermal():

@@ -13092,6 +13092,18 @@ def run_device_mode():
             return ""
         if not wav:
             return ""
+        # A question left the mic open with no wake word gating it, so a room
+        # that just stayed quiet reaches here as a clip of pure silence/room
+        # tone. Whisper doesn't say "silence" -- it invents a plausible short
+        # sentence (live 2026-08-08: an all-quiet follow-up came back as "I'm
+        # going to go.", which Sarina then answered with "Drive safely, Alex."
+        # as if it had really been said). Same guard as the wake listener:
+        # an RMS gate only says "loud", _has_speech asks "voice", which is
+        # what actually distinguishes real silence from a fabricated
+        # transcript of it.
+        if not _has_speech(wav):
+            print("[followup] no speech detected, skipping STT", flush=True)
+            return ""
         text = (stt(wav, prompt=_FOLLOWUP_WHISPER_PROMPT) or "").strip()
         print(f"[followup] heard: {text!r}", flush=True)
         return text

@@ -1273,9 +1273,8 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # description in 9.8s, gemma-4-31b was 429 rate-limited, and the nvidia VL model
 # did not respond inside 60s. Free-tier 429s are routine, hence the list.
 VISION_MODELS = [
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
 ]
 VISION_TIMEOUT = float(os.environ.get("VISION_TIMEOUT", "60"))
 

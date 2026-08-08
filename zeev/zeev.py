@@ -8234,18 +8234,50 @@ def _with_search(user_text, on_search=None, session=None):
 
 
 # ---------------------------------------------------------------------------
-# Camera (Raspberry Pi NoIR Camera Module V2)
+# Camera (Raspberry Pi NoIR Camera Module V2, or a USB UVC webcam fallback)
 # ---------------------------------------------------------------------------
 
+USB_CAMERA_DEV = os.environ.get("USB_CAMERA_DEV", "/dev/video0")
+CAMERA_KIND = None  # "picam" or "usb", set by init_camera()
+
+
 def init_camera():
-    global CAMERA_AVAILABLE
+    """Probe for a CSI camera (picamera2) first, then a USB UVC webcam.
+
+    picamera2 fails immediately (import or open error) when there is no CSI
+    ribbon camera, so trying it first is free -- it's the USB probe that
+    costs a real capture attempt, done only as a fallback.
+    """
+    global CAMERA_AVAILABLE, CAMERA_KIND
     try:
         from picamera2 import Picamera2
         cam = Picamera2()
         cam.close()
         CAMERA_AVAILABLE = True
+        CAMERA_KIND = "picam"
+        return
     except Exception:
-        CAMERA_AVAILABLE = False
+        pass
+    CAMERA_AVAILABLE = False
+    CAMERA_KIND = None
+    if os.path.exists(USB_CAMERA_DEV) and shutil.which("ffmpeg"):
+        try:
+            # -input_format mjpeg here for the same reason _capture_image_usb
+            # uses it: probing with the default raw format makes ffmpeg
+            # re-encode, which is slower for no benefit on a probe that just
+            # needs a return code. Runs at startup alongside Piper prewarm,
+            # so keep the timeout short.
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-f", "v4l2",
+                 "-input_format", "mjpeg", "-i", USB_CAMERA_DEV,
+                 "-frames:v", "1", "-f", "null", "-"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            if r.returncode == 0:
+                CAMERA_AVAILABLE = True
+                CAMERA_KIND = "usb"
+        except Exception as e:
+            print(f"[camera] USB webcam probe failed: {e}", flush=True)
 
 
 def init_thermal():
@@ -8273,30 +8305,75 @@ def init_mic():
         print(f"[audio] init_mic gain set failed: {e}", flush=True)
 
 
-def capture_image(width=1280, height=720):
-    """Capture a JPEG via picamera2. Returns base64 string or None."""
+def _camera_flip_jpeg(jpeg):
+    if not CAMERA_FLIP:
+        return jpeg
     try:
-        from picamera2 import Picamera2
-        cam = Picamera2()
-        config = cam.create_still_configuration(main={"size": (width, height)})
-        cam.configure(config)
-        cam.start()
-        time.sleep(0.5)  # let auto-exposure settle
-        buf = io.BytesIO()
-        cam.capture_file(buf, format="jpeg")
-        cam.stop()
-        cam.close()
-        buf.seek(0)
-        jpeg = buf.read()
-        if CAMERA_FLIP:
-            try:
-                from PIL import Image
-                img = Image.open(io.BytesIO(jpeg)).rotate(180)
-                out = io.BytesIO()
-                img.save(out, format="jpeg")
-                jpeg = out.getvalue()
-            except Exception:
-                pass
+        from PIL import Image
+        img = Image.open(io.BytesIO(jpeg)).rotate(180)
+        out = io.BytesIO()
+        img.save(out, format="jpeg")
+        return out.getvalue()
+    except Exception:
+        return jpeg
+
+
+def _capture_image_picam(width, height):
+    from picamera2 import Picamera2
+    cam = Picamera2()
+    config = cam.create_still_configuration(main={"size": (width, height)})
+    cam.configure(config)
+    cam.start()
+    time.sleep(0.5)  # let auto-exposure settle
+    buf = io.BytesIO()
+    cam.capture_file(buf, format="jpeg")
+    cam.stop()
+    cam.close()
+    buf.seek(0)
+    return buf.read()
+
+
+def _capture_image_usb(width, height):
+    """Grab one frame from a USB UVC webcam via ffmpeg.
+
+    Requests MJPEG directly from the webcam (``-input_format mjpeg``) rather
+    than raw YUYV re-encoded through libavcodec -- the Pi Zero 2W's single
+    core can't afford that re-encode, and most UVC webcams (incl. NexiGo)
+    support MJPEG capture natively. Falls back to ffmpeg's default input
+    format if the device doesn't support that mode/size combination.
+
+    Discards the first 8 frames before encoding the 9th: picamera2's path has
+    an explicit 0.5s auto-exposure settle sleep, and a raw v4l2 pipe has no
+    equivalent -- the very first frame off a UVC webcam is routinely dark or
+    badly gained. A free-tier vision model won't say "this frame is black",
+    it'll narrate something plausible (see the MTV-t-shirt note below), so a
+    bad first frame would surface as a confident, wrong description.
+    """
+    base = ["ffmpeg", "-y", "-loglevel", "error", "-f", "v4l2"]
+    skip = ["-vf", "select=gte(n\\,8)"]
+    attempts = [
+        base + ["-input_format", "mjpeg", "-video_size", f"{width}x{height}",
+                "-i", USB_CAMERA_DEV] + skip + ["-frames:v", "1", "-f", "mjpeg", "-"],
+        base + ["-i", USB_CAMERA_DEV] + skip + ["-frames:v", "1", "-f", "mjpeg", "-"],
+    ]
+    for cmd in attempts:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=15)
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+    return None
+
+
+def capture_image(width=1280, height=720):
+    """Capture a JPEG from whichever camera init_camera() found. Returns base64 or None."""
+    try:
+        if CAMERA_KIND == "usb":
+            jpeg = _capture_image_usb(width, height)
+        else:
+            jpeg = _capture_image_picam(width, height)
+        if not jpeg:
+            return None
+        jpeg = _camera_flip_jpeg(jpeg)
         return base64.b64encode(jpeg).decode()
     except Exception as e:
         print(f"[camera] capture_image failed: {e}", flush=True)

@@ -12035,6 +12035,7 @@ def run_device_mode():
         except Exception as e:
             print(f"[audio] startup BT volume set failed: {e}", flush=True)
     init_mic()
+    init_camera()
 
     board  = WhisplayBoard()
     # 100 MHz SPI is too fast for Pi Zero 2W; 20 MHz verified clean on hardware

@@ -421,11 +421,11 @@ _MUSIC_STOP_RE = re.compile(
 
 _JOKES: dict = {"en": [], "es": [], "ru": [], "he": [], "zh": []}
 _JOKE_RE = re.compile(
-    r"^(tell me a (dirty |adult |naughty |nasty |raunchy )?joke"
-    r"|give me a (dirty |adult |naughty |nasty |raunchy )?joke"
+    r"^(tell me an? (?:super |extra |really |very |extremely )?(dirty |adult |naughty |nasty |raunchy )?joke"
+    r"|give me an? (?:super |extra |really |very |extremely )?(dirty |adult |naughty |nasty |raunchy )?joke"
     r"|joke|say a joke|hit me with a joke"
     r"|make me laugh|say something funny|got any jokes"
-    r"|(dirty|adult|naughty|nasty|raunchy) joke"
+    r"|(?:super |extra |really |very |extremely )?(dirty|adult|naughty|nasty|raunchy) joke"
     # Spanish
     r"|cu[eé]ntame un chiste|chiste|hazme reír|algo gracioso"
     # Russian
@@ -436,6 +436,35 @@ _JOKE_RE = re.compile(
     r"|讲个笑话|说个笑话|来个笑话|笑话)",
     re.IGNORECASE,
 )
+
+# "tell me a SUPER dirty joke" (also extra/really/very/extremely) routes to
+# the sexual-content subset; every other joke request (plain "dirty joke",
+# "tell me a joke", "make me laugh", ...) routes to the non-sexual subset.
+# _JOKE_RE above was widened with the same intensifier group so the request
+# actually matches at all -- it previously only recognized a single adjective
+# immediately before "joke", so "tell me a super dirty joke" didn't trigger
+# the joke branch in the first place.
+_SUPER_DIRTY_RE = re.compile(r"\b(super|extra|really|very|extremely)\s+dirty\b", re.IGNORECASE)
+
+# Keyword classifier for "is this joke sexual content" vs. other crude/adult
+# humor (profanity, bathroom humor, drugs, dark humor, slurs, ...) that
+# doesn't involve sex. Not LLM-graded -- a regex pass over ~2000 jokes is
+# instant and good enough for a coarse two-bucket split; a joke_probe.py-style
+# LLM audit would be far more accurate but isn't worth the cost just to route
+# a single "make it extra dirty" request.
+_SEXUAL_JOKE_RE = re.compile(
+    r"\b(sex|sexual|sexy|fuck\w*|screw\w*|banging|blowjob|handjob|cum\w*|"
+    r"orgasm\w*|masturbat\w*|penis|dick|cock|vagina|pussy|clit\w*|"
+    r"anal|threesome|foreplay|virgin\w*|porn\w*|nude\w*|naked|"
+    r"boob\w*|tit\w*|breast\w*|nipple\w*|erect\w*|horny|slut\w*|whore\w*|"
+    r"condom\w*|orgy|bdsm|dildo|vibrator|strap-?on|semen|sperm|ejacul\w*|"
+    r"intercourse|hooker\w*|prostitut\w*|gangbang|make out|hook.?up)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_sexual_joke(j: dict) -> bool:
+    return bool(_SEXUAL_JOKE_RE.search(j.get("setup", "") + " " + (j.get("punchline") or "")))
 
 
 _JOKE_EXCLUDE_RE = re.compile(
@@ -462,9 +491,18 @@ def load_jokes():
                 _JOKES[lang] = []
 
 
-def random_joke(lang: str = "en") -> str:
-    """Return a random joke in the given language, falling back to English."""
+def random_joke(lang: str = "en", sexual: bool | None = None) -> str:
+    """Return a random joke in the given language, falling back to English.
+
+    sexual: None picks from the whole pool (unchanged default); True/False
+    restricts to _is_sexual_joke's matching subset. Falls back to the whole
+    pool if the requested subset is empty for this language -- a non-English
+    pool may be too small to have a meaningful split, and serving nothing is
+    worse than serving from the wrong bucket occasionally."""
     pool = _JOKES.get(lang) or _JOKES.get("en") or []
+    if sexual is not None and pool:
+        filtered = [j for j in pool if _is_sexual_joke(j) == sexual]
+        pool = filtered or pool
     if not pool:
         return ""
     j = random.choice(pool)
@@ -10206,7 +10244,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 return
 
             if user_msg.lower().startswith("/joke") or _JOKE_RE.match(user_msg):
-                joke = random_joke(joke_lang(user_msg))
+                joke = random_joke(joke_lang(user_msg), sexual=bool(_SUPER_DIRTY_RE.search(user_msg)))
                 if joke:
                     sse({"token": joke})
                 else:
@@ -10877,7 +10915,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # ── Adult jokes ──────────────────────────────────────────────────────
     if _JOKE_RE.match(transcript):
         jlang = joke_lang(transcript)
-        joke = random_joke(jlang)
+        joke = random_joke(jlang, sexual=bool(_SUPER_DIRTY_RE.search(transcript)))
         if joke:
             print(f"Zeev [joke]: {joke}")
             ctx.session.append({"role": "user", "content": transcript})
@@ -14108,7 +14146,7 @@ def main():
 
         if user_input.lower().startswith("/joke") or _JOKE_RE.match(user_input):
             jlang = joke_lang(user_input)
-            joke = random_joke(jlang)
+            joke = random_joke(jlang, sexual=bool(_SUPER_DIRTY_RE.search(user_input)))
             if joke:
                 print(f"\n{CYAN}{BOLD}Zeev:{RESET} {joke}\n")
                 if tts_on:

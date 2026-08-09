@@ -992,12 +992,17 @@ _CAMERA_RE = re.compile(
     r"|\bwhat('?s| is) (in front of you|around you|there)\b"
     r"|\b(describe|show me) what('?s| is) (there|in front|around)\b"
     r"|\bcan you see (anything|something|what'?s|me)\b"
-    # Bare "look at ... camera", singular, no room noun -- "look at the wood
-    # in the camera"/"look at the attached camera". _WYZE_CAM_RE's own "look
-    # at ... camera(s)" phrasing is near-identical, so this only ever gets a
-    # turn once the Wyze gate above has declined it (no room resolved and a
-    # local camera is attached) -- see the gate at CAMERA_AVAILABLE below.
-    r"|\blook at\b.{0,30}\bcamera\b",
+    # Bare "look at/to/toward/in/into ... camera", singular, no room noun --
+    # "look at the wood in the camera"/"look at the attached camera". Only
+    # "look at" was covered at first; "look to the camera" (found live
+    # 2026-08-08) used a different preposition and missed this arm entirely,
+    # so the turn reached the 8B with no image and no camera-shaped gate to
+    # correct it -- the model hallucinated "I see a container... partially
+    # hidden by your hand" from nothing. _WYZE_CAM_RE's own "look at/in ...
+    # camera(s)" phrasing is near-identical, so this only ever gets a turn
+    # once the Wyze gate above has declined it (no room resolved and a local
+    # camera is attached) -- see the gate at CAMERA_AVAILABLE below.
+    r"|\blook (at|to|toward|towards|in|into)\b.{0,30}\bcamera\b",
     re.IGNORECASE,
 )
 # A house camera is asked about differently from the Pi's own eye: "what's going
@@ -1008,7 +1013,7 @@ _WYZE_CAM_RE = re.compile(
     # Contractions are not reliable: Whisper transcribed the same spoken question
     # as "What's going on upstairs?" once and "what is going on upstairs" the
     # next time, and only the first form matched -- so both are spelled out.
-    r"\b(check|look at|look in|show me|peek at|pull up|"
+    r"\b(check|look at|look to|look toward|look towards|look in|look into|show me|peek at|pull up|"
     r"what(?:'?s| is) (?:happening|going on|up)|"
     r"who(?:'?s| is)|is (?:anyone|anybody|someone|somebody))\b"
     # Plurals are not optional. "check all cameras" matched *nothing* here --

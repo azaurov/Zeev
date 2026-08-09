@@ -8483,6 +8483,82 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
 
 
 # ---------------------------------------------------------------------------
+# Wake-triggered ambient capture
+# ---------------------------------------------------------------------------
+# A silent, un-announced webcam capture kicked off the moment a wake word
+# fires, so the LLM has passive visual context for the turn ("you look
+# tired") without Alex ever asking Zeev to look. Deliberately NOT fired on
+# every turn: vision_complete() hits a shared free-tier endpoint (~3-8s round
+# trip, same quota the Wyze cameras and /look share), so capturing on every
+# single wake word would multiply that spend for a background nicety.
+# _AMBIENT_VISION_MIN_INTERVAL_S throttles attempts (not just successes --
+# an outage shouldn't turn into a retry-every-wake loop), and injection into
+# the prompt is separately gated on freshness (_AMBIENT_VISION_FRESH_S) so a
+# five-minute-old description is never read out as the current scene -- the
+# same staleness trap the camera-capability guard above already documents.
+_AMBIENT_VISION_MIN_INTERVAL_S = float(os.environ.get("ZEEV_AMBIENT_VISION_INTERVAL", "300"))
+_AMBIENT_VISION_FRESH_S = 20.0
+_AMBIENT_VISION_PROMPT = (
+    "In one short, plain sentence, describe the current scene for background "
+    "context only -- this is not a reply to the user, just a private note."
+)
+_ambient_vision = {"desc": None, "desc_ts": 0.0, "attempt_ts": 0.0, "capturing": False}
+_ambient_vision_lock = threading.Lock()
+
+
+def _start_ambient_capture():
+    """Kick off a background webcam capture+description, throttled.
+
+    Runs on its own thread, overlapped with whatever the wake path is already
+    doing (recording the follow-up utterance, STT) -- see `_wake_dispatch` --
+    so it is rarely on the critical path of the turn it ends up informing,
+    and never blocks one it doesn't finish in time for.
+    """
+    if not CAMERA_AVAILABLE:
+        return
+    now = time.time()
+    with _ambient_vision_lock:
+        if (_ambient_vision["capturing"]
+                or (now - _ambient_vision["attempt_ts"]) < _AMBIENT_VISION_MIN_INTERVAL_S):
+            return
+        _ambient_vision["capturing"] = True
+        _ambient_vision["attempt_ts"] = now
+
+    def _run():
+        try:
+            img = capture_image()
+            if not img:
+                print("[ambient-vision] capture failed", flush=True)
+                return
+            desc, err = vision_complete(img, _AMBIENT_VISION_PROMPT)
+            if not desc:
+                print(f"[ambient-vision] vision failed: {err}", flush=True)
+                return
+            clean = _strip_stage_directions(desc).strip()
+            if clean:
+                with _ambient_vision_lock:
+                    _ambient_vision["desc"] = clean
+                    _ambient_vision["desc_ts"] = time.time()
+                print(f"[ambient-vision] {clean[:150]!r}", flush=True)
+        except Exception as e:
+            print(f"[ambient-vision] error: {e}", flush=True)
+        finally:
+            with _ambient_vision_lock:
+                _ambient_vision["capturing"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fresh_ambient_vision():
+    """Return the current ambient description if captured recently enough, else None."""
+    with _ambient_vision_lock:
+        desc, ts = _ambient_vision["desc"], _ambient_vision["desc_ts"]
+    if desc and (time.time() - ts) < _AMBIENT_VISION_FRESH_S:
+        return desc
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Wyze cameras (via docker-wyze-bridge on bosgame)
 # ---------------------------------------------------------------------------
 # Wyze cameras expose nothing on the LAN by themselves -- no RTSP, no snapshot
@@ -11727,7 +11803,22 @@ def handle_transcript(ctx, transcript, _depth=0):
     short    = _MODEL_SHORT.get(model_id, "?")
 
     print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
-    sys_prompt   = _build_system_prompt(transcript, session=ctx.session) + (
+    sys_prompt   = _build_system_prompt(transcript, session=ctx.session)
+    # Ambient webcam context from the wake-triggered capture above. Freshness
+    # is enforced by _fresh_ambient_vision itself (only what was captured for
+    # THIS wake, not a stale multi-minute-old frame) -- same reasoning as the
+    # camera-capability guard's "earlier description is a record of the past"
+    # instruction. Deliberately worded as background, not an invitation to
+    # narrate it unprompted -- Alex didn't ask Zeev to look.
+    _amb = _fresh_ambient_vision()
+    if _amb:
+        sys_prompt += (
+            f"\n\n## What you can currently see (webcam, background context): {_amb}\n"
+            "This is passive context, not something you were asked to look at -- "
+            "only bring it up if it's naturally relevant to the reply, don't "
+            "describe it unprompted."
+        )
+    sys_prompt += (
         "\n\nVOICE INTERFACE: You are speaking aloud. Rules:\n"
         "1. Always reply in exactly 1-2 sentences. Never more.\n"
         "2. No lists, bullet points, headers, or preamble.\n"
@@ -13247,6 +13338,10 @@ def run_device_mode():
             _busy.set()   # already set in "ready"; idempotent
 
         _play_wake_beep()
+        # Fire-and-forget: overlaps the follow-up recording/STT below (or, in
+        # the utterance-with-wake-word branch, the LLM call handle_transcript
+        # is about to start), so it's rarely the reason a turn is slow.
+        _start_ambient_capture()
 
         if len(utterance) > 2:
             board.set_rgb(*_LED_THINKING)

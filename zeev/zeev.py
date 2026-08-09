@@ -10903,7 +10903,7 @@ _QUESTION_TAIL_RE = re.compile(r"\?\s*$")
 _TURN_DEPTH = [0]
 # A model that ends every reply with a question would otherwise hold the mic in
 # a loop the user cannot walk away from.
-_FOLLOWUP_MAX_DEPTH = 2
+_FOLLOWUP_MAX_DEPTH = 3
 
 # A pivot or a question after "yes" means the answer is not a bare yes. Live
 # 2026-08-01 19:07, "Yes, but can you sing in harmony together with Zeev?" hit
@@ -12059,7 +12059,8 @@ def handle_transcript(ctx, transcript, _depth=0):
             try:
                 r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
                 if r and r.status_code == 200:
-                    content = (r.json()["choices"][0]["message"]["content"] or "").strip()
+                    content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
+                    content = content.strip()
                 if content:
                     ctx._pending_detail[0] = content
                     print("[detail] pre-generated and ready", flush=True)

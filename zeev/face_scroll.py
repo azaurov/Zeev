@@ -207,6 +207,53 @@ _FACE_R_ORIG = 25  # radius the original hand-tuned pixel offsets were designed 
 _HAT_TOP = 20  # crown top y — fixed, clears the status-row text above it
 
 
+# ── Equalizer visualizer (state == "speaking") ────────────────────────────────
+# Replaces the Miss Minutes face for the whole duration of any spoken reply.
+# `eq_levels`, when given, is 8 real per-band amplitudes (0-1) computed 30x/sec
+# from the actual audio in zeev.py's _play_pcm_chunked -- but that path only
+# runs when Python itself is streaming PCM to aplay (the Orpheus/BT fallback
+# TTS route). The primary TTS route, the Go audio daemon's speak_sync(), plays
+# audio entirely inside the daemon process and hands nothing back to Python,
+# so most turns have no live signal at all. eq_levels is None in that case,
+# and a smooth synthetic per-bar pattern is drawn instead -- same
+# real-data-or-synthetic-fallback contract _draw_miss_minutes_icon already
+# used for mouth_shape, just applied to a different visual.
+_EQ_BANDS = 8
+_EQ_SYNTH_PHASE = [0.31, 0.67, 0.12, 0.88, 0.45, 0.72, 0.20, 0.58]
+_eq_smoothed = [0.0] * _EQ_BANDS  # small per-frame decay so bars fall, not cut, between updates
+
+
+def _draw_equalizer(img, draw, t, col, eq_levels=None):
+    n = _EQ_BANDS
+    if eq_levels:
+        raw = [max(0.0, min(1.0, eq_levels[i] if i < len(eq_levels) else 0.0))
+               for i in range(n)]
+    else:
+        # Bounded, per-bar-phased sine so it reads as "alive" rather than a
+        # static or obviously looping shape, without claiming to be real audio.
+        raw = [0.18 + 0.30 * math.sin(t * 3.1 + _EQ_SYNTH_PHASE[i] * 2 * math.pi) ** 2
+               for i in range(n)]
+
+    area_top = _HAT_TOP
+    area_h   = HEADER_H - area_top - 12
+    area_w   = W - 48
+    x0       = (W - area_w) // 2
+    bar_w    = area_w / n
+    gap      = bar_w * 0.28
+    base_y   = area_top + area_h
+
+    for i in range(n):
+        # Instant rise, gentle fall — real bar-graph feel instead of jitter,
+        # and it papers over the gap between 30Hz updates and the 8fps redraw.
+        _eq_smoothed[i] = max(raw[i], _eq_smoothed[i] * 0.55)
+        h = max(3, _eq_smoothed[i] * area_h)
+        x = x0 + i * bar_w + gap / 2
+        w = bar_w - gap
+        draw.rounded_rectangle(
+            [x, base_y - h, x + w, base_y],
+            radius=min(4, w / 2), fill=col)
+
+
 def _draw_miss_minutes_icon(img, draw, state, t, mouth_shape=None):
     """Draw Miss Minutes — animated PIL clock face with cartoon expressions.
 
@@ -329,7 +376,7 @@ def _draw_battery(draw, x, y, level, charging):
         draw.line([cx - 1, y + bh // 2, cx + 2, y + bh - 3], fill=(0, 0, 0), width=1)
 
 
-def _draw_header(img, draw, state, col, batt=None, t=0.0, mouth_shape=None):
+def _draw_header(img, draw, state, col, batt=None, t=0.0, mouth_shape=None, eq_levels=None):
     """batt: (level_float_or_None, charging_bool) or None if unavailable."""
     label = _LABELS.get(state, state)
     clock = datetime.now().strftime("%H:%M")
@@ -362,8 +409,12 @@ def _draw_header(img, draw, state, col, batt=None, t=0.0, mouth_shape=None):
     else:
         draw.text((W - clock_w - 8, 5), clock, font=font_sm, fill=(130, 140, 170))
 
-    # Miss Minutes clock-face icon
-    _draw_miss_minutes_icon(img, draw, state, t, mouth_shape=mouth_shape)
+    # Speaking gets the equalizer visualizer; every other state keeps the
+    # Miss Minutes clock face.
+    if state == "speaking":
+        _draw_equalizer(img, draw, t, col, eq_levels=eq_levels)
+    else:
+        _draw_miss_minutes_icon(img, draw, state, t, mouth_shape=mouth_shape)
 
     # Separator line
     draw.line([0, SEP_Y - 1, W, SEP_Y - 1], fill=(40, 44, 55), width=1)
@@ -515,7 +566,8 @@ def _draw_idle_mm(t: float) -> Image.Image | None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def draw_frame(state: str, caption: str, t: float, batt=None, mouth_shape=None) -> Image.Image:
+def draw_frame(state: str, caption: str, t: float, batt=None, mouth_shape=None,
+               eq_levels=None) -> Image.Image:
     """
     Render one 240×280 frame.
 
@@ -525,8 +577,11 @@ def draw_frame(state: str, caption: str, t: float, batt=None, mouth_shape=None) 
     caption     : full reply text to show in the scrolling area
     t           : time.time() — drives clock, scroll, and icon animations
     batt        : (level: float|None, charging: bool) from get_battery(), or None
-    mouth_shape : "closed"|"half"|"open"|"e"|"u" from the lipsync engine, or None
-                  to fall back to the fixed-rate flap during "speaking".
+    mouth_shape : unused while state == "speaking" (see eq_levels below); kept
+                  for callers/tests still passing it during other states.
+    eq_levels   : 8 floats (0-1), real per-band audio levels for the
+                  "speaking" equalizer visualizer, or None to draw a smooth
+                  synthetic pattern (no live PCM reached Python this turn).
     """
     if state == "idle":
         img = _draw_idle_mm(t)
@@ -537,7 +592,8 @@ def draw_frame(state: str, caption: str, t: float, batt=None, mouth_shape=None) 
     draw = ImageDraw.Draw(img)
     col  = _STATE_COLORS.get(state, (120, 120, 120))
 
-    _draw_header(img, draw, state, col, batt=batt, t=t, mouth_shape=mouth_shape)
+    _draw_header(img, draw, state, col, batt=batt, t=t, mouth_shape=mouth_shape,
+                 eq_levels=eq_levels)
     _draw_text_area(img, draw, caption, t)
 
     return img

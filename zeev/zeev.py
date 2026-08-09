@@ -12351,6 +12351,17 @@ def run_device_mode():
     # fixed-rate flap animation for TTS paths that don't chunk audio (Piper,
     # gTTS, espeak).
     _mouth_shape = [None]
+    # Equalizer-bar levels for the "speaking" visualizer, same update site and
+    # same None-means-synthetic contract as _mouth_shape above. Real levels
+    # only exist while Python itself is streaming PCM to aplay (the Orpheus/BT
+    # fallback path in _play_pcm_chunked) -- the primary path, the Go audio
+    # daemon's own speak_sync(), plays audio entirely inside the daemon and
+    # never hands PCM back to Python, so there is no live signal to bucket for
+    # most turns. face_scroll draws a smooth synthetic pattern in that case
+    # rather than leaving the screen static during speech.
+    _EQ_BANDS = 8
+    _eq_levels = [None]
+    _eq_peaks = [1e-3] * _EQ_BANDS
 
     _lipsync_engine = None
     if _have_numpy:
@@ -12385,7 +12396,8 @@ def run_device_mode():
                 try:
                     from face_scroll import draw_frame
                     img = draw_frame(state, caption, now, batt=get_battery(),
-                                      mouth_shape=_mouth_shape[0])
+                                      mouth_shape=_mouth_shape[0],
+                                      eq_levels=_eq_levels[0])
                     _push_lcd(img)
                 except Exception as e:
                     print(f"LCD error: {e}")
@@ -12697,6 +12709,24 @@ def run_device_mode():
                     den = float(np.sum(spectrum))
                     if den > 0 and nyquist > 0:
                         centroid01 = min(1.0, float(np.sum(freqs * spectrum)) / den / nyquist)
+                    # Equalizer bands: log-spaced buckets of the same FFT used
+                    # for the centroid above, each normalized against its own
+                    # slow-decaying peak (same shape as the lipsync engine's
+                    # peak/noise tracking) so a quiet passage doesn't read as
+                    # a flatlined visualizer.
+                    n_bins = len(spectrum)
+                    if n_bins >= _EQ_BANDS + 1:
+                        edges = np.unique(np.geomspace(1, n_bins, _EQ_BANDS + 1).astype(int))
+                        levels = []
+                        for bi in range(len(edges) - 1):
+                            lo, hi = edges[bi], max(edges[bi] + 1, edges[bi + 1])
+                            band = spectrum[lo:hi]
+                            e = float(np.sqrt(np.mean(band ** 2))) if band.size else 0.0
+                            _eq_peaks[bi] = max(e, _eq_peaks[bi] * 0.995)
+                            levels.append(max(0.0, min(1.0, e / max(_eq_peaks[bi], 1e-6))))
+                        while len(levels) < _EQ_BANDS:
+                            levels.append(levels[-1] if levels else 0.0)
+                        _eq_levels[0] = levels
                 elapsed = time.monotonic() - start_t
                 _mouth_shape[0] = _lipsync_engine.update(rms, centroid01, elapsed)
                 proc.stdin.write(chunk)
@@ -13008,6 +13038,7 @@ def run_device_mode():
             finally:
                 _tts_p1 = _tts_p2 = None
                 _mouth_shape[0] = None
+                _eq_levels[0] = None
                 if _lipsync_engine:
                     _lipsync_engine.reset()
 

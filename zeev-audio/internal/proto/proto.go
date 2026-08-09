@@ -53,6 +53,10 @@ type Response struct {
 	BTDev     string `json:"bt_dev,omitempty"`
 	BTRate    int    `json:"bt_rate,omitempty"`
 	BTChannels int   `json:"bt_channels,omitempty"`
+	// EQLevels/Playing: live LCD-equalizer state (see audio/eq.go), polled by
+	// Python's face-render loop while state == "speaking".
+	EQLevels []float64 `json:"eq_levels,omitempty"`
+	Playing  bool      `json:"playing,omitempty"`
 }
 
 // BTDevice is one entry from a BT scan result.

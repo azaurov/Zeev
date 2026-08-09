@@ -158,9 +158,22 @@ func SetVolume(level int) (int, error) {
 	return level, nil
 }
 
+// eqTrackable reports whether format/rate/channels are ones updateEQ can
+// actually process (16-bit PCM, known geometry) — mirrors zeev.py's own
+// "not (_have_numpy...) or sampwidth != 2" guard in _play_pcm_chunked.
+func eqTrackable(format string, rate, channels int) bool {
+	return format == "S16_LE" && rate > 0 && channels > 0
+}
+
 // APlay pipes raw PCM data to aplay on the given device.
 // Acquires aplayMu so the keepalive goroutine and TTS never open the device
 // simultaneously (concurrent opens cause broken pipe on the WM8960).
+//
+// Also feeds the live LCD-equalizer state (see eq.go) via a small internal
+// write-splitting wrapper when the format is trackable — this is the
+// primary TTS path (Go daemon speak_sync), so without it the LCD's
+// "speaking" visualizer would only ever animate for the Orpheus/BT-fallback
+// path that streams PCM back through Python instead.
 func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 	if format == "" {
 		format = "S16_LE"
@@ -172,6 +185,11 @@ func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 		"-f", format,
 		"-r", strconv.Itoa(rate),
 		"-c", strconv.Itoa(channels),
+		// Tight buffer/period (100ms/20ms) so the level-tracking writer's
+		// small sequential writes actually get paced by pipe backpressure
+		// close to real playback time — same reasoning as zeev.py's own
+		// _play_pcm_chunked comment on aplay's -B/-F flags.
+		"-B", "100000", "-F", "20000",
 	}
 	cmd := exec.Command("aplay", args...)
 	stdin, err := cmd.StdinPipe()
@@ -182,8 +200,14 @@ func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 		return err
 	}
 	setPlaying(cmd)
+	setEQPlaying(eqTrackable(format, rate, channels))
 	defer setPlaying(nil)
-	if _, err := stdin.Write(pcmData); err != nil {
+	defer setEQPlaying(false)
+	var w io.Writer = stdin
+	if eqTrackable(format, rate, channels) {
+		w = &levelTrackingWriter{w: stdin.Write, rate: rate, channels: channels}
+	}
+	if _, err := w.Write(pcmData); err != nil {
 		stdin.Close()
 		cmd.Wait()
 		return err
@@ -197,6 +221,9 @@ func APlay(pcmData []byte, dev, format string, rate, channels int) error {
 // prevents the keepalive from opening the device mid-stream.
 // Use this when playing multiple sequential chunks (e.g. sentence-by-sentence
 // TTS) to avoid the WM8960 glitch caused by rapid open/close cycles.
+//
+// See APlay's doc comment for why `feed` is handed a level-tracking writer
+// rather than aplay's stdin directly.
 func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) error) error {
 	if format == "" {
 		format = "S16_LE"
@@ -208,6 +235,7 @@ func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) er
 		"-f", format,
 		"-r", strconv.Itoa(rate),
 		"-c", strconv.Itoa(channels),
+		"-B", "100000", "-F", "20000",
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -217,8 +245,14 @@ func APlayPipe(dev, format string, rate, channels int, feed func(w io.Writer) er
 		return err
 	}
 	setPlaying(cmd)
+	setEQPlaying(eqTrackable(format, rate, channels))
 	defer setPlaying(nil)
-	feedErr := feed(stdin)
+	defer setEQPlaying(false)
+	var w io.Writer = stdin
+	if eqTrackable(format, rate, channels) {
+		w = &levelTrackingWriter{w: stdin.Write, rate: rate, channels: channels}
+	}
+	feedErr := feed(w)
 	stdin.Close()
 	waitErr := cmd.Wait()
 	if feedErr != nil {

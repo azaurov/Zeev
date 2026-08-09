@@ -96,6 +96,18 @@ func (s *Server) handle(req proto.Request) proto.Response {
 		base.OK = true
 		base.Dev = bt.AudioDev()
 
+	// ── eq_levels ──────────────────────────────────────────────────────────
+	// Polled from a Python connection separate from whichever one is blocked
+	// in a speak_sync call — same "own connection, own goroutine" reasoning
+	// speak_stop already uses, since a single connection processes requests
+	// one at a time. Cheap and safe to poll at 8fps: no work happens here
+	// beyond a mutex-guarded read of already-computed state.
+	case "eq_levels":
+		base.OK = true
+		levels, playing := audio.EQLevels()
+		base.EQLevels = levels[:]
+		base.Playing = playing
+
 	// ── speak / speak_sync ─────────────────────────────────────────────────
 	case "speak", "speak_sync":
 		dev := req.Dev

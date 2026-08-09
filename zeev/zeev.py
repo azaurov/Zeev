@@ -12338,6 +12338,14 @@ def run_device_mode():
     def _set_face(state, caption=""):
         nonlocal _face_state, _face_caption
         with _face_lock:
+            if state == "speaking" and _face_state != "speaking":
+                # Fresh speaking turn: clear any stale levels from the
+                # previous reply (daemon-driven playback ends by reporting
+                # playing=False, which _face_loop correctly leaves alone
+                # rather than overwriting -- so without this the last frame's
+                # levels would otherwise linger on screen until the daemon
+                # actually starts streaming this turn's audio).
+                _eq_levels[0] = None
             _face_state   = state
             _face_caption = caption
 
@@ -12392,6 +12400,18 @@ def run_device_mode():
             with _face_lock:
                 state   = _face_state
                 caption = _face_caption
+            if state == "speaking" and _audio and _audio.available:
+                # Primary TTS route (Go daemon speak_sync) plays audio inside
+                # the daemon and hands nothing back to Python, so _eq_levels[0]
+                # is never set for it by _play_pcm_chunked (Orpheus/BT-fallback
+                # route only). Poll the daemon's own live levels instead. Only
+                # overwrite when it reports real playback -- if it's not
+                # playing (e.g. this turn actually went the Orpheus route),
+                # leave whatever _play_pcm_chunked already put there (real
+                # levels, or None so face_scroll falls back to synthetic).
+                _d_levels, _d_playing = _audio.eq_levels()
+                if _d_playing and _d_levels:
+                    _eq_levels[0] = _d_levels
             if _have_pil:
                 try:
                     from face_scroll import draw_frame

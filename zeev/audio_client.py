@@ -250,6 +250,37 @@ class AudioClient:
         """Stop any in-progress music playback."""
         self._call_safe({}, cmd="stop")
 
+    def eq_levels(self) -> tuple[list[float] | None, bool]:
+        """Poll the daemon's live 8-band audio-equalizer state for the LCD
+        "speaking" visualizer (see face_scroll.py). Returns (levels, playing);
+        levels is None when nothing is currently trackable (daemon idle, or
+        playing a format eq.go can't bucket).
+
+        Deliberately its own short-lived connection, same reasoning as
+        speak_stop(): a speak_sync call can be blocking the main connection
+        (serialized behind self._lock) for seconds at a time, and this needs
+        to be polled *during* that call, not after it. The daemon serves each
+        connection in its own goroutine, so a second connection isn't queued
+        behind the first. Timeout is short and failures are silent — this
+        runs inside an 8fps render loop and a slow/wedged daemon must not
+        stall the screen.
+        """
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.15)
+            s.connect(self.SOCKET)
+            s.sendall((json.dumps({"cmd": "eq_levels", "id": str(uuid.uuid4())}) + "\n").encode())
+            line = s.makefile("r").readline()
+            s.close()
+            if not line:
+                return None, False
+            r = json.loads(line)
+            levels = r.get("eq_levels") or None
+            return levels, bool(r.get("playing"))
+        except Exception as e:
+            log.debug("audio_client: eq_levels -> %s", e)
+            return None, False
+
     def record(self, max_seconds: float = 8.0, vad: bool = True, rate: int = 0,
                silence_rms: float = 0.0) -> bytes:
         """Record audio; returns WAV bytes. rate=0 → 16000 Hz.

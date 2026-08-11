@@ -239,7 +239,7 @@ sudo apt install -y python3-pillow
 python3 zeev/zeev.py --device
 ```
 
-Hold the KEY button to record, release to send. Press again while Zeev is speaking to interrupt. The LCD shows an animated face that reflects the current state (idle / listening / thinking / speaking). Speaker volume is set to raw 110 (~87%) via `amixer` at startup.
+Hold the KEY button to record, release to send. Press again while Zeev is speaking to interrupt. The LCD shows a reactive aura — a pulsing orb with 8 radiating spokes whose motion and color reflect the current state (slow breathing when idle, a sweeping spoke while thinking, real per-band audio levels while speaking). Speaker volume is set to raw 110 (~87%) via `amixer` at startup.
 
 **Audio device:** WM8960 appears as `hw:wm8960soundcard`. Recording uses `arecord -f S16_LE -r 16000 -c 1 plughw:wm8960soundcard,0`; playback uses `aplay` or `mpg123 -a plughw:wm8960soundcard,0`.
 

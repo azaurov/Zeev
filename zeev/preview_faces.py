@@ -173,6 +173,12 @@ def make_grid(frames, labels, title):
 sys.path.insert(0, str(HERE))
 import face_wave
 import face_scroll
+import face_aura
+
+# Synthetic eq_levels for the "speaking" aura/scroll preview frame -- same
+# 8-value shape _draw_equalizer/_draw_aura expect from a live daemon poll,
+# hand-picked here so the preview isn't just the flat synthetic fallback.
+_PREVIEW_EQ = [0.8, 0.4, 0.9, 0.3, 0.6, 0.95, 0.5, 0.7]
 
 renderers = {
     "face":   lambda s: draw_face(s,
@@ -180,7 +186,10 @@ renderers = {
                   caption=CAPTION,
                   breath=T * 1.2),
     "wave":   lambda s: face_wave.draw_frame(s, CAPTION, T),
-    "scroll": lambda s: face_scroll.draw_frame(s, CAPTION, T),
+    "scroll": lambda s: face_scroll.draw_frame(s, CAPTION, T,
+                  eq_levels=_PREVIEW_EQ if s == "speaking" else None),
+    "aura":   lambda s: face_aura.draw_frame(s, CAPTION, T,
+                  eq_levels=_PREVIEW_EQ if s == "speaking" else None),
 }
 
 for name, fn in renderers.items():

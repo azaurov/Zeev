@@ -12356,17 +12356,18 @@ def run_device_mode():
     _last_activity  = [time.time()]
     _visual_effect_active = [False]  # True while a shapes_test effect owns the SPI/LCD
     # Audio-driven lipsync shape, updated during Orpheus-path TTS playback.
-    # None means "no live lipsync data" — face_scroll falls back to its
-    # fixed-rate flap animation for TTS paths that don't chunk audio (Piper,
-    # gTTS, espeak).
+    # Accepted by face_aura.draw_frame for call-site compatibility but
+    # unused -- the aura renderer has no lipsync concept (see face_aura.py).
+    # Kept alive in case a future renderer wants it back, same as face_scroll
+    # (still importable, just no longer the live one) still supports it.
     _mouth_shape = [None]
-    # Equalizer-bar levels for the "speaking" visualizer, same update site and
-    # same None-means-synthetic contract as _mouth_shape above. Real levels
-    # only exist while Python itself is streaming PCM to aplay (the Orpheus/BT
+    # Aura-spoke levels for the "speaking" state, same update site and same
+    # None-means-synthetic contract as _mouth_shape above. Real levels only
+    # exist while Python itself is streaming PCM to aplay (the Orpheus/BT
     # fallback path in _play_pcm_chunked) -- the primary path, the Go audio
     # daemon's own speak_sync(), plays audio entirely inside the daemon and
     # never hands PCM back to Python, so there is no live signal to bucket for
-    # most turns. face_scroll draws a smooth synthetic pattern in that case
+    # most turns. face_aura draws a smooth synthetic pattern in that case
     # rather than leaving the screen static during speech.
     _EQ_BANDS = 8
     _eq_levels = [None]
@@ -12409,13 +12410,13 @@ def run_device_mode():
                 # overwrite when it reports real playback -- if it's not
                 # playing (e.g. this turn actually went the Orpheus route),
                 # leave whatever _play_pcm_chunked already put there (real
-                # levels, or None so face_scroll falls back to synthetic).
+                # levels, or None so face_aura falls back to synthetic).
                 _d_levels, _d_playing = _audio.eq_levels()
                 if _d_playing and _d_levels:
                     _eq_levels[0] = _d_levels
             if _have_pil:
                 try:
-                    from face_scroll import draw_frame
+                    from face_aura import draw_frame
                     img = draw_frame(state, caption, now, batt=get_battery(),
                                       mouth_shape=_mouth_shape[0],
                                       eq_levels=_eq_levels[0])

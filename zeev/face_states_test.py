@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Cycle through every device-mode face state on the Whisplay LCD, using the
-exact same renderer (face_scroll.draw_frame) and push interval per state as
-run_device_mode()'s _face_loop, to visually verify timing (blink, mouth,
-scroll, idle animation) on real hardware.
+exact same renderer (face_aura.draw_frame) and push interval per state as
+run_device_mode()'s _face_loop, to visually verify timing (aura pulse,
+spoke motion, scroll) on real hardware.
 
 Usage:
     python3 zeev/face_states_test.py [HOLD_SECONDS_PER_STATE]   # default 6s
@@ -16,7 +16,7 @@ import numpy as np
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-import face_scroll
+import face_aura
 
 W, H = 240, 280
 
@@ -59,7 +59,7 @@ def main():
         start = time.time()
         while time.time() - start < hold:
             t = time.time()
-            img = face_scroll.draw_frame(state, CAPTION, t, batt=(72.0, False))
+            img = face_aura.draw_frame(state, CAPTION, t, batt=(72.0, False))
             push_to_lcd(board, img)
             time.sleep(_FACE_INTERVAL[state])
 

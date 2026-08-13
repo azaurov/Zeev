@@ -10,5 +10,29 @@
       "Bash(ssh ragnar@ragnarok 'cd /home/ragnar/Zeev && python3 << *)",
       "Bash(ssh ragnar@ragnarok 'cd *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -Eq '(cat|less|head|tail|echo).*\\.env' && { echo 'BLOCKED: refusing to dump .env — print key NAMES only' >&2; exit 2; }; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; ruff format \"$f\" 2>/dev/null; ruff check --fix \"$f\" 2>/dev/null; }; exit 0"
+          }
+        ]
+      }
+    ]
   }
 }

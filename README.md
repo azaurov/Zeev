@@ -72,6 +72,8 @@ python3 zeev/zeev.py --device
 
 Requires `GROQ_API_KEY` and `TAVILY_API_KEY`. Copy `.env.example` to `.env` and fill in your keys — the app loads `.env` automatically. Only external dependency: `python3-requests`.
 
+For driving the web server headlessly (e.g. from an agent, or when port 5000 is already taken by something else) — `.claude/skills/run-zeev/driver.py` starts the same server on any port you choose.
+
 ## Models
 
 | Key | Model | Use case |

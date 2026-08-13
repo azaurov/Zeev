@@ -2,9 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Secrets
+
+Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into the transcript. To inspect config, print only key NAMES (e.g. `grep -o '^[A-Z_]*=' .env`) or masked values. If a secret is ever printed, stop and tell me immediately so I can rotate it.
+
+## Scope Discipline
+
+Change only what I asked for. Do not remove trigger words, edit model/max_tokens params, or add fallback paths (e.g. ffmpeg shims) that weren't requested — propose them separately instead.
+
 ## Hardware Environment
 
 Raspberry Pi Zero 2W (512 MB RAM, 4× Cortex-A53). Hardware HATs: Whisplay display (1.96" ST7789 LCD, WM8960 audio, RGB LED, KEY on GPIO17), PiSugar battery. Always verify hardware-related config changes (`config.txt`, I2C/SPI baudrates) before assuming software causes for audio/display failures.
+
+**Hardware assumptions**: before probing hardware (I2C, GPIO, cameras, audio devices), ASK which bus/interface the device is actually on and check for USB bridges (e.g. MCP2221) rather than assuming the Pi's native GPIO I2C. Never flash third-party/demo firmware to devices without first confirming hardware revision compatibility and stating the bricking risk.
 
 ## zeev-audio Go daemon
 
@@ -87,6 +97,18 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 ## Version Control / Deployment
 
 Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked; add generated/data files to `.gitignore` by default. Watch for CRLF line endings from copy-paste in shell scripts/sudoers. Before running `./deploy.sh`, ALWAYS commit local changes first — it relies on `git push origin main`.
+
+## Deploy & Verify Loop
+
+After any code change destined for the Pi: (1) commit locally, (2) `git push`, (3) SSH to the Pi and `git pull` BEFORE restarting the service, (4) `sudo systemctl restart <service>`, (5) tail `journalctl -u <service> -f` (or `-n 20 --no-pager` for a quick check) and confirm the new behavior live. Never claim a fix is deployed until the Pi's HEAD matches the local commit.
+
+## Output Visibility
+
+When producing a list, audit result, or report for me to read (flagged jokes, test failures, findings), print it directly in your chat message. Do not leave results only in Bash stdout or a background job — I can't reliably see that output.
+
+## Testing
+
+Run `pytest` with an explicit timeout (`timeout 300 pytest -x -q`) and never leave a suite running in the foreground for more than ~5 minutes; if it hangs, kill it and report which test hung. Note: `tests/` currently has ~989 tests and a full run legitimately takes several minutes — don't mistake a slow-but-progressing run for a hang; check the log for movement before killing it.
 
 ## Running
 

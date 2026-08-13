@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into the transcript. To inspect config, print only key NAMES (e.g. `grep -o '^[A-Z_]*=' .env`) or masked values. If a secret is ever printed, stop and tell me immediately so I can rotate it.
 
+**Enforced, not just advisory**: `.claude/settings.json` has a `PreToolUse` hook on `Bash` that blocks `cat`/`less`/`head`/`tail`/`echo` commands targeting `.env` (exit 2, refuses the command outright) — verified live 2026-08-13. Also has a `PostToolUse` hook on `Edit|Write` running `ruff format` + `ruff check --fix` on touched files (needs `ruff` on PATH — installed via `pipx install ruff` on this dev box since the repo has no linter/formatter config of its own).
+
 ## Scope Discipline
 
 Change only what I asked for. Do not remove trigger words, edit model/max_tokens params, or add fallback paths (e.g. ffmpeg shims) that weren't requested — propose them separately instead.

@@ -40,7 +40,7 @@ import requests
 from quantum import quantum_reason
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL    = "llama-3.3-70b-versatile"
+MODEL    = "qwen/qwen3.6-27b"
 
 # ---------------------------------------------------------------------------
 # Canonical scenarios — timeless human dilemmas that map cleanly to circuits

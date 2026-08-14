@@ -1266,13 +1266,16 @@ _SMART_RE = re.compile(
 )
 
 MODELS = {
-    "1": ("llama-3.1-8b-instant",          "Llama 3.1 8B  — fast"),
-    "2": ("llama-3.3-70b-versatile",        "Llama 3.3 70B — smart"),
+    "1": ("openai/gpt-oss-20b",             "GPT-OSS 20B   — fast"),
+    "2": ("qwen/qwen3.6-27b",               "Qwen3.6 27B   — smart"),
     "3": ("openai/gpt-oss-120b",             "GPT-OSS 120B  — reasoning"),
 }
+# Groq deprecated llama-3.1-8b-instant and llama-3.3-70b-versatile
+# (announced 2026-06-17, cutoff 2026-08-16); replaced per Groq's own
+# migration recommendations (console.groq.com/docs/deprecations).
 _MODEL_SHORT = {
-    "llama-3.1-8b-instant":         "8B",
-    "llama-3.3-70b-versatile":      "70B",
+    "openai/gpt-oss-20b":           "GPT-OSS-20B",
+    "qwen/qwen3.6-27b":             "Qwen27B",
     "openai/gpt-oss-120b":          "GPT-OSS",
 }
 PRIOR_TURNS  = 15
@@ -7336,7 +7339,7 @@ def _get_litellm_router():
         fast_models.append({
             "model_name": "zeev-routed-fast",
             "litellm_params": {
-                "model": "groq/llama-3.1-8b-instant",
+                "model": "groq/openai/gpt-oss-20b",
                 "api_key": GROQ_API_KEY,
             }
         })
@@ -7371,7 +7374,7 @@ def _get_litellm_router():
         smart_models.append({
             "model_name": "zeev-routed-smart",
             "litellm_params": {
-                "model": "groq/llama-3.3-70b-versatile",
+                "model": "groq/qwen/qwen3.6-27b",
                 "api_key": GROQ_API_KEY,
             }
         })
@@ -9269,8 +9272,8 @@ footer {
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
     <select id="modelSel">
       <option value="auto" selected>Auto</option>
-      <option value="llama-3.1-8b-instant">8B Fast</option>
-      <option value="llama-3.3-70b-versatile">70B Smart</option>
+      <option value="openai/gpt-oss-20b">GPT-OSS 20B Fast</option>
+      <option value="qwen/qwen3.6-27b">Qwen3.6 27B Smart</option>
       <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
     </select>
   </div>
@@ -11294,6 +11297,8 @@ def handle_transcript(ctx, transcript, _depth=0):
                     import os as _os
                     _os.makedirs(record_dir, exist_ok=True)
 
+                    call_lang = detect_lang("")
+
                     def _stt_from_pcm(pcm: bytes) -> str:
                         import wave, io as _io, struct as _struct
                         buf = _io.BytesIO()
@@ -11302,6 +11307,8 @@ def handle_transcript(ctx, transcript, _depth=0):
                             wf.setsampwidth(2)
                             wf.setframerate(16000)
                             wf.writeframes(pcm)
+                        if call_lang != "en":
+                            return groq_stt_call(buf.getvalue(), lang=call_lang)
                         return groq_stt(buf.getvalue())
 
                     def _llm_reply(text: str) -> str:
@@ -11334,6 +11341,7 @@ def handle_transcript(ctx, transcript, _depth=0):
                         args=(ctx._speak_device, _stt_from_pcm, _llm_reply, phone_mac),
                         kwargs={"record_dir": record_dir, "call_intent": intent_text,
                                 "persona": extract_call_persona(intent_text),
+                                "lang": call_lang,
                                 "dialed_number": number},
                         daemon=True,
                     )
@@ -14117,9 +14125,9 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
         msgs = [{"role": "system", "content": sys_prompt}]
         msgs += session[-10:]
         msgs.append({"role": "user", "content": text})
-        # 8B unreliably romanizes non-English scripts (see CLAUDE.md) — force 70B
-        # for non-English calls instead of the usual auto-routed model.
-        model = "llama-3.3-70b-versatile" if lang in _LANG_NAMES else route_model(text)
+        # 8B unreliably romanizes non-English scripts (see CLAUDE.md) — force the
+        # smart tier for non-English calls instead of the usual auto-routed model.
+        model = MODELS["2"][0] if lang in _LANG_NAMES else route_model(text)
         resp, err, _ = _llm_post(msgs, model, stream=False, max_tokens=200)
         if err or resp is None or resp.status_code != 200:
             print(f"[call] LLM error: {err}", flush=True)
@@ -14886,12 +14894,16 @@ def main():
                         import os as _os2
                         _os2.makedirs(record_dir, exist_ok=True)
 
+                        call_lang = detect_lang("")
+
                         def _term_stt(pcm: bytes) -> str:
                             import wave, io as _io2
                             buf = _io2.BytesIO()
                             with wave.open(buf, "wb") as wf:
                                 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
                                 wf.writeframes(pcm)
+                            if call_lang != "en":
+                                return groq_stt_call(buf.getvalue(), lang=call_lang)
                             return groq_stt(buf.getvalue())
 
                         _call_sys = (
@@ -14904,7 +14916,7 @@ def main():
                         def _term_llm(text: str) -> str:
                             msgs = [{"role": "system", "content": _call_sys}]
                             msgs.append({"role": "user", "content": text})
-                            resp, err, _ = _llm_post(msgs, "llama-3.1-8b-instant", stream=False, max_tokens=150)
+                            resp, err, _ = _llm_post(msgs, MODELS["1"][0], stream=False, max_tokens=150)
                             if err or resp is None or resp.status_code != 200:
                                 print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
                                 return ""
@@ -14919,6 +14931,7 @@ def main():
                             args=(_term_speak, _term_stt, _term_llm, phone_mac),
                             kwargs={"record_dir": record_dir, "call_intent": intent_text,
                                     "persona": extract_call_persona(intent_text),
+                                    "lang": call_lang,
                                     "dialed_number": number},
                             daemon=True,
                         )

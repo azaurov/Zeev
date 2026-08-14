@@ -52,7 +52,7 @@ if not GROQ_API_KEY:
 import requests
 
 GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL  = "llama-3.3-70b-versatile"
+GROQ_MODEL  = "qwen/qwen3.6-27b"
 MIN_MSGS    = 10   # skip if fewer than this many messages in the window
 MAX_MSGS    = 300  # cap to avoid token overflow
 MSG_PREVIEW = 500  # chars per message in the transcript

@@ -1270,6 +1270,39 @@ MODELS = {
     "2": ("qwen/qwen3.6-27b",               "Qwen3.6 27B   — smart"),
     "3": ("openai/gpt-oss-120b",             "GPT-OSS 120B  — reasoning"),
 }
+
+
+def _quantum_llm(msgs, max_tokens=300, json_mode=False):
+    """Shared llm_fn for every quantum.quantum_reason() caller (the web
+    /quantum handler, terminal/device /quantum, and the dream choice point).
+
+    Two separate Groq quirks found live 2026-08-15 debugging the dream
+    choice point, both breaking every quantum_reason() caller identically
+    since yesterday's MODELS["2"] swap to qwen3.6-27b -- not something the
+    new dream code introduced:
+
+    1. qwen3.6-27b inlines a <think>...</think> block into `content`, which
+       Groq's own response_format=json_object validator rejects outright
+       (json_validate_failed, empty failed_generation) -- not fixable by
+       stripping the response client-side, since Groq never returns usable
+       text at all. gpt-oss-20b keeps reasoning out of `content`, so the
+       circuit-mapping step below routes there instead of the "smart" tier.
+    2. Even gpt-oss-20b produces a malformed `phases` array (every value
+       concatenated into one string, e.g. "0.53.61.4") specifically when
+       response_format=json_object is set -- verified directly against Groq:
+       the identical prompt with the SAME model but no response_format
+       returns a clean numeric array every time. So the actual API call
+       below never sets json_mode regardless of what the caller requests;
+       quantum.py's _llm_circuit_spec already does its own json.loads() on
+       the returned text, which is exactly what a plain completion gives it.
+       Their hidden reasoning still consumes the token budget even without
+       response_format (a 400-token request truncates with finish_reason
+       "length" and empty content), hence the floor below.
+    """
+    if json_mode:
+        return _llm_complete(msgs, MODELS["1"][0], max_tokens=max(max_tokens, 800),
+                              json_mode=False)
+    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=False)
 # Groq deprecated llama-3.1-8b-instant and llama-3.3-70b-versatile
 # (announced 2026-06-17, cutoff 2026-08-16); replaced per Groq's own
 # migration recommendations (console.groq.com/docs/deprecations).
@@ -4899,10 +4932,6 @@ def _dream_choice_idea(beat1_text):
     return f"In a dream: {beat1_text} Two paths appear."
 
 
-def _dream_qllm(msgs, max_tokens=300, json_mode=False):
-    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
-
-
 def _resolve_dream_choice(idea, qllm=None):
     """Map a dream's fork onto a quantum circuit; interference picks a branch.
 
@@ -4921,7 +4950,7 @@ def _resolve_dream_choice(idea, qllm=None):
     except Exception as e:
         print(f"[dream] quantum import failed: {e}", flush=True)
         return None, None, None
-    qllm = qllm or _dream_qllm
+    qllm = qllm or _quantum_llm
     try:
         spec, err = _q._llm_circuit_spec(idea, qllm)
         if err or not spec:
@@ -10620,10 +10649,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     import sys as _sys
                     _sys.path.insert(0, str(Path(__file__).parent))
                     import quantum as _q
-                    def _qllm(msgs, max_tokens=300, json_mode=False):
-                        return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
                     past = load_quantum_insights(k=3)
-                    interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm, past_insights=past)
+                    interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _quantum_llm, past_insights=past)
                 except Exception as e:
                     err = str(e)
                     interpretation, spec, result = None, None, None
@@ -11914,13 +11941,9 @@ def handle_transcript(ctx, transcript, _depth=0):
             _sys.path.insert(0, str(Path(__file__).parent))
             import quantum as _q
 
-            def _qllm(msgs, max_tokens=300, json_mode=False):
-                return _llm_complete(msgs, MODELS["2"][0],
-                                     max_tokens=max_tokens, json_mode=json_mode)
-
             past = load_quantum_insights(k=3)
             interpretation, spec, result, err = _q.quantum_reason(
-                quantum_idea, _qllm, past_insights=past)
+                quantum_idea, _quantum_llm, past_insights=past)
             if not err and interpretation:
                 save_quantum_insight(quantum_idea, spec, result, interpretation)
         except Exception as e:
@@ -14719,12 +14742,9 @@ def main():
                 print(f"{DIM}[quantum] module error: {e}{RESET}\n")
                 continue
 
-            def _qllm(msgs, max_tokens=300, json_mode=False):
-                return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
-
             print(f"{DIM}[quantum] mapping idea to circuit...{RESET}", flush=True)
             past = load_quantum_insights(k=3)
-            interpretation, spec, result, err = _q.quantum_reason(idea, _qllm, past_insights=past)
+            interpretation, spec, result, err = _q.quantum_reason(idea, _quantum_llm, past_insights=past)
             if err:
                 print(f"{DIM}[quantum] {err}{RESET}\n")
                 continue
@@ -14894,10 +14914,8 @@ def main():
                 import sys as _sys
                 _sys.path.insert(0, str(Path(__file__).parent))
                 import quantum as _q
-                def _qllm(msgs, max_tokens=300, json_mode=False):
-                    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
                 past = load_quantum_insights(k=3)
-                interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _qllm, past_insights=past)
+                interpretation, spec, result, err = _q.quantum_reason(quantum_idea, _quantum_llm, past_insights=past)
             except Exception as e:
                 err = str(e)
                 interpretation, spec, result = None, None, None

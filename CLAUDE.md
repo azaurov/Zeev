@@ -293,6 +293,15 @@ Eight runs' worth of findings (mostly probe-grading gaps — the grader wasn't s
 
 `quantum_reason(idea, llm_fn, past_insights=None)` in `zeev/quantum.py`: idea → circuit spec → simulate → interpret. `past_insights` (k=3 most recent) compound learning over time. `quantum_daily.py` — 8 human-dilemma scenarios, one per day. Cron: `0 6 * * *`.
 
+### Dreams
+
+Zeev and Sarina each dream overnight, independently (`dreams` table: `persona`, `night_date`, `content`, `fragment`, `vividness`). `_dream_loop()` fires once per persona per night after `_DREAM_IDLE_SEC` (15 min) of device idle. `dream_night_date()` straddles midnight at 5am, so a 2am dream belongs to "last night" the way a human would mean it.
+
+- **`_DREAM_CHANCE` (0.75)** — some nights produce no dream at all, distinct from a dream that isn't recalled. "I don't think I dreamt" and "I did, but it's gone" are different answers and having both is most of the texture.
+- **Recall is a pure function of a value rolled once, at dream time, never re-rolled** (`roll_dream_vividness()` → `dream_recall(vividness, age_days)`). Ask twice and you get the same answer — rolling again at question time would read as a machine improvising rather than as memory. `_DREAM_SKEW` (1.5) skews the roll toward dim via `random()**skew`; `_DREAM_DECAY_PER_DAY` (0.12) fades it further with age. **Loosened 2026-08-15** from skew 2.2/decay 0.18 (was ~12% vivid, ~58% forgotten even at age 0 — dreams were going unremembered too often) to skew 1.5/decay 0.12 (~17% vivid, ~47% forgotten at age 0). Tuned in `tests/test_dreams.py`'s `test_vivid_dreams_are_rare` bounds (vivid 0.05–0.20, none > 0.4) — retune there first if adjusting again.
+- **Quantum-resolved choice point** (`_resolve_dream_choice`, added 2026-08-15): `compose_dream()` writes two beats around a mid-dream fork — the opening beat is mapped onto a quantum circuit (`quantum.py`'s spec/simulate machinery, reused rather than duplicated) and the top post-interference outcome picks which branch the closing beat dramatizes. A failed choice falls through to an unforked dream rather than aborting it. `dreams.content` stays one flat string; the structured open/choice/close breakdown lives in a separate `dream_beats` table as debugging detail, best-effort (a failed beat write never takes down the dream save).
+- **Neither table is read by `messages`/`facts`/RAG** — same isolation rule that protects `call_outcomes` from being served back as fact.
+
 ### Music playback
 
 `youtube_play(query, adev=None)` — `yt-dlp --default-search ytsearch1` → ffmpeg → mpg123.

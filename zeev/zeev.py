@@ -4863,13 +4863,14 @@ _DREAM_PERSONAS = ("zeev", "sarina")
 # recalled -- "I don't think I dreamt" and "I did, but it's gone" are different
 # answers, and having both is most of the texture.
 _DREAM_CHANCE = float(os.environ.get("ZEEV_DREAM_CHANCE", "0.75"))
-# Skew toward the dim. u**2.2 puts ~12% of dreams above the vivid threshold and
-# leaves most below the fragment line, which is roughly how it actually goes.
-_DREAM_SKEW = 2.2
+# Skew toward the dim, but not as dim as it was. u**1.5 puts ~17% of dreams
+# above the vivid threshold and ~55% at fragment-or-better (was ~12%/~42% at
+# u**2.2) -- loosened 2026-08-15, dreams were going unremembered too often.
+_DREAM_SKEW = 1.5
 _DREAM_VIVID_AT    = 0.75
 _DREAM_FRAGMENT_AT = 0.30
-# Dreams fade. A week on, even a vivid one is gone.
-_DREAM_DECAY_PER_DAY = 0.18
+# Dreams fade. A couple weeks on, even a vivid one is gone.
+_DREAM_DECAY_PER_DAY = 0.12
 _DREAM_IDLE_SEC = int(os.environ.get("ZEEV_DREAM_IDLE_SEC", "900"))   # 15 min
 
 

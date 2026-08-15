@@ -4297,6 +4297,26 @@ def _db() -> sqlite3.Connection:
                 ts         TEXT    NOT NULL,
                 UNIQUE(persona, night_date)
             );
+            -- Structured breakdown of a dream: its opening/choice/closing
+            -- beats. A separate table rather than a new column on `dreams` --
+            -- no ALTER TABLE needed against the live Pi's existing rows, same
+            -- reasoning as `dreams` itself getting its own table instead of a
+            -- column on `messages`. `dreams.content` (the concatenated beats)
+            -- stays the source of truth for dream_reply(); this is debugging
+            -- detail and the seed for a future lucid/interactive mode, so a
+            -- write failure here must never take down dream saving above it.
+            CREATE TABLE IF NOT EXISTS dream_beats (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                dream_id     INTEGER NOT NULL,
+                seq          INTEGER NOT NULL,
+                kind         TEXT    NOT NULL,
+                text         TEXT    NOT NULL,
+                options_json TEXT,
+                chosen       TEXT,
+                ts           TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_dream_beats_dream
+                ON dream_beats (dream_id);
             CREATE TABLE IF NOT EXISTS reflections (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 period_start TEXT    NOT NULL,
@@ -4874,70 +4894,204 @@ def _dream_material(limit=25):
     return "\n".join(f"- {b}" for b in bits[:30]) or "- a quiet day"
 
 
-def compose_dream(persona, material, llm=None):
-    """Ask the LLM for a dream. Returns (content, fragment) or (None, None).
+def _dream_choice_idea(beat1_text):
+    """Frame a dream's opening beat as a fork, for the quantum picker below."""
+    return f"In a dream: {beat1_text} Two paths appear."
 
-    Generated off-device: this runs on bosgame's llama3.2:1b with a Groq
-    fallback, the same route extract_memory takes, because a Pi Zero has
-    neither the RAM nor the core to spare at 3am.
+
+def _dream_qllm(msgs, max_tokens=300, json_mode=False):
+    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=json_mode)
+
+
+def _resolve_dream_choice(idea, qllm=None):
+    """Map a dream's fork onto a quantum circuit; interference picks a branch.
+
+    Mirrors the first two-thirds of quantum.quantum_reason() (circuit spec ->
+    qiskit -> pure-python fallback, the same chain zeev.py's other quantum
+    call sites already use) but stops short of its final _llm_interpret call
+    -- that call is written to address Alex in second person, which doesn't
+    fit dream narration, and only the raw post-interference outcome is needed
+    here. Returns (chosen_label, spec, result), or (None, None, None) on any
+    failure -- a failed choice must fall through to an unforked dream, not
+    abort it.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import quantum as _q
+    except Exception as e:
+        print(f"[dream] quantum import failed: {e}", flush=True)
+        return None, None, None
+    qllm = qllm or _dream_qllm
+    try:
+        spec, err = _q._llm_circuit_spec(idea, qllm)
+        if err or not spec:
+            print(f"[dream] circuit mapping failed: {err}", flush=True)
+            return None, None, None
+        result, err = _q._run_qiskit(spec)
+        if err:
+            result = _q._simulate_pure_python(spec)
+        options = spec["options"]
+        probs = result["probabilities"]
+        n = len(options)
+        top_bits = max(probs, key=probs.get)
+        active = [options[i] for i in range(n)
+                  if i < len(top_bits) and top_bits[-(i + 1)] == "1"]
+        chosen = " and ".join(active) if active else "nothing — the moment dissolves"
+        return chosen, spec, result
+    except Exception as e:
+        print(f"[dream] choice resolution failed: {e}", flush=True)
+        return None, None, None
+
+
+def _compose_dream_structured(persona, material, llm=None, qllm=None):
+    """Build one dream as two beats around a quantum-resolved choice point.
+
+    Returns {"content", "fragment", "beats"} or None on failure. Generated
+    off-device: this runs on bosgame's llama3.2:1b with a Groq fallback, the
+    same route extract_memory takes, because a Pi Zero has neither the RAM
+    nor the core to spare at 3am.
     """
     seed = _DREAM_SEEDS.get(persona, _DREAM_SEEDS["zeev"])
-    prompt = (
-        f"{seed}\n\nYou are asleep. From the fragments below, write one short "
-        "dream — 2 or 3 sentences, present tense, first person. Dreamlike, not a "
-        "summary of the day: things blur, shift, and do not resolve. Then on a "
-        "new line write FRAGMENT: followed by ONE image or feeling from it, six "
-        "words at most.\n\n"
-        f"Fragments from the day:\n{material}\n\n"
-        "Dream:"
-    )
-    msgs = [{"role": "user", "content": prompt}]
-    text = None
-    if llm is not None:
-        text = llm(msgs)
-    else:
+
+    def _ask(prompt, max_tokens):
+        msgs = [{"role": "user", "content": prompt}]
+        if llm is not None:
+            return llm(msgs)
+        text = None
         try:
-            text, _ = _bosgame_complete(msgs, max_tokens=220)
+            text, _ = _bosgame_complete(msgs, max_tokens=max_tokens)
         except Exception as e:
             print(f"[dream] bosgame failed: {e}", flush=True)
         if not text:
             try:
-                text, _ = _llm_complete(msgs, MODELS["2"][0], max_tokens=220)
+                text, _ = _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens)
             except Exception as e:
                 print(f"[dream] groq failed: {e}", flush=True)
-    if not text:
-        return None, None
-    text = _strip_stage_directions(text.strip())
+        return text
+
+    opening_prompt = (
+        f"{seed}\n\nYou are asleep. From the fragments below, begin a short "
+        "dream — ONE sentence, present tense, first person. Dreamlike, not a "
+        "summary of the day.\n\n"
+        f"Fragments from the day:\n{material}\n\n"
+        "Dream opens:"
+    )
+    beat1 = _ask(opening_prompt, 120)
+    if not beat1:
+        return None
+    beat1 = _strip_stage_directions(beat1.strip())
+    beat1 = re.sub(r"^Dream( opens)?:\s*", "", beat1, flags=re.IGNORECASE).strip()
+    # A model (or, in tests, a canned fake) can echo the FRAGMENT: format
+    # early -- strip it here too, not just from beat2, so it never leaks into
+    # content mid-sentence.
+    beat1 = re.sub(r"\s*FRAGMENT:.*$", "", beat1, flags=re.IGNORECASE | re.DOTALL).strip()
+    if not beat1:
+        return None
+
+    idea = _dream_choice_idea(beat1)
+    chosen, spec, _result = _resolve_dream_choice(idea, qllm)
+
+    if chosen:
+        closing_prompt = (
+            f"{seed}\n\nYou are still dreaming. The dream so far: {beat1}\n\n"
+            f"Without naming it as a choice, the dream shifts toward: {chosen}. "
+            "Continue for 1-2 more sentences, present tense, first person, "
+            "dreamlike — things blur and do not resolve. Then on a new line "
+            "write FRAGMENT: followed by ONE image or feeling from the whole "
+            "dream, six words at most.\n\nContinue:"
+        )
+    else:
+        closing_prompt = (
+            f"{seed}\n\nYou are still dreaming. The dream so far: {beat1}\n\n"
+            "Continue for 1-2 more sentences, present tense, first person, "
+            "dreamlike — things blur and do not resolve. Then on a new line "
+            "write FRAGMENT: followed by ONE image or feeling from the whole "
+            "dream, six words at most.\n\nContinue:"
+        )
+    beat2_raw = _ask(closing_prompt, 180)
+
+    beats = [{"seq": 1, "kind": "open", "text": beat1}]
+    if spec:
+        beats.append({"seq": 2, "kind": "choice", "text": idea,
+                       "options": spec.get("options"), "chosen": chosen})
+
+    if not beat2_raw:
+        # A choice that can't be dramatized is still a dream -- beat 1 alone,
+        # the same shape single-shot dream generation used to return before.
+        frag = " ".join(beat1.split()[:6])
+        return {"content": beat1, "fragment": frag, "beats": beats}
+
+    beat2 = _strip_stage_directions(beat2_raw.strip())
     frag = ""
-    m = re.search(r"FRAGMENT:\s*(.+)", text, re.IGNORECASE)
+    m = re.search(r"FRAGMENT:\s*(.+)", beat2, re.IGNORECASE)
     if m:
         frag = m.group(1).strip().strip('".')
-        text = text[:m.start()].strip()
-    text = re.sub(r"^Dream:\s*", "", text, flags=re.IGNORECASE).strip()
-    if not text:
-        return None, None
+        beat2 = beat2[:m.start()].strip()
+    beat2 = re.sub(r"^Continue:\s*", "", beat2, flags=re.IGNORECASE).strip()
+
+    content = f"{beat1} {beat2}".strip() if beat2 else beat1
     if not frag:
         # A fragment must be fragmentary. Falling back to the opening sentence
         # would make partial recall read as a tidy summary, which is the one
         # thing it should never sound like.
-        frag = " ".join(text.split()[:6])
-    return text, frag
+        frag = " ".join(content.split()[:6])
+
+    beats.append({"seq": len(beats) + 1, "kind": "close", "text": beat2})
+    return {"content": content, "fragment": frag, "beats": beats}
+
+
+def compose_dream(persona, material, llm=None):
+    """Ask the LLM for a dream. Returns (content, fragment) or (None, None).
+
+    Thin wrapper over _compose_dream_structured() for callers that only want
+    the flat text -- dream_once() calls the structured version directly so it
+    can also persist the beat breakdown via save_dream_beats().
+    """
+    d = _compose_dream_structured(persona, material, llm=llm)
+    if d is None:
+        return None, None
+    return d["content"], d["fragment"]
 
 
 def save_dream(persona, night_date, content, fragment, vividness):
-    """Store one dream. Silently does nothing if that night is already dreamt."""
+    """Store one dream. Returns the new row id, or False if that night is
+    already dreamt (a restart, not a bug) -- still truthy/falsy as before for
+    existing callers, but the id lets dream_once() link dream_beats to it."""
     with _db_lock:
         con = _db()
         try:
-            con.execute(
+            cur = con.execute(
                 "INSERT INTO dreams (persona, night_date, content, fragment, "
                 "vividness, ts) VALUES (?, ?, ?, ?, ?, ?)",
                 (persona, night_date, content, fragment, float(vividness),
                  datetime.now().isoformat()))
             con.commit()
-            return True
+            return cur.lastrowid
         except sqlite3.IntegrityError:
             return False        # already dreamt this night — a restart, not a bug
+
+
+def save_dream_beats(dream_id, beats):
+    """Best-effort structured breakdown of a dream (see the dream_beats
+    schema note). Never fatal -- dreams.content saved above is the source of
+    truth for dream_reply(); this is debugging detail and the seed for a
+    future lucid/interactive mode."""
+    if not beats:
+        return
+    try:
+        with _db_lock:
+            con = _db()
+            now = datetime.now().isoformat()
+            for b in beats:
+                con.execute(
+                    "INSERT INTO dream_beats (dream_id, seq, kind, text, "
+                    "options_json, chosen, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (dream_id, b["seq"], b["kind"], b.get("text", ""),
+                     json.dumps(b["options"]) if b.get("options") is not None else None,
+                     b.get("chosen"), now))
+            con.commit()
+    except Exception as e:
+        print(f"[dream] beat save failed: {e}", flush=True)
 
 
 def latest_dream(persona, now=None):
@@ -4994,12 +5148,15 @@ def dream_once(persona, now=None, rng=None):
     rng = rng or random
     if rng.random() > _DREAM_CHANCE:
         return "dreamless"
-    content, frag = compose_dream(persona, _dream_material())
-    if not content:
+    d = _compose_dream_structured(persona, _dream_material())
+    if not d:
         return "failed"
-    if save_dream(persona, night, content, frag, roll_dream_vividness(rng)):
-        return "dreamt"
-    return "already"
+    dream_id = save_dream(persona, night, d["content"], d["fragment"],
+                           roll_dream_vividness(rng))
+    if not dream_id:
+        return "already"
+    save_dream_beats(dream_id, d["beats"])
+    return "dreamt"
 
 
 def _dream_loop(idle_secs_fn):

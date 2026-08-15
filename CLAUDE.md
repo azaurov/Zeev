@@ -145,18 +145,23 @@ Single-file app: `zeev/zeev.py`.
 
 ### Models (Groq)
 
+Migrated off Groq-deprecated `llama-3.1-8b-instant`/`llama-3.3-70b-versatile` (cutoff 2026-08-16); table below is current as of that migration, not the original models this project started with.
+
 | Key | Model ID | Use |
 |---|---|---|
-| `1` | `llama-3.1-8b-instant` | Fast — casual chat |
-| `2` | `llama-3.3-70b-versatile` | Smart — code, writing |
+| `1` | `openai/gpt-oss-20b` | Fast — casual chat |
+| `2` | `qwen/qwen3.6-27b` | Smart — code, writing |
 | `3` | `openai/gpt-oss-120b` | Reasoning — math, logic |
+
+- **gpt-oss models spend hidden reasoning tokens out of the same `max_tokens` budget as their visible `content`.** A budget sized only for the expected spoken/written reply length can be exhausted entirely by reasoning before any content token is emitted — `finish_reason: "length"` with empty `content`. Found live 2026-08-15 in two places: `_quantum_llm`'s json-mode circuit-spec calls (800 tokens routinely truncated mid-JSON; 1500 held up, see its docstring) and device chat's fast-tier default (160 tokens occasionally emptied out entirely on a reflective question; widened to 350). **When adding a new gpt-oss call site with a tight token budget, budget for reasoning overhead, not just the expected reply length.**
+- **Device chat's streaming empty-reply fallback used to be dead code.** When `_stream_speak()` drains a stream and gets zero content tokens, the old fallback tried `resp.json()` on that same `resp` — but its body was already consumed by the streaming reader, so the reparse always failed (`Expecting value: line 1 column 1`), guaranteeing a silent "Empty reply" error face on every empty stream. Fixed: on an empty stream, re-POST fresh with `stream=False` and `max(tok_limit * 3, 500)` tokens before giving up, so there's an actual second attempt instead of a parse of nothing.
 
 ### Key constants
 
 | Constant | Value |
 |---|---|
 | `PRIOR_TURNS` | 15 turns loaded from DB per session |
-| `max_tokens` | 600 (8B) / 1200 (70B, GPT-OSS, Torah) |
+| `max_tokens` | 600 (web/terminal default) / 1200 (70B-equivalent, GPT-OSS 120B, Torah) / 160-350 (device chat, spoken-reply budgets — see gpt-oss reasoning-overhead note above) |
 | `temperature` | 0.75 |
 | `VISION_MODELS` | OpenRouter free tier (see below) — **Groq dropped vision** |
 

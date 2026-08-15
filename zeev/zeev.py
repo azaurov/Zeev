@@ -1296,11 +1296,16 @@ def _quantum_llm(msgs, max_tokens=300, json_mode=False):
        quantum.py's _llm_circuit_spec already does its own json.loads() on
        the returned text, which is exactly what a plain completion gives it.
        Their hidden reasoning still consumes the token budget even without
-       response_format (a 400-token request truncates with finish_reason
-       "length" and empty content), hence the floor below.
+       response_format -- 400 truncates with finish_reason "length" and
+       empty content, and 800 still truncates mid-JSON often enough to
+       matter (observed live: unterminated strings, missing delimiters).
+       1500 held up over repeated live trials across several very different
+       prompts; quantum.py's own default of 400 (in _llm_circuit_spec's
+       hardcoded llm_fn call) was sized for a model with no hidden
+       reasoning at all and is far too low for this one.
     """
     if json_mode:
-        return _llm_complete(msgs, MODELS["1"][0], max_tokens=max(max_tokens, 800),
+        return _llm_complete(msgs, MODELS["1"][0], max_tokens=max(max_tokens, 1500),
                               json_mode=False)
     return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=False)
 # Groq deprecated llama-3.1-8b-instant and llama-3.3-70b-versatile

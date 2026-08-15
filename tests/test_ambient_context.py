@@ -111,6 +111,50 @@ def test_error_fix_yields_no_block(zeev, _gps):
     assert "## Approximate location:" not in zeev._build_system_prompt("hello")
 
 
+# --- weather search anchored to ambient location -----------------------
+#
+# A bare "what's the weather today?" carries no place name, so Tavily has
+# nothing to anchor on and returns whatever generic weather pages rank
+# highest. Found live 2026-08-15: with a real GPS fix on Canton, Massachusetts,
+# Zeev's own reasoning caught that the injected search results were for
+# "Bahamas, Kauai, Maui" -- unrelated vacation-weather pages, not the user's
+# actual location.
+
+@pytest.fixture
+def _tavily(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "TAVILY_API_KEY", "test-key")
+    captured = {}
+
+    def _fake_search(query):
+        captured["query"] = query
+        return "fake results"
+
+    monkeypatch.setattr(zeev, "tavily_search", _fake_search)
+    return captured
+
+
+def test_weather_query_anchored_to_ambient_place(zeev, _gps, _tavily):
+    _fix(zeev, _gps)
+    zeev._build_system_prompt("what's the weather today?")
+    assert "Fairview" in _tavily["query"]
+    assert "Massachusetts" in _tavily["query"]
+
+
+def test_weather_query_unanchored_without_a_fix(zeev, _gps, _tavily):
+    """No GPS fix at all -- the query must fall back to the raw text rather
+    than injecting an empty/garbled place string."""
+    zeev._build_system_prompt("what's the weather today?")
+    assert _tavily["query"] == "what's the weather today?"
+
+
+def test_non_weather_search_query_is_unchanged(zeev, _gps, _tavily):
+    """Anchoring is weather-specific -- an unrelated search must not get a
+    place name silently appended."""
+    _fix(zeev, _gps)
+    zeev._build_system_prompt("what's the latest news on the election?")
+    assert _tavily["query"] == "what's the latest news on the election?"
+
+
 def test_percent_to_dbm_conversion(zeev):
     """Measured: percent gave 869m accuracy, dBm gave 11m, same 7 APs."""
     assert zeev._nm_percent_to_dbm(74) == -63

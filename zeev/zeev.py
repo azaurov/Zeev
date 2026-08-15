@@ -8193,14 +8193,13 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     # so it was blind to location on every other turn, including weather. That
     # answer looked right only because a memorised fact happened to name the
     # town, which goes stale the moment they travel.
-    if _AMBIENT_LOCATION:
-        place = ambient_place()
-        if place:
-            parts.append(
-                f"\n\n## Approximate location: {place}\n"
-                "This is ambient context. Do not mention it unless the user asks "
-                "where they are, or it is needed to answer (weather, what's nearby)."
-            )
+    ambient_place_str = ambient_place()
+    if _AMBIENT_LOCATION and ambient_place_str:
+        parts.append(
+            f"\n\n## Approximate location: {ambient_place_str}\n"
+            "This is ambient context. Do not mention it unless the user asks "
+            "where they are, or it is needed to answer (weather, what's nearby)."
+        )
 
     # Ambient recent-call outcome. bt_call_loop runs in a background thread and
     # never wrote its result anywhere a later chat turn could see -- a
@@ -8477,8 +8476,17 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     if needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
             on_search(user_text)
-        results = tavily_search(user_text)
-        parts.append(f"\n\n[Web search results for '{user_text}']\n{results}")
+        search_query = user_text
+        # A bare "what's the weather today?" carries no place name, so Tavily
+        # has nothing to anchor on and returns whatever generic weather pages
+        # rank highest -- found live 2026-08-15: Zeev's own reasoning caught
+        # the search results were for "Bahamas, Kauai, Maui" while sitting in
+        # Canton, Massachusetts. Anchor the query to the same ambient place
+        # string already computed above, when one is available.
+        if needs_weather(user_text) and ambient_place_str:
+            search_query = f"{user_text} in {ambient_place_str}"
+        results = tavily_search(search_query)
+        parts.append(f"\n\n[Web search results for '{search_query}']\n{results}")
         if needs_weather(user_text):
             parts.append(
                 "\n\n## Units instruction: These replies are spoken aloud via TTS. "

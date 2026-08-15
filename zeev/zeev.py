@@ -12071,7 +12071,16 @@ def handle_transcript(ctx, transcript, _depth=0):
     elif model_id in (MODELS["3"][0], MODELS["2"][0]):
         tok_limit = 160
     else:
-        tok_limit = 160
+        # model_id here is gpt-oss-20b, device chat's fast-tier default. Found
+        # live 2026-08-15 ("What did you feel about the dream?"): it spends
+        # hidden reasoning tokens out of this SAME max_tokens budget before
+        # any content token, the identical failure class already fixed for
+        # _quantum_llm above (800->1500) -- 160 was tight enough to hit
+        # finish_reason="length" with zero content on a reflective question,
+        # producing a silent "Empty reply" error. Widened for headroom; the
+        # system prompt still holds replies to 1-2 sentences, so this raises
+        # the ceiling the reasoning can eat into, not the spoken length.
+        tok_limit = 350
     # Device-mode limits are deliberately far tighter than web/terminal (160 vs
     # 600) because every reply is spoken aloud. But they are tuned for English,
     # and a token is not a unit of *content*: pointed Hebrew costs several
@@ -12132,7 +12141,9 @@ def handle_transcript(ctx, transcript, _depth=0):
     # Voice was resolved at the top of the turn.
 
     streamed = False
+    stream_attempted = False
     if STREAM_TTS and getattr(resp, "raw", None) is not None:
+        stream_attempted = True
         ctx.board.set_rgb(*ctx._LED_SPEAKING)
         print(f"[tts] Selected voice: {_LAST_VOICE} (from transcript: {transcript!r})", flush=True)
         def _mark_first():
@@ -12151,9 +12162,21 @@ def handle_transcript(ctx, transcript, _depth=0):
             reply, streamed = "", False
         if not streamed:
             print("[stream] empty stream — no reply text", flush=True)
+    if not streamed and stream_attempted:
+        # `resp`'s body was already consumed by _stream_speak above, so
+        # re-parsing it here is guaranteed to fail (empty body -> "Expecting
+        # value: line 1 column 1") -- found live 2026-08-15, this branch was
+        # a dead end every time the stream came back empty. Re-POST fresh,
+        # non-streaming, with headroom for the hidden-reasoning overhead
+        # that emptied the stream in the first place (see tok_limit note
+        # above), instead of reparsing a response with nothing left in it.
+        retry_tokens = max(tok_limit * 3, 500)
+        resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=retry_tokens)
     if not streamed:
         try:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
+            if not reply:
+                raise ValueError("empty content")
         except Exception as e:
             print(f"[llm] could not parse reply: {e}", flush=True)
             ctx._set_face("error", "Empty reply")

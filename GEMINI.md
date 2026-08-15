@@ -1,6 +1,4 @@
 # Zeev Project Rules
 
 ## Deployment Constraints
-Before running `./deploy.sh`, you MUST ensure that all intended local modifications (e.g., changes to Python scripts, configurations) are committed to git. 
-
-The `deploy.sh` script executes a `git push origin main` and relies on pulling from the remote repository on the target device. If you execute the script with uncommitted changes, those changes will not be pushed and the deployment will not reflect your latest work.
+`./deploy.sh` is the only sanctioned deploy path. Stage your intended local modifications (`git add`) before running it — it commits staged changes itself (`./deploy.sh "message"`, message required only if something is staged) and pushes. It hard-fails if unstaged changes to tracked files are present, rather than silently deploying without them.

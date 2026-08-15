@@ -1,13 +1,7 @@
 # Deploy Zeev
-Before committing: run `timeout 300 pytest -x -q`. If anything fails (or the run hangs and gets killed by the timeout), stop and report which test failed/hung — do not proceed to commit or deploy.
+Stage the changes (never include data/*.json), then run `./deploy.sh "commit message"` — this is the only sanctioned deploy path (see CLAUDE.md "Deploy & Verify Loop"). It runs the full test suite, commits, pushes, pulls on the Pi, runs the SQLite migration, hard-asserts the Pi's HEAD matches local before restarting `zeev-device`, polls for the real startup banner in `journalctl` (not just `systemctl is-active`), and auto-rolls back the Pi on an unhealthy deploy. Do not SSH in and restart the service manually — it skips all of these gates.
 
-Commit staged changes (never include data/*.json), push to origin, then ssh to the Pi at ragnar@ragnarok, pull, and run the following in order:
-
-1. `python3 zeev/migrate_to_sqlite.py` — idempotent, safe to re-run; imports any flat-file data (history.jsonl, user_memory.json, notes.jsonl, settings.json) into zeev.db if not already there. No-ops on rows already present.
-2. Confirm the Pi's checkout matches local: `git rev-parse HEAD` on both sides must be equal. Abort and report if they differ instead of restarting the service against a stale checkout.
-3. `sudo -n systemctl restart zeev-device` — non-interactive; a scoped NOPASSWD sudoers rule (`/etc/sudoers.d/zeev-deploy` on ragnarok) permits `ragnar` to run exactly this command without a password. (Note: the systemd unit and service name are `zeev-device`, not `zeev`.)
-4. Tail logs (`journalctl -u zeev-device -n 20 --no-pager`) and verify the startup greeting played and prior turns were loaded. Paste the relevant log lines directly in chat rather than leaving them only in shell output.
-5. Report PASS/FAIL explicitly: whether tests passed, HEAD matched, and the live log confirmed the expected behavior.
+Report PASS/FAIL explicitly based on the script's own output: it never claims success without printing "Deploy healthy." and a `journalctl -n 50` tail. Paste the relevant log lines directly in chat rather than leaving them only in shell output.
 
 After a successful deploy:
 1. Update `/home/azaurov/Zeev/CLAUDE.md` to reflect any architectural changes made in this session (new functions, changed behaviour, updated constants, new endpoints, etc.).

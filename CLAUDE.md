@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into the transcript. To inspect config, print only key NAMES (e.g. `grep -o '^[A-Z_]*=' .env`) or masked values. If a secret is ever printed, stop and tell me immediately so I can rotate it.
 
-**Enforced, not just advisory**: `.claude/settings.json` has a `PreToolUse` hook on `Bash` that blocks `cat`/`less`/`head`/`tail`/`echo` commands targeting `.env` (exit 2, refuses the command outright) — verified live 2026-08-13. Also has a `PostToolUse` hook on `Edit|Write` running `ruff format` + `ruff check --fix` on touched files (needs `ruff` on PATH — installed via `pipx install ruff` on this dev box since the repo has no linter/formatter config of its own).
+**Enforced, not just advisory**: `.claude/settings.json` has a `PreToolUse` hook on `Bash` that blocks `cat`/`less`/`head`/`tail`/`echo` commands targeting `.env` (exit 2, refuses the command outright) — verified live 2026-08-13.
 
 ## Scope Discipline
 
@@ -98,11 +98,11 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
 
 ## Version Control / Deployment
 
-Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked; add generated/data files to `.gitignore` by default. Watch for CRLF line endings from copy-paste in shell scripts/sudoers. Before running `./deploy.sh`, ALWAYS commit local changes first — it relies on `git push origin main`.
+Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked; add generated/data files to `.gitignore` by default. Watch for CRLF line endings from copy-paste in shell scripts/sudoers.
 
 ## Deploy & Verify Loop
 
-After any code change destined for the Pi: (1) commit locally, (2) `git push`, (3) SSH to the Pi and `git pull` BEFORE restarting the service, (4) `sudo systemctl restart <service>`, (5) tail `journalctl -u <service> -f` (or `-n 20 --no-pager` for a quick check) and confirm the new behavior live. Never claim a fix is deployed until the Pi's HEAD matches the local commit.
+**All deploys to the Pi MUST go through `./deploy.sh` — this is the only sanctioned path, not a manual SSH/restart sequence.** It runs the full test suite (`-n auto` via pytest-xdist if installed, ~450s timeout, aborts the deploy on failure or hang), commits any staged changes (`./deploy.sh "message"` — message required only if something is staged; idempotent no-op otherwise) and pushes, resolves the Pi over LAN then Tailscale, pulls and runs the SQLite migration remotely, **hard-asserts the Pi's post-pull HEAD equals local HEAD before touching the service** (exits 1 rather than restarting against a stale checkout), restarts `zeev-device`, then polls up to `HEALTH_TIMEOUT` (75s default) for the actual startup banner in `journalctl` — not just `systemctl is-active`, which reports healthy the instant the process execs, well before the display/audio/wake-listener are up. A traceback in the post-restart log also fails health even if the banner printed. On an unhealthy deploy it automatically rolls the Pi back to the pre-deploy SHA and reports whether the rollback itself succeeded — `origin/main` is deliberately left on the bad commit so the failure isn't lost, only the running device is protected. Every failure mode exits non-zero with an explicit message (test failure/hang, push failure, HEAD mismatch, health timeout, rollback failure) — never claim a deploy succeeded without the script's own "Deploy healthy" line and its printed `journalctl -n 50` tail.
 
 ## Output Visibility
 
@@ -110,7 +110,7 @@ When producing a list, audit result, or report for me to read (flagged jokes, te
 
 ## Testing
 
-Run `pytest` with an explicit timeout (`timeout 300 pytest -x -q`) and never leave a suite running in the foreground for more than ~5 minutes; if it hangs, kill it and report which test hung. Note: `tests/` currently has ~989 tests and a full run legitimately takes several minutes — don't mistake a slow-but-progressing run for a hang; check the log for movement before killing it.
+Run `pytest` with an explicit timeout and never leave a suite running in the foreground for more than ~5 minutes unmonitored; if it hangs, kill it and report which test hung. `tests/` has ~989 tests. **Use `pytest-xdist`** (`sudo apt install python3-pytest-xdist`, then `pytest -n auto`) — measured live on this box: 770s serial vs 279s parallel (4 workers; `-n auto` picked 4, not `nproc`'s 8 — cgroup/affinity limited), a ~2.8x speedup. `-n auto` is a **hard usage error**, not a graceful no-op, if `pytest-xdist` isn't installed — check `python3 -c "import xdist"` first if scripting this (see `deploy.sh`). Don't mistake a slow-but-progressing run for a hang — one single unmocked-network test (`_build_system_prompt` real GPS/weather/RAG calls) has been observed taking 58s by itself; check the log for movement before killing it.
 
 ## Running
 

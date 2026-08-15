@@ -1,4 +1,11 @@
 #!/bin/bash
+# Deploy Zeev to the Pi. This is the ONLY sanctioned deploy path — see
+# CLAUDE.md "Version Control / Deployment". Idempotent: safe to re-run with
+# no staged changes (commit/push become no-ops) and re-running after a
+# healthy deploy just re-verifies and re-prints the tail.
+#
+# Usage: ./deploy.sh ["commit message"]
+#   commit message is required only if there are staged changes to commit.
 set -e
 
 PI_LAN="ragnar@ragnarok"
@@ -13,6 +20,58 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-75}"
 # be tested against a marker that will never appear.
 HEALTH_MARKER="${HEALTH_MARKER:-Zeev Device Mode}"
 
+COMMIT_MSG="$1"
+
+# ── Test gate ────────────────────────────────────────────────────────────────
+# 989 tests. Measured live on this box: 770s serial, 279s with `-n auto`
+# (pytest-xdist picked 4 workers here, not nproc's 8 -- cgroup/affinity
+# limited). `-n auto` is a hard usage error if pytest-xdist isn't installed
+# (no graceful fallback in pytest itself), so check for it explicitly rather
+# than crash the deploy over a missing optional package.
+# TEST_TIMEOUT defaults to 450s -- real headroom over the ~280s xdist run,
+# not padding, since one unmocked-network test alone has been observed
+# taking 58s by itself. A hang here must fail the deploy, not hide it.
+TEST_TIMEOUT="${TEST_TIMEOUT:-450}"
+XDIST_ARGS=""
+if python3 -c "import xdist" 2>/dev/null; then
+    XDIST_ARGS="-n auto"
+else
+    echo "NOTE: pytest-xdist not installed (sudo apt install python3-pytest-xdist) — running serial, will be slower."
+fi
+echo "Running test suite (${TEST_TIMEOUT}s timeout)..."
+RC=0
+# shellcheck disable=SC2086  # intentional word-splitting: XDIST_ARGS is "" or two tokens
+timeout "$TEST_TIMEOUT" python3 -m pytest tests/ -x -q --no-header $XDIST_ARGS || RC=$?
+if [ "$RC" -eq 124 ]; then
+    echo "ERROR: test suite timed out after ${TEST_TIMEOUT}s — a test is hanging. Not deploying." >&2
+    exit 1
+elif [ "$RC" -ne 0 ]; then
+    echo "ERROR: test suite failed. Not deploying." >&2
+    exit 1
+fi
+echo "Tests passed."
+
+# ── Commit + push (idempotent: no staged changes = no-op) ───────────────────
+if ! git diff --cached --quiet; then
+    if [ -z "$COMMIT_MSG" ]; then
+        echo "ERROR: staged changes present but no commit message given. Usage: ./deploy.sh \"message\"" >&2
+        exit 1
+    fi
+    echo "Committing staged changes..."
+    git commit -m "$COMMIT_MSG"
+else
+    echo "No staged changes — skipping commit."
+fi
+
+# The test gate above ran against the full working tree, including any
+# unstaged edits to tracked files. If those never got staged, they also
+# never got committed/pushed above -- deploying HEAD would test one thing
+# and ship another, silently. Fail loud instead.
+if ! git diff --quiet; then
+    echo "ERROR: unstaged changes to tracked files present. They were tested but won't be deployed. Run 'git add' first (or discard them)." >&2
+    exit 1
+fi
+
 # Resolve which SSH target is reachable
 PI=""
 if ssh -o ConnectTimeout=5 -o BatchMode=yes "$PI_LAN" true 2>/dev/null; then
@@ -26,7 +85,11 @@ fi
 echo "Connected via $PI"
 
 echo "Pushing to origin..."
-git push origin main
+if ! git push origin main; then
+    echo "ERROR: git push failed. Not deploying." >&2
+    exit 1
+fi
+LOCAL_HEAD="$(git rev-parse HEAD)"
 
 # Remember what the Pi was running so a bad deploy can be undone on the device.
 # Deliberately does NOT touch origin/main: an unattended deploy that fails at
@@ -40,8 +103,19 @@ ssh "$PI" "
   cd ~/Zeev
   git pull
   python3 zeev/migrate_to_sqlite.py
-  sudo systemctl restart $SERVICE
 "
+
+# ── HEAD-match gate ───────────────────────────────────────────────────────────
+# A stale checkout must never be restarted against — that's deploying nothing
+# and reporting success. Hard-fail before touching the service.
+REMOTE_HEAD="$(ssh "$PI" "cd ~/Zeev && git rev-parse HEAD")"
+if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+    echo "ERROR: HEAD mismatch after pull — local=$LOCAL_HEAD remote=$REMOTE_HEAD. Not restarting the service." >&2
+    exit 1
+fi
+echo "HEAD verified: Pi matches local ($LOCAL_HEAD)."
+
+ssh "$PI" "sudo systemctl restart $SERVICE"
 
 # ── Health gate ─────────────────────────────────────────────────────────────
 # 'active' alone is not health: systemd reports active the moment the process
@@ -77,7 +151,7 @@ fi
 if [ "$HEALTHY" = "1" ]; then
     echo
     echo "Deploy healthy."
-    ssh "$PI" "journalctl -u $SERVICE --since '-3 min' --no-pager | tail -20"
+    ssh "$PI" "journalctl -u $SERVICE -n 50 --no-pager"
     exit 0
 fi
 

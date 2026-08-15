@@ -2756,7 +2756,7 @@ def voice_coach_feedback(transcript: str) -> str:
     reply, err, _ = _llm_post(msgs, MODELS["2"][0], stream=False, max_tokens=200)
     if err or reply is None or reply.status_code != 200:
         return "I had trouble analyzing that. Try again?"
-    return reply.json()["choices"][0]["message"]["content"].strip()
+    return _strip_think_text(reply.json()["choices"][0]["message"]["content"])
 
 
 def _voice_coach_record_and_transcribe(adev: str, max_seconds: int = 60,
@@ -7632,14 +7632,80 @@ def _get_litellm_router():
     return _litellm_router
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_text(text):
+    """Non-streaming counterpart to _strip_think_tags, for _llm_complete's
+    single-shot providers that read the whole JSON body at once instead of
+    iterating _iter_llm_tokens."""
+    if not text:
+        return text
+    return _THINK_UNCLOSED_RE.sub("", _THINK_BLOCK_RE.sub("", text)).strip()
+
+
+def _strip_think_tags(token_iter):
+    """Filter out <think>...</think> chain-of-thought blocks some hybrid-
+    reasoning models (e.g. qwen3.6-27b, MODELS["2"]) inline directly into
+    `content` -- unlike gpt-oss, whose reasoning lives in a separate field
+    and never reaches `content` at all (see _quantum_llm's docstring).
+    Found live 2026-08-15: three real device-chat turns spoke/logged the
+    model's raw "Here's a thinking process: 1. Analyze User Input..." as
+    if it were the reply, because nothing anywhere stripped it.
+
+    Buffers a short trailing window so a tag split across two stream
+    chunks isn't missed. An unclosed trailing <think> (reasoning ran to
+    the token limit before a real answer began) yields nothing rather
+    than the partial reasoning -- same "empty stream" shape already
+    handled by callers' existing empty-reply fallbacks.
+    """
+    buf = ""
+    in_think = False
+    for tok in token_iter:
+        if not tok:
+            continue
+        buf += tok
+        while True:
+            if not in_think:
+                idx = buf.find(_THINK_OPEN)
+                if idx == -1:
+                    safe = len(buf) - (len(_THINK_OPEN) - 1)
+                    if safe > 0:
+                        yield buf[:safe]
+                        buf = buf[safe:]
+                    break
+                if idx > 0:
+                    yield buf[:idx]
+                buf = buf[idx + len(_THINK_OPEN):]
+                in_think = True
+            else:
+                idx = buf.find(_THINK_CLOSE)
+                if idx == -1:
+                    keep = len(_THINK_CLOSE) - 1
+                    buf = buf[-keep:] if keep else ""
+                    break
+                buf = buf[idx + len(_THINK_CLOSE):]
+                in_think = False
+    if buf and not in_think:
+        yield buf
+
+
 def _iter_llm_tokens(resp, provider, on_finish=None):
-    """Yield text tokens from a streaming response for the given provider.
+    """Yield text tokens from a streaming response for the given provider,
+    with any <think>...</think> chain-of-thought stripped (_strip_think_tags).
 
     If given, on_finish(reason) fires once when the API reports why generation
     stopped ("stop" naturally, "length" hit max_tokens, ...). Read-only
     instrumentation for the truncation-rate research question (see CLAUDE.md
     "Truncated is inferred" note) -- does not change what is yielded or when.
     """
+    return _strip_think_tags(_iter_llm_tokens_raw(resp, provider, on_finish=on_finish))
+
+
+def _iter_llm_tokens_raw(resp, provider, on_finish=None):
     if provider == "litellm":
         for chunk in resp:
             try:
@@ -7852,7 +7918,7 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
             resp = router.completion(**kwargs)
-            return resp.choices[0].message.content, None
+            return _strip_think_text(resp.choices[0].message.content), None
         except Exception as e:
             return None, f"litellm complete: {e}"
 
@@ -7876,7 +7942,7 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
             if r.status_code == 429:
                 return None, "rate-limited"
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"], None
+            return _strip_think_text(r.json()["choices"][0]["message"]["content"]), None
         except Exception as e:
             return None, str(e)
 
@@ -7955,7 +8021,7 @@ def _feiergente_complete(msgs, max_tokens=300, json_mode=False, model=None):
         if r.status_code == 429:
             return None, "rate-limited"
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"], None
+        return _strip_think_text(r.json()["choices"][0]["message"]["content"]), None
     except Exception as e:
         return None, str(e)
 
@@ -7986,7 +8052,7 @@ def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
         if r.status_code == 429:
             return None, "rate-limited"
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"], None
+        return _strip_think_text(r.json()["choices"][0]["message"]["content"]), None
     except Exception as e:
         return None, str(e)
 
@@ -8670,7 +8736,7 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
                 timeout=timeout or VISION_TIMEOUT,
             )
             if r.status_code == 200:
-                txt = r.json()["choices"][0]["message"]["content"].strip()
+                txt = _strip_think_text(r.json()["choices"][0]["message"]["content"])
                 if txt:
                     return txt, None
                 last = f"{m}: empty reply"
@@ -9223,6 +9289,8 @@ def stream_reply(messages, model):
         if terr is None and tresp is not None and tresp.status_code == 200:
             try:
                 tmsg = tresp.json()["choices"][0]["message"]
+                if tmsg.get("content"):
+                    tmsg["content"] = _strip_think_text(tmsg["content"])
             except Exception as e:
                 print(f"[tools] bad tool response: {e}", flush=True)
                 tmsg = {}
@@ -10722,6 +10790,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 if terr is None and tresp is not None and tresp.status_code == 200:
                     try:
                         tmsg = tresp.json()["choices"][0]["message"]
+                        if tmsg.get("content"):
+                            tmsg["content"] = _strip_think_text(tmsg["content"])
                     except Exception as e:
                         print(f"[tools] bad tool response: {e}", flush=True)
                         tmsg = {}
@@ -12046,6 +12116,8 @@ def handle_transcript(ctx, transcript, _depth=0):
         if terr is None and tresp is not None and tresp.status_code == 200:
             try:
                 tmsg = tresp.json()["choices"][0]["message"]
+                if tmsg.get("content"):
+                    tmsg["content"] = _strip_think_text(tmsg["content"])
             except Exception as e:
                 print(f"[tools] bad tool response: {e}", flush=True)
                 tmsg = {}
@@ -12174,7 +12246,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         resp, err = _groq_post_with_fallback(payload_msgs, model_id, stream=False, max_tokens=retry_tokens)
     if not streamed:
         try:
-            reply = resp.json()["choices"][0]["message"]["content"].strip()
+            reply = _strip_think_text(resp.json()["choices"][0]["message"]["content"])
             if not reply:
                 raise ValueError("empty content")
         except Exception as e:

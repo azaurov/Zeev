@@ -1,0 +1,52 @@
+{
+  "configVersion": "v2",
+  "app": {
+    "appId": 1802260001,
+    "appName": "Zeev",
+    "appType": "app",
+    "version": {
+      "code": 1,
+      "name": "1.0.0"
+    },
+    "icon": "icon.png",
+    "vender": "Alex",
+    "description": "Trigger Zeev commands from the watch: pair headphones, world news, find Smokey."
+  },
+  "permissions": [],
+  "runtime": {
+    "apiVersion": {
+      "compatible": "1.0.0",
+      "target": "1.0.1",
+      "minVersion": "1.0.0"
+    }
+  },
+  "targets": {
+    "common": {
+      "module": {
+        "page": {
+          "pages": ["pages/index"]
+        },
+        "app-side": {
+          "path": "app-side/index"
+        }
+      },
+      "platforms": [
+        {
+          "name": "gtr3",
+          "deviceSource": 226
+        },
+        {
+          "name": "gtr3-w",
+          "deviceSource": 227
+        }
+      ],
+      "designWidth": 480
+    }
+  },
+  "i18n": {
+    "en-US": {
+      "appName": "Zeev"
+    }
+  },
+  "defaultLanguage": "en-US"
+}

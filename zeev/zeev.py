@@ -631,7 +631,7 @@ _GOODMORNING_LINES = [
 # voice-triggered goodnight branch below, which only fires when Alex says it).
 # (hour, minute, lines, label)
 _GREETING_SCHEDULE = (
-    (6, 30, _GOODMORNING_LINES, "morning"),
+    (7, 0, _GOODMORNING_LINES, "morning"),
     (23, 0, _GOODNIGHT_LINES, "night"),
 )
 # How late a delayed poll may still fire -- catches a target missed by a few

@@ -83,8 +83,11 @@ Page({
     });
     this.state.widgets.push(status);
 
+    // Default request timeout (60s) can be too short for find_smokey, which
+    // sweeps up to 3 cameras sequentially (~25-40s each on a slow vision
+    // response) -- 120s covers a worst-case sweep with margin.
     this.messageBuilder
-      .request({ method: cmd.method })
+      .request({ method: cmd.method }, { timeout: 120000 })
       .then((data) => {
         const ok = !!(data && data.ok);
         const message = (data && data.message) || "No response.";

@@ -36,7 +36,16 @@ _BLE_TARGET_NAME = "TOZO NC9"
 _FIND_SMOKEY_TRANSCRIPT = "find Smokey"
 
 
+def _already_connected(mac):
+    return any(m == mac and connected for m, _name, connected in zeev.bt_list())
+
+
 def _cmd_pair_ble():
+    # BlueZ returns a spurious "br-connection-page-timeout" error when asked
+    # to connect a device that's already connected (found live 2026-08-18) --
+    # skip the redundant connect attempt rather than report a false failure.
+    if _already_connected(_BLE_TARGET_MAC):
+        return True, f"Already connected to {_BLE_TARGET_NAME}."
     if not zeev.bt_pair(_BLE_TARGET_MAC):
         return False, f"Couldn't pair {_BLE_TARGET_NAME}."
     if not zeev.bt_connect(_BLE_TARGET_MAC):

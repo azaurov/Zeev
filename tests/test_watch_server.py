@@ -108,6 +108,7 @@ def test_world_news_dispatches_get_shpeel(watch_server, zeev, monkeypatch):
 
 def test_pair_ble_success(watch_server, zeev, monkeypatch):
     ws, port = watch_server
+    monkeypatch.setattr(zeev, "bt_list", lambda: [])
     monkeypatch.setattr(zeev, "bt_pair", lambda mac: mac == ws._BLE_TARGET_MAC)
     monkeypatch.setattr(zeev, "bt_connect", lambda mac: mac == ws._BLE_TARGET_MAC)
     status, data = _post(port, "/watch", {"cmd": "pair_ble"})
@@ -116,7 +117,21 @@ def test_pair_ble_success(watch_server, zeev, monkeypatch):
     assert ws._BLE_TARGET_NAME in data["message"]
 
 
+def test_pair_ble_already_connected_skips_reconnect(watch_server, zeev, monkeypatch):
+    # BlueZ returns a spurious page-timeout error when asked to connect an
+    # already-connected device -- bt_pair/bt_connect must not even be called.
+    ws, port = watch_server
+    monkeypatch.setattr(zeev, "bt_list", lambda: [(ws._BLE_TARGET_MAC, "TOZO NC9", True)])
+    monkeypatch.setattr(zeev, "bt_pair", lambda mac: (_ for _ in ()).throw(AssertionError("should not be called")))
+    monkeypatch.setattr(zeev, "bt_connect", lambda mac: (_ for _ in ()).throw(AssertionError("should not be called")))
+    status, data = _post(port, "/watch", {"cmd": "pair_ble"})
+    assert status == 200
+    assert data["ok"] is True
+    assert "Already connected" in data["message"]
+
+
 def test_pair_ble_pair_failure(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "bt_list", lambda: [])
     monkeypatch.setattr(zeev, "bt_pair", lambda mac: False)
     monkeypatch.setattr(zeev, "bt_connect", lambda mac: True)
     _ws, port = watch_server
@@ -126,6 +141,7 @@ def test_pair_ble_pair_failure(watch_server, zeev, monkeypatch):
 
 
 def test_pair_ble_connect_failure(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "bt_list", lambda: [])
     monkeypatch.setattr(zeev, "bt_pair", lambda mac: True)
     monkeypatch.setattr(zeev, "bt_connect", lambda mac: False)
     _ws, port = watch_server

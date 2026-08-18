@@ -137,13 +137,18 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                # Same reasoning-budget gap as news_digest.py's Groq call --
-                # qwen3.6-27b's hidden <think> block spends from this same
-                # budget before the GROUNDED/UNGROUNDED verdict, so 150 is
-                # too tight and can leave parse_grade nothing but an
-                # unclosed reasoning trace to parse.
-                "max_tokens": 400,
+                # gpt-oss-20b's hidden reasoning is spent from this same
+                # budget. At the account's default reasoning effort, grading
+                # this task's ~13KB prompt (a full digest against all 8
+                # regions' raw snippets) burned 1200+ reasoning tokens and
+                # still hit finish_reason "length" with zero verdict text,
+                # confirmed directly against the Groq API 2026-08-18.
+                # reasoning_effort="low" fixed it (258 reasoning tokens,
+                # finished naturally) -- same fix as news_digest.py's Groq
+                # call, same reason.
+                "max_tokens": 800,
                 "temperature": 0.3,
+                "reasoning_effort": "low",
             },
             timeout=60,
         )

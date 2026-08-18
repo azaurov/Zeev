@@ -113,13 +113,19 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                # gpt-oss-20b's hidden reasoning is tracked separately from
-                # `content` (see GROQ_MODEL comment above) rather than
-                # inlined into the budget this caps -- 1500 is real headroom
-                # over the ~1000 completion tokens observed live for this
-                # exact prompt shape.
+                # gpt-oss-20b's hidden reasoning IS spent from this same
+                # budget (unlike qwen3.6-27b, it just doesn't leak into
+                # `content`) -- at the account's default reasoning effort,
+                # summarizing across 8 regions burned 1200+ reasoning tokens
+                # and still hit finish_reason "length" with empty content,
+                # confirmed directly against the Groq API 2026-08-18.
+                # reasoning_effort="low" is the actual fix (46-258 reasoning
+                # tokens observed instead, finishing naturally) -- 1500
+                # completion budget is generous headroom on top of that, not
+                # load-bearing on its own.
                 "max_tokens": 1500,
                 "temperature": 0.7,
+                "reasoning_effort": "low",
             },
             timeout=90,
         )

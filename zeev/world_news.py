@@ -38,6 +38,13 @@ points, no headers, no markdown -- this gets read aloud by text-to-speech). \
 Briefly name the country or region for each story so Alex has context. Keep \
 it to about {words} words total.
 
+Write the whole briefing in plain English text only -- no accented letters \
+or non-Latin script anywhere, even in names. Spell foreign names, places, \
+and titles using their common plain-English rendering (e.g. "Traore" not \
+"Traoré", "Erdogan" not "Erdoğan"). This is a text-to-speech constraint, not \
+a style preference: any accented character can misroute the whole reply to \
+the wrong TTS voice/language.
+
 RAW SNIPPETS:
 {snippets}"""
 

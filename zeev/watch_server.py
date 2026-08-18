@@ -116,6 +116,12 @@ def run_watch_server(host="0.0.0.0", port=5050):
     if not zeev.ZEEV_WATCH_KEY:
         print("[watch] WARNING: ZEEV_WATCH_KEY is not set — every request will "
               "be refused. Add ZEEV_WATCH_KEY=... to .env.", flush=True)
+    # Without this, zeev.bt_pair/bt_connect/bt_scan silently fall through to
+    # a raw bluetoothctl subprocess (15s hard timeout on connect) instead of
+    # the already-running zeev-audio daemon's fast BT path -- found live
+    # 2026-08-18, a real "pair_ble" request timed out and reported failure
+    # even though the earbuds connected moments later on their own.
+    zeev._init_audio()
     server = ThreadingHTTPServer((host, port), _make_handler())
     print(f"[watch] listening on {host}:{port}", flush=True)
     server.serve_forever()

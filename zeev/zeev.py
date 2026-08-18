@@ -446,6 +446,18 @@ _JOKE_RE = re.compile(
 # the joke branch in the first place.
 _SUPER_DIRTY_RE = re.compile(r"\b(super|extra|really|very|extremely)\s+dirty\b", re.IGNORECASE)
 
+# "Give me the shpeel" -- Alex's own phrasing for the curated world-news
+# roundup ("spiel" is the standard spelling; "shpeel" is how it's actually
+# said out loud, so both are matched).
+_SHPEEL_RE = re.compile(
+    r"\b(give me the (shpeel|spiel)|what'?s the (shpeel|spiel)|"
+    r"(world|global) news( roundup| briefing| update)?\b|"
+    r"news (roundup|briefing|update|round-up)|"
+    r"what'?s happening (around|in) the world|"
+    r"catch me up on (the )?(world|global) news)\b",
+    re.IGNORECASE,
+)
+
 # Keyword classifier for "is this joke sexual content" vs. other crude/adult
 # humor (profanity, bathroom humor, drugs, dark humor, slurs, ...) that
 # doesn't involve sex. Not LLM-graded -- a regex pass over ~2000 jokes is
@@ -4482,6 +4494,15 @@ def _db() -> sqlite3.Connection:
                 finish_reason TEXT    NOT NULL,
                 reply_chars   INTEGER NOT NULL
             );
+            -- Curated world-news digests ("the shpeel"), built by the
+            -- news_digest.py cron job. "Give me the shpeel" reads the latest
+            -- row here first; a live Tavily+LLM pull only runs when this is
+            -- missing or stale, the same cache-first shape reflections use.
+            CREATE TABLE IF NOT EXISTS world_news (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT    NOT NULL,
+                ts      REAL    NOT NULL
+            );
         """)
         _db_con.commit()
     return _db_con
@@ -6217,6 +6238,77 @@ def tavily_search(query):
         )
     except Exception as e:
         return f"Search error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# World news ("the shpeel") — curated cross-region digest
+# ---------------------------------------------------------------------------
+
+# news_digest.py (cron) runs every few hours; anything older than this is
+# treated as stale and triggers a live fallback rather than being handed to
+# Alex as if it were current.
+_SHPEEL_MAX_AGE_S = 8 * 3600
+
+# The live fallback runs synchronously inside a real turn, so it uses a
+# shorter slice of world_news.NEWS_QUERIES than the cron job's full sweep —
+# bounding latency matters more than full regional coverage on this path.
+_SHPEEL_LIVE_QUERY_COUNT = 4
+
+
+def _shpeel_cached():
+    """Latest cached digest and its age in seconds, or (None, None) if
+    nothing has been stored yet (fresh install, cron never ran)."""
+    try:
+        with _db_lock:
+            row = _db().execute(
+                "SELECT content, ts FROM world_news ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None, None
+    if not row:
+        return None, None
+    return row["content"], time.time() - row["ts"]
+
+
+def _shpeel_live_fallback():
+    """A smaller, synchronous live pull for when the cached digest is
+    missing or stale. Returns (content, error)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import world_news as _wn
+    except Exception as e:
+        return None, f"world_news import failed: {e}"
+
+    def _llm(prompt):
+        resp, err = _groq_post([{"role": "user", "content": prompt}],
+                                MODELS["2"][0], stream=False, max_tokens=500)
+        if err or resp is None:
+            return None, err or "no response"
+        try:
+            return resp.json()["choices"][0]["message"]["content"].strip(), None
+        except Exception as e:
+            return None, str(e)
+
+    queries = _wn.NEWS_QUERIES[:_SHPEEL_LIVE_QUERY_COUNT]
+    return _wn.build_shpeel(tavily_search, _llm, queries=queries)
+
+
+def get_shpeel():
+    """The text for "give me the shpeel" — the cron-built cache if it's
+    fresh, else a smaller live pull, else the stale cache as a last resort.
+    Never raises; a total failure returns a spoken apology so callers don't
+    need their own try/except around this."""
+    content, age = _shpeel_cached()
+    if content is not None and age < _SHPEEL_MAX_AGE_S:
+        return content
+    live, err = _shpeel_live_fallback()
+    if live:
+        return live
+    if content is not None:
+        print(f"[shpeel] live fallback failed ({err}) — using stale cache", flush=True)
+        return content
+    print(f"[shpeel] live fallback failed ({err}) — no cache available", flush=True)
+    return "I couldn't pull together the world news roundup right now."
 
 
 # ---------------------------------------------------------------------------
@@ -10770,6 +10862,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.flush()
                 return
 
+            if user_msg.lower().startswith("/shpeel") or (
+                    _SHPEEL_RE.search(user_msg) and not _TOOL_INTENT_RE.search(user_msg)):
+                sse({"token": get_shpeel()})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
             with lock:
                 session.append({"role": "user", "content": user_msg})
                 append_message("user", user_msg)
@@ -11448,6 +11547,23 @@ def handle_transcript(ctx, transcript, _depth=0):
             ctx._set_face("speaking", reply)
             ctx.board.set_rgb(*ctx._LED_SPEAKING)
             ctx._speak_device(reply)
+        ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
+        return
+
+    # ── World news shpeel ────────────────────────────────────────────────
+    # _TOOL_INTENT_RE exclusion because "remind me to check the world news
+    # briefing tonight" matches news (roundup|briefing|update) -- same
+    # precedent as the goodnight gate and resolve_subject()'s exclusion.
+    if _SHPEEL_RE.search(transcript) and not _TOOL_INTENT_RE.search(transcript):
+        shpeel = get_shpeel()
+        print(f"Zeev [shpeel]: {shpeel}")
+        ctx.session.append({"role": "user", "content": transcript})
+        append_message("user", transcript)
+        ctx.session.append({"role": "assistant", "content": shpeel})
+        append_message("assistant", shpeel)
+        ctx._set_face("speaking", shpeel)
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        ctx._speak_device(shpeel)
         ctx._go_ready() if ctx._busy.is_set() else ctx._go_idle()
         return
 
@@ -14826,6 +14942,14 @@ def main():
                     speak_terminal(joke, lang=jlang)
             else:
                 print(f"{DIM}No jokes loaded.{RESET}\n")
+            continue
+
+        if user_input.lower().startswith("/shpeel") or user_input.lower() == "/news" or (
+                _SHPEEL_RE.search(user_input) and not _TOOL_INTENT_RE.search(user_input)):
+            shpeel = get_shpeel()
+            print(f"\n{CYAN}{BOLD}Zeev:{RESET} {shpeel}\n")
+            if tts_on:
+                speak_terminal(shpeel)
             continue
 
         if user_input.lower() == "/flip":

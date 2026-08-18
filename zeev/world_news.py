@@ -1,0 +1,80 @@
+"""world_news.py — curated world-news snippet gathering ("the shpeel").
+
+Shared by news_digest.py (the cron job that builds the cache zeev.py reads)
+and zeev.py's own live fallback for when that cache is missing or stale.
+Kept as its own module, the same way quantum.py is shared by quantum_daily.py/
+quantum_convo.py and zeev.py, rather than duplicated: the curated query list
+and prompt are exactly the kind of thing that drifts apart across two copies
+if they're ever edited in only one place.
+"""
+
+# Regions/topics chosen to surface stories outside the US/UK-centric
+# mainstream feed -- a single generic "world news today" search just returns
+# the same half-dozen top-of-fold wire stories every outlet already ran.
+NEWS_QUERIES = [
+    "Central Asia news this week Kazakhstan Uzbekistan Kyrgyzstan Tajikistan Turkmenistan",
+    "West Africa news this week",
+    "Caucasus news this week Georgia Armenia Azerbaijan",
+    "Pacific Islands news this week",
+    "Southeast Asia news this week Laos Cambodia Myanmar Timor-Leste",
+    "Balkans news this week",
+    "Latin America news this week underreported",
+    "small country news overlooked by international media this week",
+]
+
+SHPEEL_PROMPT = """\
+You are Zeev, giving Alex a spoken world-news roundup -- "the shpeel". Below \
+are raw search snippets gathered from several under-covered regions and \
+topics around the world.
+
+Turn them into a spoken briefing: pick the {n} most interesting or \
+significant stories, favoring ones that would NOT already be all over \
+mainstream US/UK headlines. Skip anything that's just a wire-service rehash \
+of a story everyone already knows, and skip anything that reads like an ad, \
+spam, or a non-news result. Speak in first person, flowing prose (no bullet \
+points, no headers, no markdown -- this gets read aloud by text-to-speech). \
+Briefly name the country or region for each story so Alex has context. Keep \
+it to about {words} words total.
+
+RAW SNIPPETS:
+{snippets}"""
+
+_BAD_RESULT_MARKERS = ("search error", "unavailable", "no results found")
+
+
+def gather_snippets(tavily_fn, queries=None):
+    """Run each query through tavily_fn(query) -> str, concatenate the ones
+    that came back with real content.
+
+    A single failed or empty query degrades to fewer regions covered, not a
+    crash or a summary built partly out of an error string -- the summarizer
+    works fine on 5 of 8 regions, it just can't work on zero.
+    """
+    queries = queries if queries is not None else NEWS_QUERIES
+    chunks = []
+    for q in queries:
+        try:
+            result = tavily_fn(q)
+        except Exception:
+            continue
+        if result and not any(m in result.lower() for m in _BAD_RESULT_MARKERS):
+            chunks.append(f"### {q}\n{result}")
+    return "\n\n".join(chunks)
+
+
+def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):
+    """Gather snippets across the curated query list, then summarize them
+    into a spoken shpeel.
+
+    `llm_fn` takes a prompt string and returns (content, error) -- the same
+    shape every LLM call site in this project already uses. Returns
+    (content, error); on any failure content is None and error explains why.
+    """
+    snippets = gather_snippets(tavily_fn, queries)
+    if not snippets:
+        return None, "no snippets gathered (search unavailable or all queries empty)"
+    prompt = SHPEEL_PROMPT.format(n=n, words=words, snippets=snippets)
+    content, err = llm_fn(prompt)
+    if err:
+        return None, err
+    return content, None

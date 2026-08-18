@@ -612,6 +612,57 @@ _GOODNIGHT_LINES = [
      "Everything can wait until morning."),
 ]
 
+# Same two-voice, name-everyone shape as _GOODNIGHT_LINES, for the scheduled
+# morning greeting below.
+_GOODMORNING_LINES = [
+    ("Good morning, Alex! Hope you slept well.",
+     "Morning, everyone — wishing Alex, Maria, and Leo a great day. "
+     "And good morning to you too, Smokey."),
+    ("Good morning, Alex. Here's to a good one.",
+     "Good morning, Alex, Maria, and Leo. And good morning, Smokey, "
+     "wherever you're stretching."),
+    ("Rise and shine, Alex.",
+     "Good morning to the whole house — Alex, Maria, Leo, and Smokey too."),
+    ("Good morning, Alex. Ready when you are.",
+     "Morning, Alex. Morning, Maria. Morning, Leo. Morning, Smokey."),
+]
+
+# Weekday-only proactive announcements (unprompted -- distinct from the
+# voice-triggered goodnight branch below, which only fires when Alex says it).
+# (hour, minute, lines, label)
+_GREETING_SCHEDULE = (
+    (6, 30, _GOODMORNING_LINES, "morning"),
+    (23, 0, _GOODNIGHT_LINES, "night"),
+)
+# How late a delayed poll may still fire -- catches a target missed by a few
+# seconds of scheduling jitter, but never fires hours late after e.g. a
+# device restart mid-morning.
+_GREETING_FIRE_WINDOW_MIN = 5
+
+
+def _due_greetings(now, last_fired):
+    """Pure: which _GREETING_SCHEDULE entries are due to fire at `now`.
+
+    Mon-Fri only, at most once per weekday per label (via `last_fired`,
+    label -> last-fired date), and only within _GREETING_FIRE_WINDOW_MIN of
+    the target time -- a poll loop that starts late must not fire hours
+    after the target. Doesn't mutate `last_fired`: the caller only records a
+    fire once the speak attempt actually succeeds.
+    """
+    if now.weekday() >= 5:   # Sat/Sun -- both greetings are Mon-Fri
+        return []
+    today = now.date()
+    due = []
+    for hour, minute, lines, label in _GREETING_SCHEDULE:
+        if last_fired.get(label) == today:
+            continue
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        elapsed_min = (now - target).total_seconds() / 60
+        if 0 <= elapsed_min <= _GREETING_FIRE_WINDOW_MIN:
+            due.append((label, lines))
+    return due
+
+
 # ── Birthday duet ───────────────────────────────────────────────────────────
 # The second branch (after goodnight) where both personas speak, and the reason
 # it exists: asked twice on 2026-08-01 to "sing a birthday song together with
@@ -14261,6 +14312,40 @@ def run_device_mode():
                     return
 
     threading.Thread(target=_battery_monitor, daemon=True).start()
+
+    def _speak_scheduled_greeting(zeev_line, sarina_line, label):
+        """Unprompted two-voice greeting -- same wait/restore shape as
+        _plead_for_charge, since this also must never talk over a live turn."""
+        for _ in range(60):          # wait up to ~2 min for the device to be free
+            if _face_state in ("idle", "ready"):
+                break
+            time.sleep(2)
+        print(f"[greeting] {label}: {zeev_line} / {sarina_line}", flush=True)
+        _screen_wake()
+        was_idle = _face_state == "idle"
+        _set_face("speaking", zeev_line)
+        board.set_rgb(*_LED_SPEAKING)
+        _speak_device(zeev_line, "daniel")
+        _set_face("speaking", sarina_line)
+        _speak_device(sarina_line, "sarina")
+        _go_idle() if was_idle else _go_ready()
+
+    def _greeting_scheduler_loop():
+        """Polls _due_greetings every 30s and speaks whatever comes due."""
+        last_fired = {}
+        while True:
+            time.sleep(30)
+            for label, lines in _due_greetings(datetime.now(), last_fired):
+                zeev_line, sarina_line = random.choice(lines)
+                try:
+                    _speak_scheduled_greeting(zeev_line, sarina_line, label)
+                    # Recorded only on success -- a failed attempt should get
+                    # another try on the next poll, not be marked done.
+                    last_fired[label] = datetime.now().date()
+                except Exception as e:
+                    print(f"[greeting] {label} failed: {e}", flush=True)
+
+    threading.Thread(target=_greeting_scheduler_loop, daemon=True).start()
 
     def _shutdown(sig=None, frame=None):
         _keepalive_stop.set()

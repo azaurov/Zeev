@@ -51,7 +51,19 @@ from world_news import gather_snippets, summarize
 
 TAVILY_URL = "https://api.tavily.com/search"
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "qwen/qwen3.6-27b"
+# NOT qwen/qwen3.6-27b -- tried first (matches weekly_reflection.py's Groq
+# fallback choice) and failed live in two different ways synthesizing across
+# 8 regions of snippets: at 500/1500 completion tokens it hit finish_reason
+# "length" with an unclosed <think> and zero real content; at 3000 it STILL
+# hit "length" mid-reasoning (usage showed reasoning_tokens dominating), and
+# a further increase isn't viable -- this account's qwen3.6-27b quota caps at
+# 8000 TPM, and the prompt alone is already ~2700 tokens, leaving no safe
+# room to raise completion budget further. gpt-oss-20b keeps reasoning out
+# of `content` entirely (see usage.completion_tokens_details.reasoning_tokens
+# in a raw response) and finished this exact prompt naturally
+# (finish_reason "stop") in under 1000 completion tokens when tested direct
+# against the Groq API 2026-08-18.
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 # ---------------------------------------------------------------------------
@@ -101,18 +113,12 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                # qwen3.6-27b's hidden <think> reasoning spends from this
-                # SAME budget before any visible reply text. 500, then 1500,
-                # both produced an unclosed <think> with zero real content on
-                # live runs (see world_news.summarize's empty-after-stripping
-                # check, which catches this instead of silently storing an
-                # empty digest) -- synthesizing across 8 regions' worth of
-                # snippets into "pick the 6 best" is evidently a much more
-                # reasoning-heavy task for this model than the single-passage
-                # Torah/quantum call sites CLAUDE.md's 1200-1600 guidance
-                # comes from. 3000 gives real headroom over the reasoning
-                # actually observed live.
-                "max_tokens": 3000,
+                # gpt-oss-20b's hidden reasoning is tracked separately from
+                # `content` (see GROQ_MODEL comment above) rather than
+                # inlined into the budget this caps -- 1500 is real headroom
+                # over the ~1000 completion tokens observed live for this
+                # exact prompt shape.
+                "max_tokens": 1500,
                 "temperature": 0.7,
             },
             timeout=90,

@@ -53,7 +53,12 @@ import requests
 from world_news import strip_think_text
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "qwen/qwen3.6-27b"
+# gpt-oss-20b, not qwen/qwen3.6-27b -- see news_digest.py's GROQ_MODEL
+# comment for why: qwen3.6-27b inlines its reasoning into `content` and, for
+# this project's account, its 8000 TPM quota can't absorb enough completion
+# tokens to reliably finish that reasoning on a real prompt. gpt-oss-20b
+# keeps reasoning out of `content` and finishes naturally instead.
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 # ---------------------------------------------------------------------------

@@ -118,7 +118,19 @@ def summarize(snippets, llm_fn, n=6, words=300):
     # live-fallback llm_fn calls _groq_post directly (not _llm_complete, the
     # one wrapper that already strips this), so it has the identical gap
     # news_digest.py just hit live.
-    return strip_think_text(content), None
+    content = strip_think_text(content)
+    # A reasoning model's hidden <think> tokens come out of the SAME
+    # max_tokens budget as the visible reply (see CLAUDE.md's gpt-oss
+    # reasoning-overhead note for the general shape of this bug) -- found
+    # live 2026-08-18 immediately after the stripping fix above: qwen3.6-27b
+    # spent its entire budget reasoning across 8 regions of snippets and hit
+    # finish_reason length with an UNCLOSED <think> and zero real content,
+    # so strip_think_text correctly stripped it down to "" and an empty
+    # string got saved as a "successful" digest. An empty result after
+    # stripping is a truncation failure, not a valid (if terse) summary.
+    if not content:
+        return None, "LLM reply was empty after stripping <think> reasoning (likely truncated by max_tokens)"
+    return content, None
 
 
 def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):

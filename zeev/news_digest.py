@@ -101,10 +101,18 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 500,
+                # qwen3.6-27b's hidden <think> reasoning spends from this
+                # SAME budget before any visible reply text -- 500 was too
+                # tight and produced an unclosed <think> with zero real
+                # content on a live run (see world_news.summarize's
+                # empty-after-stripping check, which now catches this
+                # instead of silently storing an empty digest). 1500 matches
+                # the headroom CLAUDE.md documents for other reasoning-heavy
+                # Torah/quantum call sites on this same model family.
+                "max_tokens": 1500,
                 "temperature": 0.7,
             },
-            timeout=60,
+            timeout=90,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip(), None

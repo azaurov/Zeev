@@ -132,7 +132,12 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 150,
+                # Same reasoning-budget gap as news_digest.py's Groq call --
+                # qwen3.6-27b's hidden <think> block spends from this same
+                # budget before the GROUNDED/UNGROUNDED verdict, so 150 is
+                # too tight and can leave parse_grade nothing but an
+                # unclosed reasoning trace to parse.
+                "max_tokens": 400,
                 "temperature": 0.3,
             },
             timeout=60,

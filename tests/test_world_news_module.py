@@ -89,6 +89,19 @@ def test_summarize_strips_think_blocks_from_llm_output():
     assert content == "Here's what's happening around the world."
 
 
+def test_summarize_treats_empty_after_strip_as_truncation_error():
+    """Regression for the live 2026-08-18 follow-up: after the <think>
+    stripping fix landed, qwen3.6-27b spent its whole max_tokens budget
+    reasoning across 8 regions and hit finish_reason length with an
+    UNCLOSED <think> and zero real content -- stripping correctly reduced
+    that to "", and an empty string must not be treated as a successful
+    (if terse) digest."""
+    raw = "<think>still reasoning about which stories to pick and never got to the answer"
+    content, err = world_news.summarize("some snippet", lambda p: (raw, None))
+    assert content is None
+    assert "empty" in err.lower()
+
+
 def test_summarize_is_reusable_with_already_gathered_snippets():
     """news_digest.py calls gather_snippets() and summarize() separately (not
     build_shpeel()) so it can persist the raw snippets alongside the summary

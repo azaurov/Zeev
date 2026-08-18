@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -52,7 +53,20 @@ if not GROQ_API_KEY:
 import requests
 
 GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL  = "qwen/qwen3.6-27b"
+# NOT qwen/qwen3.6-27b -- that was this constant's original value and shares
+# the exact bug found live 2026-08-18 building the world-news digest
+# (zeev/news_digest.py, see CLAUDE.md's "World news" section for the full
+# incident): it inlines hidden <think> reasoning into `content`, and on a
+# large-enough prompt (this script's transcript can run to MAX_MSGS=300
+# messages) that reasoning alone can consume the whole completion budget,
+# leaving finish_reason "length" and an unclosed, unstripped <think> block --
+# or, once stripped, an empty "reflection". gpt-oss-20b keeps reasoning out
+# of `content`, and reasoning_effort="low" below keeps it from eating the
+# budget anyway (both confirmed against the Groq API on the news_digest.py
+# task). This path is rarely exercised in practice -- feiergente/bosgame
+# both come first in _synthesize() and usually succeed -- so the bug sat
+# latent here rather than being caught live the way it was for news_digest.py.
+GROQ_MODEL  = "openai/gpt-oss-20b"
 MIN_MSGS    = 10   # skip if fewer than this many messages in the window
 MAX_MSGS    = 300  # cap to avoid token overflow
 MSG_PREVIEW = 500  # chars per message in the transcript
@@ -161,6 +175,20 @@ def _count_reflections(con):
 # LLM — bosgame first (free), Groq 70B fallback
 # ---------------------------------------------------------------------------
 
+# Applied to every LLM path's output, not just Groq's -- feiergente/bosgame
+# don't currently inline reasoning, but stripping is a no-op on plain text,
+# and a future model swap on either shouldn't get to silently leak a <think>
+# block into a stored reflection the way the unfixed Groq path could.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_text(text):
+    if not text:
+        return text
+    return _THINK_UNCLOSED_RE.sub("", _THINK_BLOCK_RE.sub("", text)).strip()
+
+
 def _feiergente_busy():
     try:
         age = time.time() - os.path.getmtime(_FEIERGENTE_LOCK)
@@ -220,10 +248,16 @@ def _call_groq(prompt):
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 400,
+                # gpt-oss-20b's hidden reasoning is spent from this same
+                # budget -- reasoning_effort="low" is the fix that actually
+                # matters (see GROQ_MODEL comment); 700 is generous headroom
+                # on top of that for the ~250-word reflection itself, not
+                # load-bearing on its own.
+                "max_tokens": 700,
                 "temperature": 0.7,
+                "reasoning_effort": "low",
             },
-            timeout=30,
+            timeout=60,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip(), None
@@ -235,16 +269,23 @@ def _synthesize(transcript, days):
     prompt = REFLECTION_PROMPT.format(days=days, transcript=transcript)
     content, err = _call_feiergente(prompt)
     if content:
-        print("  [LLM: feiergente qwen2.5]")
-        return content, None
+        content = _strip_think_text(content)
+        if content:
+            print("  [LLM: feiergente qwen2.5]")
+            return content, None
     content, err = _call_bosgame(prompt)
     if content:
-        print("  [LLM: bosgame]")
-        return content, None
+        content = _strip_think_text(content)
+        if content:
+            print("  [LLM: bosgame]")
+            return content, None
     print(f"  [bosgame failed: {err}] — trying Groq…")
     content, err = _call_groq(prompt)
     if content:
-        print("  [LLM: Groq 70B]")
+        content = _strip_think_text(content)
+        if not content:
+            return None, "Groq reply was empty after stripping <think> reasoning (likely truncated by max_tokens)"
+        print("  [LLM: Groq]")
         return content, None
     return None, err
 

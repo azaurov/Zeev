@@ -110,14 +110,19 @@ def test_world_news_speaks_through_audio_daemon_when_available(watch_server, zee
     _ws, port = watch_server
     monkeypatch.setattr(zeev, "get_shpeel", lambda: "The shpeel.")
     spoken = []
+    skip_espeak_flags = []
     fake_audio = type("FakeAudio", (), {
         "available": True,
-        "speak": lambda self, text: spoken.append(text),
+        "speak": lambda self, text, **kw: (spoken.append(text),
+                                            skip_espeak_flags.append(kw.get("skip_espeak"))),
     })()
     monkeypatch.setattr(zeev, "_audio", fake_audio)
     status, data = _post(port, "/watch", {"cmd": "world_news"})
     assert status == 200
     assert spoken == ["The shpeel."]
+    # skip_espeak=True: a Kokoro/Piper failure here must stay silent, not
+    # fall back to the robotic espeak-ng voice.
+    assert skip_espeak_flags == [True]
 
 
 def test_world_news_speak_failure_does_not_break_response(watch_server, zeev, monkeypatch):
@@ -125,7 +130,7 @@ def test_world_news_speak_failure_does_not_break_response(watch_server, zeev, mo
     monkeypatch.setattr(zeev, "get_shpeel", lambda: "The shpeel.")
     fake_audio = type("FakeAudio", (), {
         "available": True,
-        "speak": lambda self, text: (_ for _ in ()).throw(RuntimeError("daemon gone")),
+        "speak": lambda self, text, **kw: (_ for _ in ()).throw(RuntimeError("daemon gone")),
     })()
     monkeypatch.setattr(zeev, "_audio", fake_audio)
     status, data = _post(port, "/watch", {"cmd": "world_news"})
@@ -203,15 +208,18 @@ def test_find_smokey_speaks_through_audio_daemon_when_available(watch_server, ze
     monkeypatch.setattr(zeev, "sweep_for_subject",
                          lambda s, **kw: ("Smokey is on the basement cam.", 1))
     spoken = []
+    skip_espeak_flags = []
     fake_audio = type("FakeAudio", (), {
         "available": True,
-        "speak": lambda self, text: spoken.append(text),
+        "speak": lambda self, text, **kw: (spoken.append(text),
+                                            skip_espeak_flags.append(kw.get("skip_espeak"))),
     })()
     monkeypatch.setattr(zeev, "_audio", fake_audio)
     _ws, port = watch_server
     status, data = _post(port, "/watch", {"cmd": "find_smokey"})
     assert status == 200
     assert spoken == ["Smokey is on the basement cam."]
+    assert skip_espeak_flags == [True]
 
 
 def test_find_smokey_unconfigured(watch_server, zeev, monkeypatch):

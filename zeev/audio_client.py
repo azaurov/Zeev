@@ -130,9 +130,17 @@ class AudioClient:
         r = self._call_safe({"dev": "plughw:wm8960soundcard,0"}, cmd="audio_dev")
         return r.get("dev", "plughw:wm8960soundcard,0")
 
-    def speak(self, text: str, lang: str = "en", dev: str = "", voice: str = "") -> None:
-        """Fire-and-forget TTS — returns immediately (daemon synthesises async)."""
-        self._call_safe({}, cmd="speak", text=text, lang=lang, dev=dev, voice=voice)
+    def speak(self, text: str, lang: str = "en", dev: str = "", voice: str = "",
+              skip_espeak: bool = False) -> None:
+        """Fire-and-forget TTS — returns immediately (daemon synthesises async).
+
+        skip_espeak: suppress the daemon's own espeak-ng fallback on failure,
+        same reasoning as speak_sync's skip_espeak -- pass this when the
+        caller would rather stay silent (or use its own fallback) than have
+        a Kokoro/Piper failure quietly re-speak the whole text in the
+        robotic espeak-ng voice."""
+        self._call_safe({}, cmd="speak", text=text, lang=lang, dev=dev, voice=voice,
+                         skip_espeak=skip_espeak)
 
     def speak_sync(self, text: str, lang: str = "en", dev: str = "", voice: str = "",
                     skip_espeak: bool = False) -> bool:

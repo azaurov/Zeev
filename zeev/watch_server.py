@@ -60,11 +60,17 @@ def _speak(text):
     blocks up to 180s: the watch app is waiting on this HTTP response with a
     spinner, and a multi-minute news digest must not hold that open. Best
     effort -- a TTS failure must not turn a working text reply into a 500.
+
+    skip_espeak=True: this endpoint has no better fallback of its own queued
+    (unlike device mode's English path, which escalates to Groq Orpheus on a
+    Kokoro/Piper failure), so a failure here should mean silence, not the
+    daemon quietly re-speaking the whole digest in the robotic espeak-ng
+    voice -- the watch already shows the text either way.
     """
     if not (zeev._audio and zeev._audio.available):
         return
     try:
-        zeev._audio.speak(text)
+        zeev._audio.speak(text, skip_espeak=True)
     except Exception as e:
         print(f"[watch] speak failed: {e}", flush=True)
 

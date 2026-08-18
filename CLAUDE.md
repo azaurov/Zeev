@@ -286,7 +286,7 @@ FTS5 DB `data/torah.db` (Tanakh, Mishna, Talmud, Apocrypha, Siddur/Haggadah, Zoh
 
 ### Weekly reflection
 
-`zeev/weekly_reflection.py` — synthesizes the last 7 days of messages into a first-person Zeev reflection. Stored in `reflections` table; injected into every system prompt under `## Weekly reflection:` (capped 1500 chars). LLM: bosgame `llama3.1:8b` first, Groq 70B fallback. Cron: `0 7 * * 0`. Skips if fewer than 10 messages in the window.
+`zeev/weekly_reflection.py` — synthesizes the last 7 days of messages into a first-person Zeev reflection. Stored in `reflections` table; injected into every system prompt under `## Weekly reflection:` (capped 1500 chars). LLM: feiergente qwen2.5 first, then bosgame `llama3.1:8b`, then Groq `gpt-oss-20b` (`reasoning_effort="low"`, `<think>`-stripped defensively) as a last resort — not qwen3.6-27b, which this constant originally was; see the "World news" section below for the live-found bug that model has on any large-enough prompt and why every reasoning-model Groq call in this project now needs `reasoning_effort="low"`. Cron: `0 7 * * 0`. Skips if fewer than 10 messages in the window.
 
 ### RAG-faithfulness dashboard
 

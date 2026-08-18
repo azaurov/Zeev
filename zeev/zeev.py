@@ -77,6 +77,7 @@ BOSGAME_KEY        = os.environ.get("BOSGAME_KEY",        "")
 FEIERGENTE_URL     = os.environ.get("FEIERGENTE_URL",     "")   # e.g. http://10.0.0.208:11434
 FEIERGENTE_MODEL   = os.environ.get("FEIERGENTE_MODEL",   "qwen2.5:7b-instruct-q4_K_M")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+ZEEV_WATCH_KEY     = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 
@@ -9352,6 +9353,101 @@ def parse_subject_sighting(reply: str, kind: str = ""):
     return found, desc
 
 
+def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
+    """Sweep `cams` (default: `subj["cams"]`, capped to `_SUBJECT_MAX_CAMS`) for
+    the named subject in `subj` (a `resolve_subject()` result). Returns
+    ``(reply, frames_seen)``.
+
+    Extracted from the inline device-mode handler so a second caller (the
+    watch HTTP endpoint) can reuse the exact same sweep/verdict logic without
+    a live `ctx` to speak through. `on_progress(text)`, if given, is called
+    with the same spoken-style interim lines device mode used to speak
+    directly ("Let me look for X.", "Not on the Y. Checking Z.") — callers
+    that don't want narration (e.g. a synchronous HTTP request) pass None.
+    """
+    name, kind = subj["name"], subj["kind"]
+    cams = (cams if cams is not None else list(subj["cams"]))[:_SUBJECT_MAX_CAMS]
+    if not cams:
+        return f"I don't have a camera set up to look for {name}.", 0
+    print(f"[subject] looking for {name} on {', '.join(cams)}", flush=True)
+
+    def _grab(stream):
+        box = []
+        th = threading.Thread(
+            target=lambda: box.append(wyze_snapshot(stream)), daemon=True)
+        th.start()
+        return th, box
+
+    # First grab runs under the announcement, same as the room branch below.
+    pending = {cams[0]: _grab(cams[0])}
+    if on_progress:
+        on_progress(f"Let me look for {name}.")
+    found = best = None      # best = an inconclusive read worth reporting
+    frames = 0
+    for i, stream in enumerate(cams):
+        th, box = pending.get(stream) or _grab(stream)
+        th.join(WYZE_SNAP_TIMEOUT + 5)
+        img = box[0] if box else None
+        if not img:
+            print(f"[subject] no frame from {stream}", flush=True)
+            continue
+        frames += 1
+        # Start the next grab *under* this vision call: measured here, a
+        # grab is 4-8s against ~21-25s of free-tier vision, so overlapping
+        # them is most of the second camera's cost. On a hit the wasted
+        # work is one background ffmpeg.
+        if i + 1 < len(cams) and cams[i + 1] not in pending:
+            pending[cams[i + 1]] = _grab(cams[i + 1])
+        label = wyze_cam_label(stream)
+        vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
+        if not vreply:
+            print(f"[subject] vision failed on {stream}: {verr}", flush=True)
+            continue
+        seen, desc = parse_subject_sighting(vreply, kind)
+        # 200, not 80: the first live sweep logged "...and a cat" on a
+        # FOUND: no, which reads exactly like a false negative. The full
+        # line was "a cat tree" -- the truncation, not the model, was the
+        # problem, and it cost a frame grab to disprove.
+        print(f"[subject] {stream}: found={seen} {desc[:200]!r}", flush=True)
+        if seen is True:
+            found = (label, desc)
+            break
+        if seen is None and desc and best is None:
+            best = (label, desc)
+        if i + 1 < len(cams):
+            # Only a clean "no" may be announced as a miss. An inconclusive
+            # read is still the answer if nothing better turns up, and
+            # "not on the basement cam" followed by "on the basement cam I
+            # can see a grey cat" is Zeev contradicting itself out loud.
+            nxt = wyze_cam_label(cams[i + 1])
+            if on_progress:
+                on_progress(
+                    f"Not on the {label}. Checking the {nxt}." if seen is False
+                    else f"Checking the {nxt}.")
+    # Labels already end in "cam" (wyze_cam_label('basement-cam') ->
+    # 'basement cam'), so nothing here appends "camera" -- same reason the
+    # room branch below speaks the bare label.
+    if found:
+        label, desc = found
+        reply = (f"{name} is on the {label}. {desc}" if desc
+                 else f"I can see {name} on the {label}.")
+    elif best:
+        label, desc = best
+        reply = (f"I'm not sure whether that's {name}. On the {label} "
+                 f"I can see: {desc}")
+    elif not frames:
+        where = " or the ".join(wyze_cam_label(c) for c in cams)
+        reply = (f"I couldn't get a picture from the {where} just "
+                 "now — it may be asleep or offline.")
+    else:
+        where = " or the ".join(wyze_cam_label(c) for c in cams)
+        # "I didn't see him", not "he isn't there": a small model missing a
+        # dark cat on a dark couch is the wrong-city failure class again.
+        reply = f"I didn't see {name} on the {where}."
+    print(f"Zeev [subject/{name}]: {reply}\n", flush=True)
+    return reply, frames
+
+
 def wyze_snapshot(stream: str, timeout: float | None = None):
     """Grab one frame from a bridge stream. Returns base64 JPEG or None.
 
@@ -11829,7 +11925,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # reminder guard inside resolve_subject().
     _subj = resolve_subject(transcript) if WYZE_SUBJECTS else None
     if _subj:
-        name, kind = _subj["name"], _subj["kind"]
+        name = _subj["name"]
         # "check on Smokey in the basement" is a question about the basement.
         # A named room narrows the sweep to that room rather than reordering it.
         named_cam, _ = resolve_wyze_cam(transcript)
@@ -11837,83 +11933,10 @@ def handle_transcript(ctx, transcript, _depth=0):
         if not cams:
             finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
             return
-        print(f"[subject] looking for {name} on {', '.join(cams)}", flush=True)
         ctx._set_face("thinking", f"{name}…")
-
-        def _grab(stream):
-            box = []
-            th = threading.Thread(
-                target=lambda: box.append(wyze_snapshot(stream)), daemon=True)
-            th.start()
-            return th, box
-
-        # First grab runs under the announcement, same as the room branch below.
-        pending = {cams[0]: _grab(cams[0])}
-        ctx._speak_device(f"Let me look for {name}.", _LAST_VOICE)
-        found = best = None      # best = an inconclusive read worth reporting
-        frames = 0
-        for i, stream in enumerate(cams):
-            th, box = pending.get(stream) or _grab(stream)
-            th.join(WYZE_SNAP_TIMEOUT + 5)
-            img = box[0] if box else None
-            if not img:
-                print(f"[subject] no frame from {stream}", flush=True)
-                continue
-            frames += 1
-            # Start the next grab *under* this vision call: measured here, a
-            # grab is 4-8s against ~21-25s of free-tier vision, so overlapping
-            # them is most of the second camera's cost. On a hit the wasted
-            # work is one background ffmpeg.
-            if i + 1 < len(cams) and cams[i + 1] not in pending:
-                pending[cams[i + 1]] = _grab(cams[i + 1])
-            label = wyze_cam_label(stream)
-            vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
-            if not vreply:
-                print(f"[subject] vision failed on {stream}: {verr}", flush=True)
-                continue
-            seen, desc = parse_subject_sighting(vreply, kind)
-            # 200, not 80: the first live sweep logged "...and a cat" on a
-            # FOUND: no, which reads exactly like a false negative. The full
-            # line was "a cat tree" -- the truncation, not the model, was the
-            # problem, and it cost a frame grab to disprove.
-            print(f"[subject] {stream}: found={seen} {desc[:200]!r}", flush=True)
-            if seen is True:
-                found = (label, desc)
-                break
-            if seen is None and desc and best is None:
-                best = (label, desc)
-            if i + 1 < len(cams):
-                # Only a clean "no" may be announced as a miss. An inconclusive
-                # read is still the answer if nothing better turns up, and
-                # "not on the basement cam" followed by "on the basement cam I
-                # can see a grey cat" is Zeev contradicting itself out loud.
-                nxt = wyze_cam_label(cams[i + 1])
-                ctx._speak_device(
-                    f"Not on the {label}. Checking the {nxt}." if seen is False
-                    else f"Checking the {nxt}.", _LAST_VOICE)
-        # Labels already end in "cam" (wyze_cam_label('basement-cam') ->
-        # 'basement cam'), so nothing here appends "camera" -- same reason the
-        # room branch below speaks the bare label.
-        if found:
-            label, desc = found
-            reply = (f"{name} is on the {label}. {desc}" if desc
-                     else f"I can see {name} on the {label}.")
-        elif best:
-            label, desc = best
-            reply = (f"I'm not sure whether that's {name}. On the {label} "
-                     f"I can see: {desc}")
-        elif not frames:
-            where = " or the ".join(wyze_cam_label(c) for c in cams)
-            reply = (f"I couldn't get a picture from the {where} just "
-                     "now — it may be asleep or offline.")
-        else:
-            where = " or the ".join(wyze_cam_label(c) for c in cams)
-            # "I didn't see him", not "he isn't there": a small model missing a
-            # dark cat on a dark couch is the wrong-city failure class again.
-            reply = f"I didn't see {name} on the {where}."
-        # Every other branch prints its reply; this one didn't, so the first
-        # live sweep left a journal that showed both verdicts and no answer.
-        print(f"Zeev [subject/{name}]: {reply}\n", flush=True)
+        reply, frames = sweep_for_subject(
+            _subj, cams=cams,
+            on_progress=lambda msg: ctx._speak_device(msg, _LAST_VOICE))
         # vision=True whenever at least one camera actually returned a frame
         # that got inspected -- a clean "not there" is still a point-in-time
         # visual read, not just a canned failure message like "asleep or

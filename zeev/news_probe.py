@@ -50,6 +50,8 @@ if not GROQ_API_KEY:
 
 import requests
 
+from world_news import strip_think_text
+
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "qwen/qwen3.6-27b"
 
@@ -148,7 +150,7 @@ def _grade(context, answer):
         text, err = _call_groq(prompt)
     if not text:
         return None, f"grader call failed: {err}"
-    return parse_grade(text)
+    return parse_grade(strip_think_text(text))
 
 
 # ---------------------------------------------------------------------------

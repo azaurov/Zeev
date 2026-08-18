@@ -63,6 +63,32 @@ def test_build_shpeel_propagates_llm_error():
     assert err == "llm exploded"
 
 
+def test_strip_think_text_removes_closed_block():
+    text = "<think>reasoning about the snippets here</think>Here's the shpeel."
+    assert world_news.strip_think_text(text) == "Here's the shpeel."
+
+
+def test_strip_think_text_removes_unclosed_block():
+    text = "<think>reasoning that never closed because it hit the token budget"
+    assert world_news.strip_think_text(text) == ""
+
+
+def test_strip_think_text_leaves_normal_text_alone():
+    text = "Here's the shpeel, no reasoning trace at all."
+    assert world_news.strip_think_text(text) == text
+
+
+def test_summarize_strips_think_blocks_from_llm_output():
+    """Regression for the live 2026-08-18 first cron run: qwen3.6-27b's Groq
+    fallback inlined its whole chain-of-thought into `content`, and got
+    stored as the "summary" verbatim because nothing stripped it."""
+    raw = "<think>let me pick the best stories</think>Here's what's happening around the world."
+    content, err = world_news.summarize("some snippet", lambda p: (raw, None))
+    assert err is None
+    assert "<think>" not in content
+    assert content == "Here's what's happening around the world."
+
+
 def test_summarize_is_reusable_with_already_gathered_snippets():
     """news_digest.py calls gather_snippets() and summarize() separately (not
     build_shpeel()) so it can persist the raw snippets alongside the summary

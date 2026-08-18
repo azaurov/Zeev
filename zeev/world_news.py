@@ -8,6 +8,8 @@ and prompt are exactly the kind of thing that drifts apart across two copies
 if they're ever edited in only one place.
 """
 
+import re
+
 # Regions/topics chosen to surface stories outside the US/UK-centric
 # mainstream feed -- a single generic "world news today" search just returns
 # the same half-dozen top-of-fold wire stories every outlet already ran.
@@ -40,6 +42,24 @@ RAW SNIPPETS:
 {snippets}"""
 
 _BAD_RESULT_MARKERS = ("search error", "unavailable", "no results found")
+
+# qwen/qwen3.6-27b (the Groq fallback model both news_digest.py and
+# news_probe.py use) inlines a <think>...</think> chain-of-thought block
+# into `content` instead of keeping it separate -- the same issue zeev.py's
+# _strip_think_text already works around for the main chat path (see its
+# docstring / MODELS["2"] history). Found live 2026-08-18: the very first
+# real cron-built digest got stored with its raw reasoning trace as the
+# "summary", because news_digest.py is a standalone script that doesn't
+# import zeev.py and had no equivalent stripping. Kept here, not duplicated
+# in both scripts, since both call qwen3.6-27b through Groq.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def strip_think_text(text):
+    if not text:
+        return text
+    return _THINK_UNCLOSED_RE.sub("", _THINK_BLOCK_RE.sub("", text)).strip()
 
 
 # Each tavily_fn(query) call returns up to 5 results, each with a full page
@@ -94,7 +114,11 @@ def summarize(snippets, llm_fn, n=6, words=300):
     content, err = llm_fn(prompt)
     if err:
         return None, err
-    return content, None
+    # Applied here rather than trusted to each llm_fn -- zeev.py's own
+    # live-fallback llm_fn calls _groq_post directly (not _llm_complete, the
+    # one wrapper that already strips this), so it has the identical gap
+    # news_digest.py just hit live.
+    return strip_think_text(content), None
 
 
 def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):

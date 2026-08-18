@@ -47,7 +47,7 @@ if not GROQ_API_KEY:
 
 import requests
 
-from world_news import build_shpeel
+from world_news import gather_snippets, summarize
 
 TAVILY_URL = "https://api.tavily.com/search"
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
@@ -136,19 +136,26 @@ def _open_db():
     con.row_factory = sqlite3.Row
     con.executescript("""
         CREATE TABLE IF NOT EXISTS world_news (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT    NOT NULL,
-            ts      REAL    NOT NULL
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            content  TEXT    NOT NULL,
+            ts       REAL    NOT NULL,
+            snippets TEXT
         );
     """)
+    # `snippets` was added after the table already shipped -- CREATE TABLE IF
+    # NOT EXISTS above won't retroactively add it to an existing zeev.db.
+    try:
+        con.execute("ALTER TABLE world_news ADD COLUMN snippets TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
     con.commit()
     return con
 
 
-def _save(con, content):
+def _save(con, content, snippets):
     con.execute(
-        "INSERT INTO world_news (content, ts) VALUES (?, ?)",
-        (content, time.time()),
+        "INSERT INTO world_news (content, ts, snippets) VALUES (?, ?, ?)",
+        (content, time.time(), snippets),
     )
     con.commit()
 
@@ -172,12 +179,13 @@ def show_latest():
 
 def run():
     print("Gathering world-news snippets…", flush=True)
-    content, err = build_shpeel(_tavily, _llm)
+    snippets = gather_snippets(_tavily)
+    content, err = summarize(snippets, _llm)
     if err:
         print(f"ERROR: {err}")
         return False
     con = _open_db()
-    _save(con, content)
+    _save(con, content, snippets)
     con.close()
     print(f"\n{'='*50}\nShpeel stored\n\n{content}\n")
     return True

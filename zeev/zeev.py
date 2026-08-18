@@ -4498,12 +4498,32 @@ def _db() -> sqlite3.Connection:
             -- news_digest.py cron job. "Give me the shpeel" reads the latest
             -- row here first; a live Tavily+LLM pull only runs when this is
             -- missing or stale, the same cache-first shape reflections use.
+            -- `snippets` (the raw Tavily text a digest was summarized from)
+            -- is what news_probe.py grades the LLM's summary against, the
+            -- same faithfulness-check shape as rag_probes.
             CREATE TABLE IF NOT EXISTS world_news (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT    NOT NULL,
-                ts      REAL    NOT NULL
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                content  TEXT    NOT NULL,
+                ts       REAL    NOT NULL,
+                snippets TEXT
+            );
+            -- Faithfulness grades for world_news rows -- see news_probe.py.
+            CREATE TABLE IF NOT EXISTS news_probes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                digest_id   INTEGER NOT NULL,
+                ts          REAL    NOT NULL,
+                grounded    INTEGER,
+                grader_note TEXT
             );
         """)
+        # `snippets` was added after world_news already shipped -- CREATE
+        # TABLE IF NOT EXISTS above won't retroactively add it to an
+        # existing zeev.db (matches the ALTER TABLE guard in news_digest.py,
+        # which opens its own connection to the same file).
+        try:
+            _db_con.execute("ALTER TABLE world_news ADD COLUMN snippets TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
         _db_con.commit()
     return _db_con
 

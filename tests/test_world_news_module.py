@@ -63,6 +63,23 @@ def test_build_shpeel_propagates_llm_error():
     assert err == "llm exploded"
 
 
+def test_summarize_is_reusable_with_already_gathered_snippets():
+    """news_digest.py calls gather_snippets() and summarize() separately (not
+    build_shpeel()) so it can persist the raw snippets alongside the summary
+    -- news_probe.py's faithfulness grader needs the exact source text, not a
+    fresh re-fetch of news that's since moved on."""
+    content, err = world_news.summarize("some pre-gathered snippet text",
+                                         lambda p: ("a summary", None))
+    assert err is None
+    assert content == "a summary"
+
+
+def test_summarize_short_circuits_on_empty_snippets():
+    content, err = world_news.summarize("", lambda p: ("should not be called", None))
+    assert content is None
+    assert "no snippets" in err
+
+
 def test_build_shpeel_happy_path():
     seen_prompt = {}
 

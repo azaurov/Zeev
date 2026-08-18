@@ -76,15 +76,18 @@ def gather_snippets(tavily_fn, queries=None):
     return "\n\n".join(chunks)
 
 
-def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):
-    """Gather snippets across the curated query list, then summarize them
-    into a spoken shpeel.
+def summarize(snippets, llm_fn, n=6, words=300):
+    """Turn already-gathered snippets into a spoken shpeel.
+
+    Split out from build_shpeel() so news_digest.py can hang onto the raw
+    `snippets` it gathered (news_probe.py's faithfulness grader needs the
+    exact source text a given digest was built from, not a fresh re-fetch --
+    news changes between the digest run and any later grading run).
 
     `llm_fn` takes a prompt string and returns (content, error) -- the same
     shape every LLM call site in this project already uses. Returns
     (content, error); on any failure content is None and error explains why.
     """
-    snippets = gather_snippets(tavily_fn, queries)
     if not snippets:
         return None, "no snippets gathered (search unavailable or all queries empty)"
     prompt = SHPEEL_PROMPT.format(n=n, words=words, snippets=snippets)
@@ -92,3 +95,11 @@ def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):
     if err:
         return None, err
     return content, None
+
+
+def build_shpeel(tavily_fn, llm_fn, queries=None, n=6, words=300):
+    """Gather snippets across the curated query list, then summarize them
+    into a spoken shpeel. Returns (content, error); on any failure content is
+    None and error explains why."""
+    snippets = gather_snippets(tavily_fn, queries)
+    return summarize(snippets, llm_fn, n=n, words=words)

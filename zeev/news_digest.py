@@ -102,14 +102,17 @@ def _call_groq(prompt):
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 # qwen3.6-27b's hidden <think> reasoning spends from this
-                # SAME budget before any visible reply text -- 500 was too
-                # tight and produced an unclosed <think> with zero real
-                # content on a live run (see world_news.summarize's
-                # empty-after-stripping check, which now catches this
-                # instead of silently storing an empty digest). 1500 matches
-                # the headroom CLAUDE.md documents for other reasoning-heavy
-                # Torah/quantum call sites on this same model family.
-                "max_tokens": 1500,
+                # SAME budget before any visible reply text. 500, then 1500,
+                # both produced an unclosed <think> with zero real content on
+                # live runs (see world_news.summarize's empty-after-stripping
+                # check, which catches this instead of silently storing an
+                # empty digest) -- synthesizing across 8 regions' worth of
+                # snippets into "pick the 6 best" is evidently a much more
+                # reasoning-heavy task for this model than the single-passage
+                # Torah/quantum call sites CLAUDE.md's 1200-1600 guidance
+                # comes from. 3000 gives real headroom over the reasoning
+                # actually observed live.
+                "max_tokens": 3000,
                 "temperature": 0.7,
             },
             timeout=90,

@@ -53,8 +53,26 @@ def _cmd_pair_ble():
     return True, f"Connected to {_BLE_TARGET_NAME}."
 
 
+def _speak(text):
+    """Fire-and-forget TTS through whatever audio device is active (BT
+    headphones if connected, wired speaker otherwise) -- same daemon call
+    device mode uses. Fire-and-forget, not speak_sync, because speak_sync
+    blocks up to 180s: the watch app is waiting on this HTTP response with a
+    spinner, and a multi-minute news digest must not hold that open. Best
+    effort -- a TTS failure must not turn a working text reply into a 500.
+    """
+    if not (zeev._audio and zeev._audio.available):
+        return
+    try:
+        zeev._audio.speak(text)
+    except Exception as e:
+        print(f"[watch] speak failed: {e}", flush=True)
+
+
 def _cmd_world_news():
-    return True, zeev.get_shpeel()
+    text = zeev.get_shpeel()
+    _speak(text)
+    return True, text
 
 
 def _cmd_find_smokey():
@@ -62,6 +80,7 @@ def _cmd_find_smokey():
     if not subj:
         return False, "Smokey isn't configured as a subject (check ZEEV_SUBJECTS)."
     reply, _frames = zeev.sweep_for_subject(subj)
+    _speak(reply)
     return True, reply
 
 

@@ -106,6 +106,42 @@ def test_world_news_dispatches_get_shpeel(watch_server, zeev, monkeypatch):
     assert data == {"ok": True, "message": "Today's shpeel: quiet everywhere."}
 
 
+def test_world_news_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):
+    _ws, port = watch_server
+    monkeypatch.setattr(zeev, "get_shpeel", lambda: "The shpeel.")
+    spoken = []
+    fake_audio = type("FakeAudio", (), {
+        "available": True,
+        "speak": lambda self, text: spoken.append(text),
+    })()
+    monkeypatch.setattr(zeev, "_audio", fake_audio)
+    status, data = _post(port, "/watch", {"cmd": "world_news"})
+    assert status == 200
+    assert spoken == ["The shpeel."]
+
+
+def test_world_news_speak_failure_does_not_break_response(watch_server, zeev, monkeypatch):
+    _ws, port = watch_server
+    monkeypatch.setattr(zeev, "get_shpeel", lambda: "The shpeel.")
+    fake_audio = type("FakeAudio", (), {
+        "available": True,
+        "speak": lambda self, text: (_ for _ in ()).throw(RuntimeError("daemon gone")),
+    })()
+    monkeypatch.setattr(zeev, "_audio", fake_audio)
+    status, data = _post(port, "/watch", {"cmd": "world_news"})
+    assert status == 200
+    assert data == {"ok": True, "message": "The shpeel."}
+
+
+def test_world_news_no_speak_when_audio_unavailable(watch_server, zeev, monkeypatch):
+    _ws, port = watch_server
+    monkeypatch.setattr(zeev, "get_shpeel", lambda: "The shpeel.")
+    monkeypatch.setattr(zeev, "_audio", None)
+    status, data = _post(port, "/watch", {"cmd": "world_news"})
+    assert status == 200
+    assert data == {"ok": True, "message": "The shpeel."}
+
+
 def test_pair_ble_success(watch_server, zeev, monkeypatch):
     ws, port = watch_server
     monkeypatch.setattr(zeev, "bt_list", lambda: [])
@@ -159,6 +195,23 @@ def test_find_smokey_dispatches_sweep(watch_server, zeev, monkeypatch):
     status, data = _post(port, "/watch", {"cmd": "find_smokey"})
     assert status == 200
     assert data == {"ok": True, "message": "Smokey is on the basement cam."}
+
+
+def test_find_smokey_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):
+    subj = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
+    monkeypatch.setattr(zeev, "resolve_subject", lambda text: subj)
+    monkeypatch.setattr(zeev, "sweep_for_subject",
+                         lambda s, **kw: ("Smokey is on the basement cam.", 1))
+    spoken = []
+    fake_audio = type("FakeAudio", (), {
+        "available": True,
+        "speak": lambda self, text: spoken.append(text),
+    })()
+    monkeypatch.setattr(zeev, "_audio", fake_audio)
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "find_smokey"})
+    assert status == 200
+    assert spoken == ["Smokey is on the basement cam."]
 
 
 def test_find_smokey_unconfigured(watch_server, zeev, monkeypatch):

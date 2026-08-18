@@ -11032,7 +11032,7 @@ def _record_chunk(duration=2.0, device="plughw:wm8960soundcard,0"):
 
 
 def _record_utterance(device="plughw:wm8960soundcard,0", max_seconds=8,
-                      silence_threshold=None, silence_run=8):
+                      silence_threshold=None, silence_run=9):
     """Record until silence or max_seconds elapsed. Returns WAV bytes or None.
 
     max_seconds is a ceiling. The daemon returns as soon as the speaker stops,

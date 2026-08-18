@@ -25,7 +25,11 @@ const (
 	// silenceAfterSpeech is how much quiet ends a recording once the speaker
 	// has actually said something. Long enough to survive the pause between
 	// sentences and the cadence of Hebrew recitation / scripture reading.
-	silenceAfterSpeech = 1500 * time.Millisecond
+	// Raised from 1500ms (2026-08-18, found live): a short reply ("Thank
+	// you.") followed by a normal thinking-pause before continuing the
+	// thought got cut off mid-sentence -- 1.5s comfortably covers reading
+	// cadence but is short for conversational hesitation.
+	silenceAfterSpeech = 2200 * time.Millisecond
 
 	// noSpeechLimit gives up when NOTHING is ever said. Without it, raising
 	// maxSeconds to give real utterances room would make every false wake sit

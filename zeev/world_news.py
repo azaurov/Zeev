@@ -42,6 +42,17 @@ RAW SNIPPETS:
 _BAD_RESULT_MARKERS = ("search error", "unavailable", "no results found")
 
 
+# Each tavily_fn(query) call returns up to 5 results, each with a full page
+# excerpt -- concatenated across 8 queries that ran to ~30-40KB raw and blew
+# past Groq's request-size limit (413 Payload Too Large), while bosgame just
+# timed out trying to process the same oversized prompt (found live
+# 2026-08-18, first real cron run). Truncating each query's result blob
+# keeps the combined prompt small enough for both backends without touching
+# tavily_fn itself, since tavily_search() elsewhere is used for single-query
+# live search where the full excerpt is exactly what's wanted.
+_MAX_RESULT_CHARS = 1200
+
+
 def gather_snippets(tavily_fn, queries=None):
     """Run each query through tavily_fn(query) -> str, concatenate the ones
     that came back with real content.
@@ -57,8 +68,11 @@ def gather_snippets(tavily_fn, queries=None):
             result = tavily_fn(q)
         except Exception:
             continue
-        if result and not any(m in result.lower() for m in _BAD_RESULT_MARKERS):
-            chunks.append(f"### {q}\n{result}")
+        if not result or any(m in result.lower() for m in _BAD_RESULT_MARKERS):
+            continue
+        if len(result) > _MAX_RESULT_CHARS:
+            result = result[:_MAX_RESULT_CHARS] + "…"
+        chunks.append(f"### {q}\n{result}")
     return "\n\n".join(chunks)
 
 

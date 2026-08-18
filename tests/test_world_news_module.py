@@ -21,6 +21,23 @@ def test_gather_skips_failed_and_empty_queries():
     assert "Pacific" not in result
 
 
+def test_gather_truncates_oversized_results():
+    """Regression for the live 2026-08-18 413 -- 8 queries x 5 full-length
+    Tavily results blew past Groq's payload limit and timed out bosgame.
+    Each query's blob must be capped before concatenation."""
+    huge = "x" * 5000
+    result = world_news.gather_snippets(lambda q: huge, queries=["Region A"])
+    assert len(result) < len(huge)
+    assert result.endswith("…")
+
+
+def test_gather_does_not_truncate_short_results():
+    short = "a normal-length snippet"
+    result = world_news.gather_snippets(lambda q: short, queries=["Region A"])
+    assert short in result
+    assert not result.endswith("…")
+
+
 def test_gather_returns_empty_string_when_all_queries_fail():
     result = world_news.gather_snippets(lambda q: "Search error: nope", queries=["a", "b"])
     assert result == ""

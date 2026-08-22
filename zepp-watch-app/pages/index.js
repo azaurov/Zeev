@@ -17,6 +17,13 @@ const COMMANDS = [
   { method: "FIND_SMOKEY", label: "Find Smokey" },
 ];
 
+// Blessings is a nav button, not a direct command -- it opens a submenu of
+// its own (currently one entry) so more blessings can be added later without
+// crowding the top-level menu.
+const BLESSINGS = [
+  { method: "BLESSING_NETILAS_YADAYIM", label: "Netilas Yadayim" },
+];
+
 Page({
   state: {
     widgets: [],
@@ -31,8 +38,7 @@ Page({
     this.state.widgets = [];
   },
 
-  showMenu() {
-    this.clearWidgets();
+  showTitle(text) {
     const title = hmUI.createWidget(hmUI.widget.TEXT, {
       x: 0,
       y: px(56),
@@ -41,16 +47,25 @@ Page({
       color: TEXT_COLOR,
       text_size: px(40),
       align_h: hmUI.align.CENTER_H,
-      text: "Zeev",
+      text,
     });
     this.state.widgets.push(title);
+  },
 
+  showButtonList(buttons) {
+    // Button height/gap scale to fit the button count in the space below the
+    // title -- the original fixed 88px/20px sizing was tuned for exactly 3
+    // buttons and a 4th (Blessings) would run off the bottom of a round
+    // 466px face. Capped at 88px so 2-3 buttons don't grow oversized.
     const btnW = px(360);
-    const btnH = px(88);
-    const gap = px(20);
     const startY = px(150);
+    const bottomMargin = px(40);
+    const gap = px(20);
+    const available = DEVICE_HEIGHT - startY - bottomMargin;
+    const n = buttons.length;
+    const btnH = Math.min(px(88), (available - gap * (n - 1)) / n);
 
-    COMMANDS.forEach((cmd, i) => {
+    buttons.forEach((b, i) => {
       const btn = hmUI.createWidget(hmUI.widget.BUTTON, {
         x: (DEVICE_WIDTH - btnW) / 2,
         y: startY + i * (btnH + gap),
@@ -61,14 +76,39 @@ Page({
         normal_color: BUTTON_COLOR,
         press_color: BUTTON_PRESS_COLOR,
         color: TEXT_COLOR,
-        text: cmd.label,
-        click_func: () => this.runCommand(cmd),
+        text: b.label,
+        click_func: b.onClick,
       });
       this.state.widgets.push(btn);
     });
   },
 
-  runCommand(cmd) {
+  showMenu() {
+    this.clearWidgets();
+    this.showTitle("Zeev");
+    this.showButtonList([
+      ...COMMANDS.map((cmd) => ({
+        label: cmd.label,
+        onClick: () => this.runCommand(cmd, () => this.showMenu()),
+      })),
+      { label: "Blessings", onClick: () => this.showBlessingsMenu() },
+    ]);
+  },
+
+  showBlessingsMenu() {
+    this.clearWidgets();
+    this.showTitle("Blessings");
+    this.showButtonList([
+      ...BLESSINGS.map((cmd) => ({
+        label: cmd.label,
+        onClick: () => this.runCommand(cmd, () => this.showBlessingsMenu()),
+      })),
+      { label: "Back", onClick: () => this.showMenu() },
+    ]);
+  },
+
+  runCommand(cmd, backTo) {
+    this.backTo = backTo || (() => this.showMenu());
     this.clearWidgets();
     const status = hmUI.createWidget(hmUI.widget.TEXT, {
       x: px(40),
@@ -142,7 +182,7 @@ Page({
       press_color: BUTTON_PRESS_COLOR,
       color: TEXT_COLOR,
       text: "Back",
-      click_func: () => this.showMenu(),
+      click_func: () => (this.backTo || (() => this.showMenu()))(),
     });
     this.state.widgets.push(back);
   },

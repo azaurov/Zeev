@@ -47,6 +47,9 @@ AppSideService({
       if (jsonRpc.method === "FIND_SMOKEY") {
         return callZeev(ctx, "find_smokey");
       }
+      if (jsonRpc.method === "BLESSING_NETILAS_YADAYIM") {
+        return callZeev(ctx, "blessing_netilas_yadayim");
+      }
     });
   },
 

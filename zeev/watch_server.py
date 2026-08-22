@@ -35,6 +35,18 @@ _BLE_TARGET_NAME = "TOZO NC9"
 
 _FIND_SMOKEY_TRANSCRIPT = "find Smokey"
 
+# Blessings menu: cmd -> exact torah.db ref-lookup query. Fetched via
+# zeev.torah_search() directly rather than the conversational needs_torah()/
+# LLM path -- a blessing is short and fixed, so a deterministic DB read is
+# both faster and strictly more grounded than routing through the 70B for
+# text that never needs paraphrasing. Query string is the canonical DB
+# spelling ("Netilat", not the Ashkenazi "Netilas" a person might say), since
+# this is a hardcoded button tap, not free text -- _torah_ref_lookup's LIKE
+# probe needs the literal spelling that's actually in `ref`.
+_BLESSINGS = {
+    "netilas_yadayim": "Netilat Yadayim",
+}
+
 
 def _already_connected(mac):
     return any(m == mac and connected for m, _name, connected in zeev.bt_list())
@@ -90,11 +102,27 @@ def _cmd_find_smokey():
     return True, reply
 
 
+def _make_blessing_cmd(query):
+    def _cmd():
+        rows = zeev.torah_search(query, k=1)
+        if not rows:
+            return False, f"Couldn't find {query} in the Torah database."
+        _ref, en, _he = rows[0]
+        if not en:
+            return False, f"{query} has no English text in the Torah database."
+        _speak(en)
+        return True, en
+    return _cmd
+
+
 _COMMANDS = {
     "pair_ble": _cmd_pair_ble,
     "world_news": _cmd_world_news,
     "find_smokey": _cmd_find_smokey,
 }
+_COMMANDS.update(
+    (f"blessing_{key}", _make_blessing_cmd(query)) for key, query in _BLESSINGS.items()
+)
 
 
 def _make_handler():

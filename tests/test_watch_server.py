@@ -230,6 +230,63 @@ def test_find_smokey_unconfigured(watch_server, zeev, monkeypatch):
     assert data["ok"] is False
 
 
+def test_blessing_netilas_yadayim_dispatches_torah_search(watch_server, zeev, monkeypatch):
+    queries = []
+
+    def fake_search(query, k=3):
+        queries.append((query, k))
+        return [("Siddur Ashkenaz, Weekday, Shacharit, Preparatory Prayers, Netilat Yadayim",
+                  "Blessed are You, Adonoy our God, King of the Universe, "
+                  "Who sanctified us with His commandments and commanded us "
+                  "concerning the washing of hands.",
+                  "he text")]
+
+    monkeypatch.setattr(zeev, "torah_search", fake_search)
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
+    assert status == 200
+    assert data["ok"] is True
+    assert "washing of hands" in data["message"]
+    # Canonical DB spelling ("Netilat"), not the Ashkenazi "Netilas" a person
+    # would say -- this is a hardcoded button tap, not free text, and
+    # _torah_ref_lookup's LIKE probe needs the literal spelling in `ref`.
+    assert queries == [("Netilat Yadayim", 1)]
+
+
+def test_blessing_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: [("ref", "The blessing text.", "he")])
+    spoken = []
+    skip_espeak_flags = []
+    fake_audio = type("FakeAudio", (), {
+        "available": True,
+        "speak": lambda self, text, **kw: (spoken.append(text),
+                                            skip_espeak_flags.append(kw.get("skip_espeak"))),
+    })()
+    monkeypatch.setattr(zeev, "_audio", fake_audio)
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
+    assert status == 200
+    assert spoken == ["The blessing text."]
+    assert skip_espeak_flags == [True]
+
+
+def test_blessing_not_found_in_db(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "torah_search", lambda query, k=3: [])
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
+    assert status == 200
+    assert data["ok"] is False
+
+
+def test_blessing_empty_english_text(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "torah_search", lambda query, k=3: [("ref", "", "he")])
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
+    assert status == 200
+    assert data["ok"] is False
+
+
 def test_command_exception_returns_500(watch_server, zeev, monkeypatch):
     def _boom():
         raise RuntimeError("network is down")

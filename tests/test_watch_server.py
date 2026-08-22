@@ -481,16 +481,16 @@ def test_literal_blessing_dispatches_hardcoded_text(watch_server, zeev, monkeypa
 
 def test_ref_blessing_uses_exact_ref_not_fuzzy_search(watch_server, zeev, monkeypatch):
     # Live 2026-08-22: a fuzzy "Shema" query resolved to the wrong passage
-    # (Talmud Berakhot 2a) -- Modeh Ani/Shema must go through the exact-ref
-    # lookup, never zeev.torah_search.
+    # (Talmud Berakhot 2a) -- Modeh Ani must go through the exact-ref lookup,
+    # never zeev.torah_search.
     ws, port = watch_server
     monkeypatch.setattr(zeev, "torah_search",
                          lambda query, k=3: (_ for _ in ()).throw(AssertionError("should not be called")))
     monkeypatch.setattr(ws, "_torah_by_exact_ref",
-                         lambda ref: (ref, "Hear, Israel...", "שְׁמַע יִשְׂרָאֵל"))
-    status, data = _post(port, "/watch", {"cmd": "blessing_shema"})
+                         lambda ref: (ref, "I give thanks...", "מוֹדֶה אֲנִי"))
+    status, data = _post(port, "/watch", {"cmd": "blessing_modeh_ani"})
     assert status == 200
-    assert data == {"ok": True, "message": "Hear, Israel..."}
+    assert data == {"ok": True, "message": "I give thanks..."}
 
 
 def test_ref_blessing_not_found(watch_server, zeev, monkeypatch):
@@ -504,11 +504,25 @@ def test_ref_blessing_not_found(watch_server, zeev, monkeypatch):
 def test_torah_by_exact_ref_live_db():
     import watch_server as ws
     row = ws._torah_by_exact_ref(
-        "Siddur Ashkenaz, Weekday, Shacharit, Blessings of the Shema, Shema")
+        "Siddur Ashkenaz, Weekday, Shacharit, Preparatory Prayers, Modeh Ani")
     assert row is not None
     ref, en, he = row
-    assert "hear" in en.lower()
+    assert "thank" in en.lower()
     assert he
+
+
+def test_shema_is_hardcoded_not_db_sourced(watch_server, zeev, monkeypatch):
+    # torah.db's Shema entry has footnote commentary interleaved into the
+    # prayer text itself (found live 2026-08-22) -- Alex chose to hardcode
+    # just the core first line instead. Must not touch the DB at all.
+    ws, port = watch_server
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: (_ for _ in ()).throw(AssertionError("should not be called")))
+    monkeypatch.setattr(ws, "_torah_by_exact_ref",
+                         lambda ref: (_ for _ in ()).throw(AssertionError("should not be called")))
+    status, data = _post(port, "/watch", {"cmd": "blessing_shema"})
+    assert status == 200
+    assert data == {"ok": True, "message": "Hear, O Israel: Adonoy is our God, Adonoy is One."}
 
 
 class _SyncThread:

@@ -418,8 +418,17 @@ _BLESSINGS = [
            "בָּרוּךְ חֵי הָעוֹלָמִים"},
     {"key": "modeh_ani", "label": "Modeh Ani", "source": "ref",
      "ref": "Siddur Ashkenaz, Weekday, Shacharit, Preparatory Prayers, Modeh Ani"},
-    {"key": "shema", "label": "Shema", "source": "ref",
-     "ref": "Siddur Ashkenaz, Weekday, Shacharit, Blessings of the Shema, Shema"},
+    # Hardcoded, not DB-sourced (Alex's choice, 2026-08-22): torah.db's
+    # "Shema" entry has footnote *commentary* interleaved directly into the
+    # prayer text itself ("...Adonoy is One.1Customarily one closes his
+    # eyes...", "-Maseches Berachos 12b", "cited by Rashi"), not just stray
+    # reference digits like the other passages -- _strip_footnote_markers
+    # can't clean that, it's editorial prose mixed into the body, not a
+    # marker glued onto a word. Just the core first line/verse, not the full
+    # three paragraphs.
+    {"key": "shema", "label": "Shema", "source": "literal",
+     "en": "Hear, O Israel: Adonoy is our God, Adonoy is One.",
+     "he": "שְׁמַע יִשְׂרָאֵל יְהֹוָה אֱלֹהֵינוּ יְהֹוָה אֶחָד"},
 ]
 
 

@@ -89,6 +89,8 @@ Use `/model` in the terminal or the model selector in the web UI to lock to a sp
 
 **Rate-limit resilience**: if 70B or R1 hits a Groq 429 (TPM burst or daily TPD limit), Zeev automatically retries with 8B instead of surfacing an error. Cooldowns are tracked per-model so a 70B limit never blocks 8B. If Groq itself is rate-limited (any model, including 8B), Zeev falls back to [OpenRouter](https://openrouter.ai)'s free tier for that reply when `OPENROUTER_API_KEY` is set. In device mode, the Whisplay display shows a specific message ("Rate limited", "No network") and errors are logged to `data/zeev_errors.log`.
 
+**Refusal resilience**: real-world-topic questions ("use Talmudic knowledge to form an opinion about [a named court case]") are first grounded in live web search results so the model has real facts to reason from instead of declining outright; if it still refuses, device mode detects the canned refusal and retries once through a second local LLM (qwen2.5 on a home LAN box) before giving up.
+
 ## TTS
 
 | Language | Set via | Terminal | Web UI | Device mode |

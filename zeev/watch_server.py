@@ -40,18 +40,6 @@ _BLE_TARGET_NAME = "TOZO NC9"
 
 _FIND_SMOKEY_TRANSCRIPT = "find Smokey"
 
-# Blessings menu: cmd -> exact torah.db ref-lookup query. Fetched via
-# zeev.torah_search() directly rather than the conversational needs_torah()/
-# LLM path -- a blessing is short and fixed, so a deterministic DB read is
-# both faster and strictly more grounded than routing through the 70B for
-# text that never needs paraphrasing. Query string is the canonical DB
-# spelling ("Netilat", not the Ashkenazi "Netilas" a person might say), since
-# this is a hardcoded button tap, not free text -- _torah_ref_lookup's LIKE
-# probe needs the literal spelling that's actually in `ref`.
-_BLESSINGS = {
-    "netilas_yadayim": "Netilat Yadayim",
-}
-
 # import_sefaria.py strips the <i class="footnote">...</i> body but leaves the
 # bare superscript reference digit stuck to the preceding word ("Blessed1
 # are You... Adonoy2 our God") -- invisible when the LLM paraphrases this text
@@ -302,7 +290,25 @@ def _cmd_find_smokey():
     return True, reply
 
 
+def _speak_blessing_and_return(en, he):
+    """Shared by both DB-sourced and hardcoded-literal blessings: speaks
+    Hebrew (slowed, Tetragrammaton fixed) if available, else falls back to
+    the English via the Go daemon; always returns the English text for the
+    watch screen (Zepp OS's bitmap fonts aren't guaranteed to render Hebrew
+    glyphs)."""
+    en = _strip_footnote_markers(en)
+    if he:
+        tetra_fixed = _substitute_tetragrammaton(_strip_footnote_markers(he))
+        _speak_hebrew(tetra_fixed, _strip_niqud(tetra_fixed))
+    else:
+        _speak(en)
+    return True, en
+
+
 def _make_blessing_cmd(query):
+    """DB-sourced blessing: query is the canonical torah.db `ref` spelling
+    (not necessarily how a person would say it -- _torah_ref_lookup's LIKE
+    probe needs the literal spelling that's actually in `ref`)."""
     def _cmd():
         rows = zeev.torah_search(query, k=1)
         if not rows:
@@ -310,18 +316,119 @@ def _make_blessing_cmd(query):
         _ref, en, he = rows[0]
         if not en:
             return False, f"{query} has no English text in the Torah database."
-        text = _strip_footnote_markers(en)
-        # Spoken in Hebrew, slowed -- Alex wants to hear the actual
-        # pronunciation, not a fast English reading. Watch screen still shows
-        # the English text: Zepp OS's bitmap fonts aren't guaranteed to
-        # render Hebrew glyphs, and the English is what's actually readable.
-        if he:
-            tetra_fixed = _substitute_tetragrammaton(_strip_footnote_markers(he))
-            _speak_hebrew(tetra_fixed, _strip_niqud(tetra_fixed))
-        else:
-            _speak(text)
-        return True, text
+        return _speak_blessing_and_return(en, he)
     return _cmd
+
+
+def _torah_by_exact_ref(ref):
+    """Exact ref lookup, bypassing torah_search()'s fuzzy bigram/FTS
+    matching -- needed where that fuzzy matching can't reliably disambiguate.
+    Found live 2026-08-22: a bare "Shema" query resolved to Talmud Berakhot
+    2a (the Gemara's opening sugya about *when* to recite it) instead of the
+    actual prayer text -- "shema" is too short for _torah_ref_lookup's
+    bigram/single-word tiers (bigrams need 2 words; singles need len>=7), so
+    it fell through to FTS body-text search, which naturally favors whatever
+    passage mentions the word "shema" most, not the passage that most is
+    named it. Safe here specifically because these are fixed watch-button
+    lookups against a ref already confirmed to exist (see git history for
+    this file), not free user text a fuzzy matcher needs to handle."""
+    if not zeev.TORAH_DB.exists():
+        return None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{zeev.TORAH_DB}?mode=ro", uri=True)
+        row = con.execute(
+            "SELECT ref, en, he FROM passages WHERE ref = ?", (ref,)
+        ).fetchone()
+        con.close()
+        return row
+    except Exception as e:
+        print(f"[watch] exact ref lookup failed: {e}", flush=True)
+        return None
+
+
+def _make_ref_blessing_cmd(ref):
+    def _cmd():
+        row = _torah_by_exact_ref(ref)
+        if not row:
+            return False, f"Couldn't find {ref!r} in the Torah database."
+        _ref, en, he = row
+        if not en:
+            return False, f"{ref!r} has no English text in the Torah database."
+        return _speak_blessing_and_return(en, he)
+    return _cmd
+
+
+def _make_literal_blessing_cmd(en, he):
+    """Hardcoded blessing: for the six primary before-eating blessings plus
+    Borei Nefashot ("Brich"), which torah.db either doesn't have as clean
+    passages at all, or only has buried in long Talmudic sugya discussion,
+    or (Borei Nefashot itself) has with no English translation at all in the
+    imported source. These are extremely short, universally fixed one-line
+    formulas -- identical in every printed Ashkenazi siddur -- so hardcoding
+    carries none of the fabrication risk a longer or more variable passage
+    would (see docs/torah-rag.md on why this project otherwise insists on
+    DB-grounding)."""
+    def _cmd():
+        return _speak_blessing_and_return(en, he)
+    return _cmd
+
+
+# Order matches the physical blessing card Alex photographed (2026-08-22):
+# Al Netilas, Hamotzi, Mezonos, Hagofen, Hoaytz, Hoadomo, Shehakol, Brich,
+# Modeh Ani, Shema. "source" picks which _make_*_cmd factory builds the
+# command; db entries name the torah.db query, literal entries carry their
+# own en/he text directly. "Brich" uses Borei Nefashot (Alex's choice) --
+# the short one-liner said after most everyday foods, not the longer
+# multi-variant Al Hamichyah (specific to the 5 grains/wine/7 species).
+_BLESSINGS = [
+    {"key": "netilas_yadayim", "label": "Netilas Yadayim", "source": "db",
+     "query": "Netilat Yadayim"},
+    {"key": "hamotzi", "label": "Hamotzi", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who brings forth bread from the earth.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם הַמּוֹצִיא לֶחֶם מִן הָאָרֶץ"},
+    {"key": "mezonos", "label": "Mezonos", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who creates various kinds of nourishment.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם בּוֹרֵא מִינֵי מְזוֹנוֹת"},
+    {"key": "hagofen", "label": "Hagofen", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who creates the fruit of the vine.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם בּוֹרֵא פְּרִי הַגָּפֶן"},
+    {"key": "hoaytz", "label": "Hoaytz", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who creates the fruit of the tree.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם בּוֹרֵא פְּרִי הָעֵץ"},
+    {"key": "hoadomo", "label": "Hoadomo", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who creates the fruit of the ground.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם בּוֹרֵא פְּרִי הָאֲדָמָה"},
+    {"key": "shehakol", "label": "Shehakol", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "by Whose word all things came to be.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם שֶׁהַכֹּל נִהְיֶה בִּדְבָרוֹ"},
+    {"key": "brich", "label": "Brich", "source": "literal",
+     "en": "Blessed are You, Adonoy our God, King of the Universe, "
+           "Who creates many living things and their needs, for all the "
+           "things You have created to sustain every living being. "
+           "Blessed is the Life of all worlds.",
+     "he": "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵינוּ מֶלֶךְ הָעוֹלָם בּוֹרֵא נְפָשׁוֹת רַבּוֹת "
+           "וְחֶסְרוֹנָן עַל כָּל מַה שֶׁבָּרָאתָ לְהַחֲיוֹת בָּהֶם נֶפֶשׁ כָּל חָי "
+           "בָּרוּךְ חֵי הָעוֹלָמִים"},
+    {"key": "modeh_ani", "label": "Modeh Ani", "source": "ref",
+     "ref": "Siddur Ashkenaz, Weekday, Shacharit, Preparatory Prayers, Modeh Ani"},
+    {"key": "shema", "label": "Shema", "source": "ref",
+     "ref": "Siddur Ashkenaz, Weekday, Shacharit, Blessings of the Shema, Shema"},
+]
+
+
+def _blessing_cmd(entry):
+    if entry["source"] == "db":
+        return _make_blessing_cmd(entry["query"])
+    if entry["source"] == "ref":
+        return _make_ref_blessing_cmd(entry["ref"])
+    return _make_literal_blessing_cmd(entry["en"], entry["he"])
 
 
 _COMMANDS = {
@@ -330,7 +437,7 @@ _COMMANDS = {
     "find_smokey": _cmd_find_smokey,
 }
 _COMMANDS.update(
-    (f"blessing_{key}", _make_blessing_cmd(query)) for key, query in _BLESSINGS.items()
+    (f"blessing_{entry['key']}", _blessing_cmd(entry)) for entry in _BLESSINGS
 )
 
 

@@ -47,8 +47,11 @@ AppSideService({
       if (jsonRpc.method === "FIND_SMOKEY") {
         return callZeev(ctx, "find_smokey");
       }
-      if (jsonRpc.method === "BLESSING_NETILAS_YADAYIM") {
-        return callZeev(ctx, "blessing_netilas_yadayim");
+      // Every blessing method is BLESSING_<KEY> on the watch side and
+      // blessing_<key> on the server -- one generic mapping instead of a
+      // growing pile of near-identical if-blocks per blessing.
+      if (jsonRpc.method && jsonRpc.method.startsWith("BLESSING_")) {
+        return callZeev(ctx, jsonRpc.method.toLowerCase());
       }
     });
   },

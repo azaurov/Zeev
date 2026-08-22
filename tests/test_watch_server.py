@@ -450,6 +450,67 @@ def test_blessing_empty_english_text(watch_server, zeev, monkeypatch):
     assert data["ok"] is False
 
 
+def test_all_ten_blessing_buttons_registered(watch_server):
+    ws, _port = watch_server
+    expected_keys = {
+        "netilas_yadayim", "hamotzi", "mezonos", "hagofen", "hoaytz",
+        "hoadomo", "shehakol", "brich", "modeh_ani", "shema",
+    }
+    assert {e["key"] for e in ws._BLESSINGS} == expected_keys
+    for key in expected_keys:
+        assert f"blessing_{key}" in ws._COMMANDS
+
+
+def test_literal_blessing_dispatches_hardcoded_text(watch_server, zeev, monkeypatch):
+    # Hamotzi has no clean torah.db entry (found live 2026-08-22) -- it must
+    # NOT touch zeev.torah_search at all, only speak/return the hardcoded
+    # text.
+    ws, port = watch_server
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: (_ for _ in ()).throw(AssertionError("should not be called")))
+    calls = []
+    monkeypatch.setattr(ws, "_speak_hebrew", lambda niqud, no_niqud, **kw: calls.append((niqud, no_niqud)))
+    status, data = _post(port, "/watch", {"cmd": "blessing_hamotzi"})
+    assert status == 200
+    assert data["ok"] is True
+    assert "bread from the earth" in data["message"]
+    assert len(calls) == 1
+    assert "אֲדֹנָי" in calls[0][0]  # Tetragrammaton already substituted
+    assert "יְהֹוָה" not in calls[0][0]
+
+
+def test_ref_blessing_uses_exact_ref_not_fuzzy_search(watch_server, zeev, monkeypatch):
+    # Live 2026-08-22: a fuzzy "Shema" query resolved to the wrong passage
+    # (Talmud Berakhot 2a) -- Modeh Ani/Shema must go through the exact-ref
+    # lookup, never zeev.torah_search.
+    ws, port = watch_server
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: (_ for _ in ()).throw(AssertionError("should not be called")))
+    monkeypatch.setattr(ws, "_torah_by_exact_ref",
+                         lambda ref: (ref, "Hear, Israel...", "שְׁמַע יִשְׂרָאֵל"))
+    status, data = _post(port, "/watch", {"cmd": "blessing_shema"})
+    assert status == 200
+    assert data == {"ok": True, "message": "Hear, Israel..."}
+
+
+def test_ref_blessing_not_found(watch_server, zeev, monkeypatch):
+    ws, port = watch_server
+    monkeypatch.setattr(ws, "_torah_by_exact_ref", lambda ref: None)
+    status, data = _post(port, "/watch", {"cmd": "blessing_modeh_ani"})
+    assert status == 200
+    assert data["ok"] is False
+
+
+def test_torah_by_exact_ref_live_db():
+    import watch_server as ws
+    row = ws._torah_by_exact_ref(
+        "Siddur Ashkenaz, Weekday, Shacharit, Blessings of the Shema, Shema")
+    assert row is not None
+    ref, en, he = row
+    assert "hear" in en.lower()
+    assert he
+
+
 class _SyncThread:
     """threading.Thread stand-in that runs its target immediately and
     synchronously, so a test can assert on _speak_hebrew_slow's subprocess

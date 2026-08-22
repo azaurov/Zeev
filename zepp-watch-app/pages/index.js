@@ -18,10 +18,20 @@ const COMMANDS = [
 ];
 
 // Blessings is a nav button, not a direct command -- it opens a submenu of
-// its own (currently one entry) so more blessings can be added later without
-// crowding the top-level menu.
+// its own so more blessings can be added later without crowding the
+// top-level menu. Order matches the physical blessing card Alex
+// photographed (2026-08-22).
 const BLESSINGS = [
   { method: "BLESSING_NETILAS_YADAYIM", label: "Netilas Yadayim" },
+  { method: "BLESSING_HAMOTZI", label: "Hamotzi" },
+  { method: "BLESSING_MEZONOS", label: "Mezonos" },
+  { method: "BLESSING_HAGOFEN", label: "Hagofen" },
+  { method: "BLESSING_HOAYTZ", label: "Hoaytz" },
+  { method: "BLESSING_HOADOMO", label: "Hoadomo" },
+  { method: "BLESSING_SHEHAKOL", label: "Shehakol" },
+  { method: "BLESSING_BRICH", label: "Brich" },
+  { method: "BLESSING_MODEH_ANI", label: "Modeh Ani" },
+  { method: "BLESSING_SHEMA", label: "Shema" },
 ];
 
 Page({
@@ -54,16 +64,22 @@ Page({
 
   showButtonList(buttons) {
     // Button height/gap scale to fit the button count in the space below the
-    // title -- the original fixed 88px/20px sizing was tuned for exactly 3
-    // buttons and a 4th (Blessings) would run off the bottom of a round
-    // 466px face. Capped at 88px so 2-3 buttons don't grow oversized.
+    // title, up to 3-4 buttons -- the original fixed 88px/20px sizing was
+    // tuned for exactly 3 buttons and a 4th (Blessings) would run off the
+    // bottom of a round 466px face. Capped at 88px so 2-3 buttons don't grow
+    // oversized. Below that, a MIN_BTN_H floor takes over instead of
+    // continuing to shrink -- the Blessings submenu has 10 entries, and
+    // squeezing all of them into one screen would make every button a few
+    // px tall and unusable. The watch supports swipe-scroll (confirmed by
+    // Alex), so content is allowed to run past the visible screen instead.
     const btnW = px(360);
     const startY = px(150);
     const bottomMargin = px(40);
     const gap = px(20);
+    const minBtnH = px(72);
     const available = DEVICE_HEIGHT - startY - bottomMargin;
     const n = buttons.length;
-    const btnH = Math.min(px(88), (available - gap * (n - 1)) / n);
+    const btnH = Math.min(px(88), Math.max(minBtnH, (available - gap * (n - 1)) / n));
 
     buttons.forEach((b, i) => {
       const btn = hmUI.createWidget(hmUI.widget.BUTTON, {

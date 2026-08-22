@@ -342,6 +342,7 @@ def test_gates_never_raise_on_junk(zeev, junk):
     "teach me Ma Tovu",
     "asher yatzar",
     "what is tachanun",
+    "Al Netilas Yadayim",
     # NOT grounded: the imported Siddur is weekday-only, so Shabbat, festival
     # and life-cycle liturgy is absent. Matching still routes to 70B instead of
     # letting the 8B answer cold, which is the point.

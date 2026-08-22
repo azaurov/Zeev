@@ -5691,7 +5691,7 @@ _TORAH_RE = re.compile(
     #
     # GROUNDED -- these retrieve from data/torah.db (Siddur Ashkenaz, weekday):
     r"asher.yatzar|elokai.neshama|elohai.neshama|ma.tovu|matovu|"
-    r"netilat.yadayim|barukh.she.amar|baruch.she.amar|yishtabach|"
+    r"netila[st].yadayim|al.netila[st].yadayim|barukh.she.amar|baruch.she.amar|yishtabach|"
     r"pesukei.dezimra|pesukei.d.zimra|az.yashir|korbanot|akedah|akeidah|"
     r"avinu.malkeinu|avinu.malken|tachanun|nishmat|"
     # NOT grounded -- the imported Siddur is WEEKDAY Ashkenaz only, so Shabbat,

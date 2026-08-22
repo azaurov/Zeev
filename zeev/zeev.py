@@ -377,7 +377,8 @@ _STOP_WORDS = frozenset([
 _SEARCH_RE = re.compile(
     r"\b(weather|forecast|news|today|tonight|tomorrow|latest|current|score|"
     r"stock|price|who won|happening|right now|recently|this week|this month|"
-    r"just announced|breaking|update|2024|2025|2026)\b",
+    r"just announced|breaking|update|2024|2025|2026|"
+    r"court case|lawsuit|trial|verdict|indictment|ruling|court ruling)\b",
     re.IGNORECASE,
 )
 
@@ -8158,8 +8159,11 @@ def _feiergente_busy():
 def _feiergente_complete(msgs, max_tokens=300, json_mode=False, model=None):
     """Non-streaming completion via Ollama on feiergente01 (qwen2.5 by
     default, Iris Xe iGPU). Testing path for background-only callers
-    (extract_memory, weekly reflection, joke_probe.py) — never for anything
-    in a live turn. Returns (text, err).
+    (extract_memory, weekly reflection, joke_probe.py) -- and, as of
+    2026-08-22, _refusal_fallback_reply()'s one narrow live-turn exception
+    (see there) -- otherwise never for anything in a live turn, per the
+    Kokoro-contention risk documented on the feiergente Kokoro section
+    above. Returns (text, err).
 
     model: overrides FEIERGENTE_MODEL for this call. joke_probe.py passes
     "dolphin3:8b" (also installed on feiergente01) -- an uncensored fine-tune
@@ -8192,6 +8196,63 @@ def _feiergente_complete(msgs, max_tokens=300, json_mode=False, model=None):
         return _strip_think_text(r.json()["choices"][0]["message"]["content"]), None
     except Exception as e:
         return None, str(e)
+
+
+# Groq's models decline outright on some real-world-topic + Talmudic-opinion
+# requests ("use Talmudic knowledge to form an opinion about [a real, named
+# court case]") -- found live 2026-08-22, GPT-OSS-20B answered "I'm sorry,
+# but I can't help with that." to a question phrased almost identically to
+# the ones this whole Torah/Talmud RAG path exists to answer. Kept short and
+# canned-refusal-shaped on purpose: this must not fire on a legitimate reply
+# that happens to start with an apology or contain "I can't" as substance.
+# [''’] rather than a plain '?: the model's own output uses a curly
+# apostrophe ("I’m sorry"), not straight ASCII -- a straight-quote-only
+# regex silently never matched a single real refusal (found live 2026-08-22,
+# same night this whole path was added).
+_REFUSAL_RE = re.compile(
+    r"\b(i['’]?m sorry,? (but )?i (can['’]?t|cannot|can not|won['’]?t|"
+    r"am not able to|am unable to)|"
+    r"i (can['’]?t|cannot|can not|won['’]?t|am not able to|am unable to)\s+"
+    r"(help|assist|provide|comment|form|offer|give|opine)|"
+    r"i (don['’]?t|do not) feel comfortable|"
+    r"as an ai( language model)?,? i)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_refusal(text):
+    """True only for a short, canned-refusal-shaped reply -- the length cap
+    keeps this from matching a long, substantive answer that merely opens
+    with an apology or a hedge."""
+    text = (text or "").strip()
+    if not text or len(text) > 220:
+        return False
+    return bool(_REFUSAL_RE.search(text))
+
+
+def _refusal_fallback_reply(user_text, system_prompt, max_tokens=350):
+    """Retry once via feiergente01's qwen2.5 when the primary model declined
+    with a canned refusal. qwen2.5 engages with ethics/legal-analysis
+    questions Groq's guardrails decline outright (verified live 2026-08-22
+    against the exact incident above -- it built a Talmudic-ethics framework
+    around the case instead of refusing). Only called after a refusal is
+    already detected, so this is the one live-turn exception noted on
+    _feiergente_complete's docstring -- rare by construction, not a new
+    steady-state load on feiergente's shared iGPU. `_feiergente_busy()`
+    (inside _feiergente_complete) still protects a concurrent Kokoro TTS
+    request if one happens to be in flight; a busy/failed/still-refusing
+    result here just falls back to the original refusal rather than raising.
+    """
+    if not FEIERGENTE_URL:
+        return None
+    msgs = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    text, err = _feiergente_complete(msgs, max_tokens=max_tokens)
+    if err or not text or _looks_like_refusal(text):
+        return None
+    return text
 
 
 def _bosgame_complete(msgs, max_tokens=300, json_mode=False):
@@ -9597,6 +9658,19 @@ def stream_reply(messages, model):
             print(delta, end="", flush=True)
     if _finish[0]:
         _log_llm_finish("terminal_chat", model, tok_limit, _finish[0], len(full))
+
+    # See _refusal_fallback_reply's docstring for the incident this covers.
+    # Already-printed text can't be un-printed cleanly here the way the
+    # Hebrew rewrite below does (that one knows its own line count in
+    # advance; this one doesn't until the whole reply has streamed), so this
+    # prints the retry as a visibly separate follow-up rather than trying to
+    # erase and redraw over the refusal.
+    if _looks_like_refusal(full):
+        fb = _refusal_fallback_reply(user_text, sys_prompt)
+        if fb:
+            print(f"\n{DIM}[declined -- retried via feiergente qwen2.5]{RESET}")
+            print(f"{CYAN}{BOLD}Zeev:{RESET} {fb}")
+            return fb
 
     has_hebrew = any('֐' <= c <= '׿' for c in full)
     if has_hebrew and shutil.which("fribidi"):
@@ -12447,7 +12521,8 @@ def handle_transcript(ctx, transcript, _depth=0):
         try:
             reply = ctx._stream_speak(resp, "groq", voice=_LAST_VOICE,
                                   on_first=_mark_first,
-                                  on_finish=lambda r: _finish.__setitem__(0, r)).strip()
+                                  on_finish=lambda r: _finish.__setitem__(0, r),
+                                  refusal_ctx=(transcript, payload_msgs[0]["content"])).strip()
             streamed = bool(reply)
             if _finish[0]:
                 _log_llm_finish("device_chat", model_id, tok_limit, _finish[0], len(reply))
@@ -13104,7 +13179,7 @@ def run_device_mode():
 
     _speak_cancel = threading.Event()
 
-    def _stream_speak(resp, provider, voice="sarina", min_chars=45, on_first=None, on_finish=None):
+    def _stream_speak(resp, provider, voice="sarina", min_chars=45, on_first=None, on_finish=None, refusal_ctx=None):
         """Speak the reply as it is generated, returning the full text.
 
         Device mode used to wait for the whole completion before saying a word,
@@ -13115,6 +13190,16 @@ def run_device_mode():
         blocks for the length of the audio, and a reply long enough to matter
         (the 1600-token Torah path) would otherwise leave the HTTP response
         unread long enough for the server to drop it.
+
+        refusal_ctx: optional (user_text, system_prompt) pair. A canned
+        refusal ("I'm sorry, but I can't help with that.") is almost always
+        under min_chars, so it never gets said mid-stream -- it lands in the
+        tail branch below with `first` still True, i.e. nothing has been
+        spoken yet. That's the one window where swapping in a
+        _refusal_fallback_reply() before the first word is spoken is
+        possible; a refusal long enough to clear min_chars would already be
+        playing and can't be un-said, so this only catches the short/common
+        shape (see the incident in _refusal_fallback_reply's docstring).
         """
         import queue as _queue
         q = _queue.Queue()
@@ -13168,6 +13253,13 @@ def run_device_mode():
         if not _speak_cancel.is_set():
             tail = buf.strip()
             if tail:
+                if first and refusal_ctx and _looks_like_refusal(tail):
+                    fb = _refusal_fallback_reply(*refusal_ctx)
+                    if fb:
+                        print(f"[llm] refusal ({tail[:60]!r}) -- using feiergente qwen2.5 instead", flush=True)
+                        collected.clear()
+                        collected.append(fb)
+                        tail = fb
                 m = re.search(r"^(.*[.!?])\s*$", tail, re.DOTALL)
                 if m:
                     _say(m.group(1))

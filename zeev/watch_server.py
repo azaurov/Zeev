@@ -108,7 +108,7 @@ def _strip_niqud(text):
 # Hebrew. atempo (not mpg123's --pitch) because atempo is a pure time-stretch
 # -- it keeps the voice's pitch natural instead of dropping it into a slowed-
 # record register, at the cost of a bit of extra ffmpeg CPU on the Pi Zero.
-_BLESSING_TEMPO = 0.65
+_BLESSING_TEMPO = 0.6
 
 
 def _current_audio_dev():

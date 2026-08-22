@@ -89,9 +89,20 @@ class AudioClient:
         instead of hanging the caller forever. Leading underscore keeps it
         out of the way of JSON payload fields like `timeout` (bt_scan uses
         that name for its own scan-duration field).
+
+        If `_available` is already False, this now retries the connection
+        instead of failing immediately. Found live 2026-08-22: once the
+        daemon restarted (a deploy, a crash, a manual restart) out from
+        under an already-running caller, `_available` latched False forever
+        -- every subsequent call short-circuited on the check below without
+        ever attempting to reconnect, so the caller went permanently silent
+        until *it* was also restarted. watch_server.py is a long-running
+        process with no other health-check path, so this was total silent
+        TTS failure with no visible symptom other than "nothing played."
         """
         if not self._available:
-            raise _Disconnected("daemon not available")
+            if not self._connect():
+                raise _Disconnected("daemon not available")
 
         kwargs["id"] = str(uuid.uuid4())
         payload = (json.dumps(kwargs) + "\n").encode()

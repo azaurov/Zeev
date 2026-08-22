@@ -65,6 +65,25 @@ def _strip_footnote_markers(text):
     return _FOOTNOTE_MARKER_RE.sub("", text)
 
 
+# The Tetragrammaton (YHVH) is never read aloud as written -- tradition
+# substitutes "Adonai" in prayer. Google's TTS has no notion of this (it's
+# not a word in its Hebrew training data) and either sounds out the raw
+# letters or garbles them, which is exactly the "didn't pronounce the
+# Adonai" Alex heard live (2026-08-22). Matched with optional niqud
+# (vowel-point combining marks, U+0591-U+05C7) between each consonant since
+# the DB text is fully vowelized and a plain "יהוה" literal would never
+# match it.
+_HEBREW_NIQUD = r"[֑-ׇ]*"
+_TETRAGRAMMATON_RE = re.compile(
+    r"י" + _HEBREW_NIQUD + r"ה" + _HEBREW_NIQUD + r"ו" + _HEBREW_NIQUD + r"ה" + _HEBREW_NIQUD
+)
+_ADONAI = "אֲדֹנָי"
+
+
+def _substitute_tetragrammaton(text):
+    return _TETRAGRAMMATON_RE.sub(_ADONAI, text)
+
+
 # Blessing audio is Hebrew at half speed (Alex explicitly wants to hear the
 # pronunciation, not a fast English paraphrase) -- the Go daemon has no
 # Hebrew path at all (Piper/Kokoro are en/ru/es only, see CLAUDE.md
@@ -196,7 +215,8 @@ def _make_blessing_cmd(query):
         # the English text: Zepp OS's bitmap fonts aren't guaranteed to
         # render Hebrew glyphs, and the English is what's actually readable.
         if he:
-            _speak_hebrew_slow(_strip_footnote_markers(he))
+            speak_text = _substitute_tetragrammaton(_strip_footnote_markers(he))
+            _speak_hebrew_slow(speak_text)
         else:
             _speak(text)
         return True, text

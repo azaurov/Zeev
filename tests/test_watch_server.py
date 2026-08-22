@@ -267,6 +267,22 @@ def test_strip_footnote_markers():
         "recited 3 times on day 40"
 
 
+def test_substitute_tetragrammaton():
+    import watch_server as ws
+    # Live 2026-08-22: Google TTS didn't pronounce the divine name at all --
+    # it's not a word in its Hebrew training data, since tradition never
+    # reads it as written. Substituting "Adonai" (how it's actually read
+    # aloud in prayer) before synthesis is both religiously correct and the
+    # actual fix.
+    text = "בָּרוּךְ אַתָּה יְהֹוָה אֱלֹהֵֽינוּ מֶֽלֶךְ הָעוֹלָם"
+    result = ws._substitute_tetragrammaton(text)
+    assert "יְהֹוָה" not in result
+    assert ws._ADONAI in result
+    # A plain, unvowelized string with no Tetragrammaton must pass through
+    # untouched.
+    assert ws._substitute_tetragrammaton("שלום עליכם") == "שלום עליכם"
+
+
 def test_blessing_speaks_hebrew_slow_when_he_text_available(watch_server, zeev, monkeypatch):
     # Alex wants to hear the actual pronunciation, not a fast English
     # reading -- Hebrew (when the DB has it) goes through the gTTS+ffmpeg

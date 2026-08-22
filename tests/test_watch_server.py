@@ -236,7 +236,7 @@ def test_blessing_netilas_yadayim_dispatches_torah_search(watch_server, zeev, mo
     def fake_search(query, k=3):
         queries.append((query, k))
         return [("Siddur Ashkenaz, Weekday, Shacharit, Preparatory Prayers, Netilat Yadayim",
-                  "Blessed are You, Adonoy our God, King of the Universe, "
+                  "Blessed1 are You, Adonoy2 our God, King of the Universe, "
                   "Who sanctified us with His commandments and commanded us "
                   "concerning the washing of hands.",
                   "he text")]
@@ -247,10 +247,24 @@ def test_blessing_netilas_yadayim_dispatches_torah_search(watch_server, zeev, mo
     assert status == 200
     assert data["ok"] is True
     assert "washing of hands" in data["message"]
+    # Sefaria footnote-reference digits ("Blessed1", "Adonoy2") must not reach
+    # the response -- they'd be spoken aloud as "one"/"two" with no LLM in
+    # between to smooth them out.
+    assert "1" not in data["message"] and "2" not in data["message"]
+    assert "Blessed are You" in data["message"]
     # Canonical DB spelling ("Netilat"), not the Ashkenazi "Netilas" a person
     # would say -- this is a hardcoded button tap, not free text, and
     # _torah_ref_lookup's LIKE probe needs the literal spelling in `ref`.
     assert queries == [("Netilat Yadayim", 1)]
+
+
+def test_strip_footnote_markers():
+    import watch_server as ws
+    assert ws._strip_footnote_markers("Blessed1 are You, Adonoy2 our God.") == \
+        "Blessed are You, Adonoy our God."
+    # Space-separated numbers (verse/chapter counts) must survive untouched.
+    assert ws._strip_footnote_markers("recited 3 times on day 40") == \
+        "recited 3 times on day 40"
 
 
 def test_blessing_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):

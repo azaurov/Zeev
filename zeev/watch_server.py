@@ -19,6 +19,7 @@ closed, not open) -- this is meant to sit behind nginx on a public hostname.
 import argparse
 import hmac
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,6 +47,19 @@ _FIND_SMOKEY_TRANSCRIPT = "find Smokey"
 _BLESSINGS = {
     "netilas_yadayim": "Netilat Yadayim",
 }
+
+# import_sefaria.py strips the <i class="footnote">...</i> body but leaves the
+# bare superscript reference digit stuck to the preceding word ("Blessed1
+# are You... Adonoy2 our God") -- invisible when the LLM paraphrases this text
+# on its way to speech, but this endpoint speaks torah_search() output
+# directly with no LLM in between, so "one"/"two" would otherwise get spoken
+# aloud. Matches only a letter immediately followed by 1-2 digits then a word
+# boundary (not space-separated numbers like verse/chapter counts).
+_FOOTNOTE_MARKER_RE = re.compile(r"(?<=[a-zA-Z])\d{1,2}\b")
+
+
+def _strip_footnote_markers(text):
+    return _FOOTNOTE_MARKER_RE.sub("", text)
 
 
 def _already_connected(mac):
@@ -110,8 +124,9 @@ def _make_blessing_cmd(query):
         _ref, en, _he = rows[0]
         if not en:
             return False, f"{query} has no English text in the Torah database."
-        _speak(en)
-        return True, en
+        text = _strip_footnote_markers(en)
+        _speak(text)
+        return True, text
     return _cmd
 
 

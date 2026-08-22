@@ -7537,13 +7537,17 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
 # cohere/north-mini-code, inclusionai/ling-3.0-tiny, poolside/laguna-s-2.1,
 # and openai/gpt-oss-20b are ALL the same reasoning-only shape -- the
 # free-tier catalog currently skews heavily toward reasoning models. Only
-# google/gemma-4-26b-a4b-it:free has been directly confirmed (via a raw
-# streaming curl, not just a non-streaming test) to stream real text in
-# `delta.content`. Left as a single-entry list rather than guessing a second
-# one; add one back only after checking its streaming response shape the
-# same way.
+# Both entries directly confirmed (via raw streaming requests against a
+# realistic system-prompt-sized payload, not just a non-streaming test) to
+# stream real answer text in `delta.content`, separate from `delta.reasoning`.
+# nvidia/nemotron-3-super-120b-a12b:free was tried and rejected 2026-08-22:
+# its `content` field is the reasoning monologue itself ("Okay, the user is
+# asking..."), same inlined-reasoning trap as qwen3.6-27b -- content_len
+# matched reasoning_len almost exactly on every trial. Add a new candidate
+# only after checking its streaming response shape the same way.
 _OPENROUTER_FREE_CANDIDATES = [
     "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
 ]
 
 

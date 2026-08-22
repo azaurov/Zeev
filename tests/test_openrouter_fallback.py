@@ -124,6 +124,10 @@ def test_candidate_list_excludes_known_reasoning_only_models(zeev):
         "cohere/north-mini-code:free",
         "inclusionai/ling-3.0-tiny:free",
         "poolside/laguna-s-2.1:free",
+        # inlines its reasoning monologue straight into `delta.content`
+        # (content_len ~= reasoning_len every trial) -- same trap as
+        # qwen3.6-27b, found live 2026-08-22.
+        "nvidia/nemotron-3-super-120b-a12b:free",
     }
     assert not (known_broken & set(zeev._OPENROUTER_FREE_CANDIDATES))
     assert len(zeev._OPENROUTER_FREE_CANDIDATES) >= 1

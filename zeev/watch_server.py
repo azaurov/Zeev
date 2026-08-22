@@ -20,7 +20,10 @@ import argparse
 import hmac
 import json
 import re
+import shutil
+import subprocess
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -60,6 +63,69 @@ _FOOTNOTE_MARKER_RE = re.compile(r"(?<=[a-zA-Z])\d{1,2}\b")
 
 def _strip_footnote_markers(text):
     return _FOOTNOTE_MARKER_RE.sub("", text)
+
+
+# Blessing audio is Hebrew at half speed (Alex explicitly wants to hear the
+# pronunciation, not a fast English paraphrase) -- the Go daemon has no
+# Hebrew path at all (Piper/Kokoro are en/ru/es only, see CLAUDE.md
+# Multilingual TTS), so this goes through gTTS + ffmpeg + mpg123 directly in
+# this process, the same tools zeev.py's own speak_terminal() uses for
+# Hebrew. atempo (not mpg123's --pitch) because atempo is a pure time-stretch
+# -- it keeps the voice's pitch natural instead of dropping it into a slowed-
+# record register, at the cost of a bit of extra ffmpeg CPU on the Pi Zero.
+_BLESSING_TEMPO = 0.5
+
+
+def _current_audio_dev():
+    """Whatever ALSA PCM the Go daemon currently has active (BT headphones if
+    connected, wired speaker otherwise) -- watch_server.py has no local BT
+    state of its own (zeev.bt_audio_dev()'s _BT_AUDIO_DEV global is only ever
+    populated by device mode's own BT init, which never runs in this
+    process), so the daemon's own live query is the only source of truth
+    here."""
+    if zeev._audio and zeev._audio.available:
+        try:
+            return zeev._audio.audio_dev() or "default"
+        except Exception:
+            pass
+    return "default"
+
+
+def _speak_hebrew_slow(text, tempo=_BLESSING_TEMPO):
+    """Fire-and-forget: gTTS chunks -> ffmpeg atempo (pitch-preserving
+    slowdown) -> mpg123. Runs in a background thread, same fire-and-forget
+    reasoning as _speak() -- the HTTP response must not wait on this.
+    Best-effort: any failure here must not turn a working text reply into a
+    500, so everything below is wrapped and only logged.
+    """
+    if not (shutil.which("mpg123") and shutil.which("ffmpeg")):
+        print("[watch] mpg123/ffmpeg not available, cannot speak Hebrew", flush=True)
+        return
+
+    def _run():
+        adev = _current_audio_dev()
+        try:
+            for chunk in zeev._gtts_chunks(text):
+                mp3 = zeev._gtts_fetch_chunk(chunk, "he")
+                if not mp3:
+                    continue
+                ffmpeg = subprocess.Popen(
+                    ["ffmpeg", "-loglevel", "error", "-i", "pipe:0",
+                     "-af", f"atempo={tempo}", "-f", "mp3", "pipe:1"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                slowed, _ = ffmpeg.communicate(input=mp3, timeout=30)
+                if not slowed:
+                    continue
+                player = subprocess.Popen(
+                    ["mpg123", "-q", "-a", adev, "-"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                player.communicate(input=slowed, timeout=60)
+        except Exception as e:
+            print(f"[watch] Hebrew speak failed: {e}", flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _already_connected(mac):
@@ -121,11 +187,18 @@ def _make_blessing_cmd(query):
         rows = zeev.torah_search(query, k=1)
         if not rows:
             return False, f"Couldn't find {query} in the Torah database."
-        _ref, en, _he = rows[0]
+        _ref, en, he = rows[0]
         if not en:
             return False, f"{query} has no English text in the Torah database."
         text = _strip_footnote_markers(en)
-        _speak(text)
+        # Spoken in Hebrew, slowed -- Alex wants to hear the actual
+        # pronunciation, not a fast English reading. Watch screen still shows
+        # the English text: Zepp OS's bitmap fonts aren't guaranteed to
+        # render Hebrew glyphs, and the English is what's actually readable.
+        if he:
+            _speak_hebrew_slow(_strip_footnote_markers(he))
+        else:
+            _speak(text)
         return True, text
     return _cmd
 

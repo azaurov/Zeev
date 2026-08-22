@@ -267,22 +267,38 @@ def test_strip_footnote_markers():
         "recited 3 times on day 40"
 
 
-def test_blessing_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):
+def test_blessing_speaks_hebrew_slow_when_he_text_available(watch_server, zeev, monkeypatch):
+    # Alex wants to hear the actual pronunciation, not a fast English
+    # reading -- Hebrew (when the DB has it) goes through the gTTS+ffmpeg
+    # slow path, not the Go daemon's English-only speak().
+    ws, port = watch_server
     monkeypatch.setattr(zeev, "torah_search",
-                         lambda query, k=3: [("ref", "The blessing text.", "he")])
-    spoken = []
-    skip_espeak_flags = []
-    fake_audio = type("FakeAudio", (), {
-        "available": True,
-        "speak": lambda self, text, **kw: (spoken.append(text),
-                                            skip_espeak_flags.append(kw.get("skip_espeak"))),
-    })()
-    monkeypatch.setattr(zeev, "_audio", fake_audio)
-    _ws, port = watch_server
+                         lambda query, k=3: [("ref", "The blessing text.", "בָּרוּךְ אַתָּה")])
+    spoken_he = []
+    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: spoken_he.append(text))
+    daemon_spoken = []
+    monkeypatch.setattr(ws, "_speak", lambda text: daemon_spoken.append(text))
     status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
     assert status == 200
-    assert spoken == ["The blessing text."]
-    assert skip_espeak_flags == [True]
+    assert spoken_he == ["בָּרוּךְ אַתָּה"]
+    assert daemon_spoken == []
+    # Watch screen still shows the English text -- Zepp OS bitmap fonts
+    # aren't guaranteed to render Hebrew glyphs.
+    assert data["message"] == "The blessing text."
+
+
+def test_blessing_falls_back_to_english_speech_when_no_he_text(watch_server, zeev, monkeypatch):
+    ws, port = watch_server
+    monkeypatch.setattr(zeev, "torah_search",
+                         lambda query, k=3: [("ref", "The blessing text.", "")])
+    spoken_he = []
+    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: spoken_he.append(text))
+    daemon_spoken = []
+    monkeypatch.setattr(ws, "_speak", lambda text: daemon_spoken.append(text))
+    status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
+    assert status == 200
+    assert spoken_he == []
+    assert daemon_spoken == ["The blessing text."]
 
 
 def test_blessing_not_found_in_db(watch_server, zeev, monkeypatch):
@@ -299,6 +315,50 @@ def test_blessing_empty_english_text(watch_server, zeev, monkeypatch):
     status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
     assert status == 200
     assert data["ok"] is False
+
+
+class _SyncThread:
+    """threading.Thread stand-in that runs its target immediately and
+    synchronously, so a test can assert on _speak_hebrew_slow's subprocess
+    calls without racing a real background thread."""
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+def test_speak_hebrew_slow_pipeline(zeev, monkeypatch):
+    import watch_server as ws
+
+    monkeypatch.setattr(ws.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(ws, "threading", type("T", (), {"Thread": _SyncThread}))
+    monkeypatch.setattr(ws, "_current_audio_dev", lambda: "bluealsa:DEV=AA:BB,PROFILE=a2dp")
+    monkeypatch.setattr(zeev, "_gtts_chunks", lambda text: ["chunk one"])
+    monkeypatch.setattr(zeev, "_gtts_fetch_chunk", lambda chunk, lang: (b"mp3bytes" if lang == "he" else None))
+
+    calls = []
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._is_ffmpeg = cmd[0] == "ffmpeg"
+
+        def communicate(self, input=None, timeout=None):
+            if self._is_ffmpeg:
+                return (b"slowed-mp3", b"")
+            return (b"", b"")
+
+    monkeypatch.setattr(ws.subprocess, "Popen", FakeProc)
+
+    ws._speak_hebrew_slow("בָּרוּךְ אַתָּה")
+
+    assert len(calls) == 2
+    ffmpeg_cmd, mpg123_cmd = calls
+    assert ffmpeg_cmd[0] == "ffmpeg"
+    assert "atempo=0.5" in ffmpeg_cmd
+    assert mpg123_cmd[0] == "mpg123"
+    assert "bluealsa:DEV=AA:BB,PROFILE=a2dp" in mpg123_cmd
 
 
 def test_command_exception_returns_500(watch_server, zeev, monkeypatch):

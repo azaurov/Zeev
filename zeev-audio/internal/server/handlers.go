@@ -586,7 +586,21 @@ func (s *Server) speakPiper(text, dev string, sync bool, voice, lang string) err
 					return audio.ErrSpeechCancelled
 				}
 				if res.err != nil {
-					return res.err
+					// A single bad chunk must not silence everything after
+					// it. Previously this returned immediately, aborting
+					// the whole APlayPipe write and truncating the reply to
+					// whatever had already played -- found live 2026-08-22:
+					// world news repeatedly cut off after the first
+					// sentence when chunk 1 got an HTTP 400 from both
+					// backends (retrying on primary already happens above
+					// in synthOne; this is the case where that retry also
+					// failed). Skip just this one sentence and keep going.
+					// The caller that hits this path has skip_espeak set,
+					// meaning it already chose "prefer partial audio over
+					// an intrusive full re-speak in a different voice" --
+					// dropping one sentence is strictly better than that.
+					log.Printf("piper: chunk %d failed (%v), skipping it", i, res.err)
+					continue
 				}
 				if err := writePCM(res.pcm, res.rate); err != nil {
 					return err

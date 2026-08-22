@@ -20,6 +20,7 @@ import argparse
 import hmac
 import json
 import re
+import requests
 import shutil
 import subprocess
 import sys
@@ -162,6 +163,91 @@ def _speak_hebrew_slow(text, tempo=_BLESSING_TEMPO):
     threading.Thread(target=_run, daemon=True).start()
 
 
+# Cartesia's sonic-3.5 has real native Hebrew prosody (sonic-2, used
+# elsewhere in this project for English phone-call TTS via zeev.cartesia_tts,
+# is English-only -- Hebrew only arrived with sonic-3). Requested live
+# 2026-08-22 after gTTS still botched vowel stress even post niqud-fix --
+# gTTS is a Google Translate hack, not a real phonetic model, and was never
+# going to get stress right. Full niqud text is passed through UNSTRIPPED
+# here (opposite of the gTTS path): a real phonetic model should use the
+# vowel points to get stress right, not choke on them the way gTTS did.
+_CARTESIA_HEBREW_MODEL = "sonic-3.5"
+
+
+def _cartesia_tts_hebrew(text):
+    """Returns WAV bytes or None (no key configured, HTTP error, network
+    failure) -- every failure mode falls back to the gTTS path, never to
+    silence."""
+    if not zeev.CARTESIA_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.cartesia.ai/tts/bytes",
+            headers={"X-API-Key": zeev.CARTESIA_API_KEY,
+                     "Cartesia-Version": "2024-06-10",
+                     "Content-Type": "application/json"},
+            json={"model_id": _CARTESIA_HEBREW_MODEL,
+                  "transcript": text[:4000],
+                  "voice": {"mode": "id", "id": zeev.CARTESIA_VOICE_ID},
+                  "language": "he",
+                  "output_format": {"container": "wav", "encoding": "pcm_s16le",
+                                     "sample_rate": 22050}},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"[watch] Cartesia Hebrew TTS HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+            return None
+        return resp.content
+    except Exception as e:
+        print(f"[watch] Cartesia Hebrew TTS error: {e}", flush=True)
+        return None
+
+
+def _speak_hebrew(text_niqud, text_no_niqud, tempo=_BLESSING_TEMPO):
+    """Fire-and-forget: try Cartesia (native Hebrew prosody) first, fall back
+    to the gTTS pipeline (_speak_hebrew_slow) on any failure -- no API key,
+    an HTTP error, a network blip, or ffmpeg/mpg123 producing nothing. Runs
+    in its own thread so a slow/failed Cartesia call can't hold up the HTTP
+    response; the gTTS fallback spawns its own thread in turn, which is
+    harmless (both are still fire-and-forget, just one thread deep).
+    """
+    def _run():
+        wav = _cartesia_tts_hebrew(text_niqud)
+        if not wav:
+            _speak_hebrew_slow(text_no_niqud, tempo=tempo)
+            return
+        if not (shutil.which("mpg123") and shutil.which("ffmpeg")):
+            print("[watch] mpg123/ffmpeg not available, cannot play Cartesia Hebrew audio", flush=True)
+            _speak_hebrew_slow(text_no_niqud, tempo=tempo)
+            return
+        adev = _current_audio_dev()
+        try:
+            # Re-encoded to mp3 (not played as the wav Cartesia returns)
+            # because mpg123, not aplay, is what's proven safe against
+            # BlueALSA's strict format matching in this project (see
+            # CLAUDE.md's BT audio resampling note) -- same reasoning the
+            # gTTS path already relies on.
+            ffmpeg = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "error", "-i", "pipe:0",
+                 "-af", f"atempo={tempo}", "-f", "mp3", "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            slowed, _ = ffmpeg.communicate(input=wav, timeout=30)
+            if not slowed:
+                _speak_hebrew_slow(text_no_niqud, tempo=tempo)
+                return
+            player = subprocess.Popen(
+                ["mpg123", "-q", "-a", adev, "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            player.communicate(input=slowed, timeout=60)
+        except Exception as e:
+            print(f"[watch] Cartesia Hebrew playback failed: {e}", flush=True)
+            _speak_hebrew_slow(text_no_niqud, tempo=tempo)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _already_connected(mac):
     return any(m == mac and connected for m, _name, connected in zeev.bt_list())
 
@@ -230,8 +316,8 @@ def _make_blessing_cmd(query):
         # the English text: Zepp OS's bitmap fonts aren't guaranteed to
         # render Hebrew glyphs, and the English is what's actually readable.
         if he:
-            speak_text = _strip_niqud(_substitute_tetragrammaton(_strip_footnote_markers(he)))
-            _speak_hebrew_slow(speak_text)
+            tetra_fixed = _substitute_tetragrammaton(_strip_footnote_markers(he))
+            _speak_hebrew(tetra_fixed, _strip_niqud(tetra_fixed))
         else:
             _speak(text)
         return True, text

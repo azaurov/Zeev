@@ -296,23 +296,25 @@ def test_strip_niqud():
     assert ws._strip_niqud("שלום עליכם") == "שלום עליכם"
 
 
-def test_blessing_speaks_hebrew_slow_when_he_text_available(watch_server, zeev, monkeypatch):
+def test_blessing_speaks_hebrew_when_he_text_available(watch_server, zeev, monkeypatch):
     # Alex wants to hear the actual pronunciation, not a fast English
-    # reading -- Hebrew (when the DB has it) goes through the gTTS+ffmpeg
-    # slow path, not the Go daemon's English-only speak().
+    # reading -- Hebrew (when the DB has it) goes through _speak_hebrew
+    # (Cartesia-first, gTTS-fallback), not the Go daemon's English-only
+    # speak().
     ws, port = watch_server
     monkeypatch.setattr(zeev, "torah_search",
                          lambda query, k=3: [("ref", "The blessing text.", "בָּרוּךְ אַתָּה")])
-    spoken_he = []
-    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: spoken_he.append(text))
+    calls = []
+    monkeypatch.setattr(ws, "_speak_hebrew",
+                         lambda niqud, no_niqud, **kw: calls.append((niqud, no_niqud)))
     daemon_spoken = []
     monkeypatch.setattr(ws, "_speak", lambda text: daemon_spoken.append(text))
     status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
     assert status == 200
-    # Niqud is stripped before synthesis (Google's Hebrew TTS mispronounces
-    # heavily vowel-pointed text -- see test_strip_niqud), so the spoken text
-    # is the unvocalized form, not the DB's raw vowelized string.
-    assert spoken_he == ["ברוך אתה"]
+    # Full niqud text goes to Cartesia (a real phonetic model should use the
+    # vowel points); the niqud-stripped text is the gTTS fallback's input
+    # (see test_strip_niqud -- gTTS mishandles heavily vowel-pointed text).
+    assert calls == [("בָּרוּךְ אַתָּה", "ברוך אתה")]
     assert daemon_spoken == []
     # Watch screen still shows the English text -- Zepp OS bitmap fonts
     # aren't guaranteed to render Hebrew glyphs.
@@ -323,14 +325,113 @@ def test_blessing_falls_back_to_english_speech_when_no_he_text(watch_server, zee
     ws, port = watch_server
     monkeypatch.setattr(zeev, "torah_search",
                          lambda query, k=3: [("ref", "The blessing text.", "")])
-    spoken_he = []
-    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: spoken_he.append(text))
+    calls = []
+    monkeypatch.setattr(ws, "_speak_hebrew", lambda niqud, no_niqud, **kw: calls.append(niqud))
     daemon_spoken = []
     monkeypatch.setattr(ws, "_speak", lambda text: daemon_spoken.append(text))
     status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
     assert status == 200
-    assert spoken_he == []
+    assert calls == []
     assert daemon_spoken == ["The blessing text."]
+
+
+def test_cartesia_tts_hebrew_no_key_returns_none(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(zeev, "CARTESIA_API_KEY", "")
+    assert ws._cartesia_tts_hebrew("שלום") is None
+
+
+def test_cartesia_tts_hebrew_sends_language_and_full_niqud_text(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(zeev, "CARTESIA_API_KEY", "test-key")
+    monkeypatch.setattr(zeev, "CARTESIA_VOICE_ID", "some-voice-id")
+
+    posted = {}
+
+    class FakeResp:
+        status_code = 200
+        content = b"RIFF...wav-bytes"
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        posted["url"] = url
+        posted["headers"] = headers
+        posted["json"] = json
+        return FakeResp()
+
+    monkeypatch.setattr(ws.requests, "post", fake_post)
+    result = ws._cartesia_tts_hebrew("בָּרוּךְ אַתָּה")
+    assert result == b"RIFF...wav-bytes"
+    assert posted["json"]["model_id"] == "sonic-3.5"
+    assert posted["json"]["language"] == "he"
+    # Full niqud text, not stripped -- a real phonetic model should use it.
+    assert posted["json"]["transcript"] == "בָּרוּךְ אַתָּה"
+    assert posted["json"]["voice"] == {"mode": "id", "id": "some-voice-id"}
+    assert posted["headers"]["X-API-Key"] == "test-key"
+
+
+def test_cartesia_tts_hebrew_non_200_returns_none(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(zeev, "CARTESIA_API_KEY", "test-key")
+
+    class FakeResp:
+        status_code = 402
+        text = "payment required"
+
+    monkeypatch.setattr(ws.requests, "post", lambda *a, **kw: FakeResp())
+    assert ws._cartesia_tts_hebrew("שלום") is None
+
+
+def test_cartesia_tts_hebrew_exception_returns_none(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(zeev, "CARTESIA_API_KEY", "test-key")
+
+    def raise_it(*a, **kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(ws.requests, "post", raise_it)
+    assert ws._cartesia_tts_hebrew("שלום") is None
+
+
+def test_speak_hebrew_uses_cartesia_when_available(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(ws, "threading", type("T", (), {"Thread": _SyncThread}))
+    monkeypatch.setattr(ws, "_cartesia_tts_hebrew", lambda text: b"wav-bytes")
+    monkeypatch.setattr(ws.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(ws, "_current_audio_dev", lambda: "default")
+
+    calls = []
+    fallback_calls = []
+    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: fallback_calls.append(text))
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._is_ffmpeg = cmd[0] == "ffmpeg"
+
+        def communicate(self, input=None, timeout=None):
+            return (b"slowed-mp3", b"") if self._is_ffmpeg else (b"", b"")
+
+    monkeypatch.setattr(ws.subprocess, "Popen", FakeProc)
+
+    ws._speak_hebrew("בָּרוּךְ אַתָּה", "ברוך אתה")
+
+    assert fallback_calls == []
+    assert len(calls) == 2
+    assert calls[0][0] == "ffmpeg"
+    assert calls[1][0] == "mpg123"
+
+
+def test_speak_hebrew_falls_back_to_gtts_when_cartesia_unavailable(zeev, monkeypatch):
+    import watch_server as ws
+    monkeypatch.setattr(ws, "threading", type("T", (), {"Thread": _SyncThread}))
+    monkeypatch.setattr(ws, "_cartesia_tts_hebrew", lambda text: None)
+
+    fallback_calls = []
+    monkeypatch.setattr(ws, "_speak_hebrew_slow", lambda text, **kw: fallback_calls.append(text))
+
+    ws._speak_hebrew("בָּרוּךְ אַתָּה", "ברוך אתה")
+
+    assert fallback_calls == ["ברוך אתה"]
 
 
 def test_blessing_not_found_in_db(watch_server, zeev, monkeypatch):

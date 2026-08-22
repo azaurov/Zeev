@@ -98,6 +98,12 @@ def _strip_niqud(text):
 # record register, at the cost of a bit of extra ffmpeg CPU on the Pi Zero.
 _BLESSING_TEMPO = 0.6
 
+# +5% louder than whatever the current playback device is already set to
+# (requested 2026-08-22). Applied via ffmpeg's volume filter, same chain as
+# the atempo slowdown, rather than touching system/device volume -- this
+# must only affect blessing playback, not every other TTS path.
+_BLESSING_VOLUME = 1.05
+
 
 def _current_audio_dev():
     """Whatever ALSA PCM the Go daemon currently has active (BT headphones if
@@ -134,7 +140,7 @@ def _speak_hebrew_slow(text, tempo=_BLESSING_TEMPO):
                     continue
                 ffmpeg = subprocess.Popen(
                     ["ffmpeg", "-loglevel", "error", "-i", "pipe:0",
-                     "-af", f"atempo={tempo}", "-f", "mp3", "pipe:1"],
+                     "-af", f"atempo={tempo},volume={_BLESSING_VOLUME}", "-f", "mp3", "pipe:1"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 slowed, _ = ffmpeg.communicate(input=mp3, timeout=30)
@@ -217,7 +223,7 @@ def _speak_hebrew(text_niqud, text_no_niqud, tempo=_BLESSING_TEMPO):
             # gTTS path already relies on.
             ffmpeg = subprocess.Popen(
                 ["ffmpeg", "-loglevel", "error", "-i", "pipe:0",
-                 "-af", f"atempo={tempo}", "-f", "mp3", "pipe:1"],
+                 "-af", f"atempo={tempo},volume={_BLESSING_VOLUME}", "-f", "mp3", "pipe:1"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
             slowed, _ = ffmpeg.communicate(input=wav, timeout=30)

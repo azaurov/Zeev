@@ -14,7 +14,7 @@ const MAX_MESSAGE_CHARS = 500;
 const COMMANDS = [
   { method: "PAIR_BLE", label: "Pair Headphones" },
   { method: "WORLD_NEWS", label: "World News" },
-  { method: "FIND_SMOKEY", label: "Find Smokey" },
+  { method: "FIND_SMOKEY", label: "Find Leo and/or Smokey" },
 ];
 
 // Blessings is a nav button, not a direct command -- it opens a submenu of
@@ -140,10 +140,11 @@ Page({
     this.state.widgets.push(status);
 
     // Default request timeout (60s) can be too short for find_smokey, which
-    // sweeps up to 3 cameras sequentially (~25-40s each on a slow vision
-    // response) -- 120s covers a worst-case sweep with margin.
+    // (2026-08-22: widened to sweep both Leo and Smokey) now sweeps up to 2
+    // subjects x 2 cameras sequentially (~25-40s each on a slow vision
+    // response) -- 180s covers a worst-case double sweep with margin.
     this.messageBuilder
-      .request({ method: cmd.method }, { timeout: 120000 })
+      .request({ method: cmd.method }, { timeout: 180000 })
       .then((data) => {
         const ok = !!(data && data.ok);
         const message = (data && data.message) || "No response.";

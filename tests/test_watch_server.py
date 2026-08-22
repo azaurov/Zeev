@@ -191,22 +191,33 @@ def test_pair_ble_connect_failure(watch_server, zeev, monkeypatch):
     assert data["ok"] is False
 
 
-def test_find_smokey_dispatches_sweep(watch_server, zeev, monkeypatch):
-    subj = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
-    monkeypatch.setattr(zeev, "resolve_subject", lambda text: subj)
-    monkeypatch.setattr(zeev, "sweep_for_subject",
-                         lambda s, **kw: ("Smokey is on the basement cam.", 1))
+def test_find_smokey_dispatches_sweep_for_both_leo_and_smokey(watch_server, zeev, monkeypatch):
+    leo = {"name": "Leo", "kind": "dog", "cams": ["basement-cam"]}
+    smokey = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {"leo": leo, "smokey": smokey})
+    swept = []
+
+    def fake_sweep(subj, **kw):
+        swept.append(subj["name"])
+        return f"{subj['name']} is on the basement cam.", 1
+
+    monkeypatch.setattr(zeev, "sweep_for_subject", fake_sweep)
     _ws, port = watch_server
     status, data = _post(port, "/watch", {"cmd": "find_smokey"})
     assert status == 200
-    assert data == {"ok": True, "message": "Smokey is on the basement cam."}
+    assert data["ok"] is True
+    # Leo swept before Smokey (order of _FIND_SUBJECT_KEYS).
+    assert swept == ["Leo", "Smokey"]
+    assert "Leo is on the basement cam." in data["message"]
+    assert "Smokey is on the basement cam." in data["message"]
 
 
 def test_find_smokey_speaks_through_audio_daemon_when_available(watch_server, zeev, monkeypatch):
-    subj = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
-    monkeypatch.setattr(zeev, "resolve_subject", lambda text: subj)
+    leo = {"name": "Leo", "kind": "dog", "cams": ["basement-cam"]}
+    smokey = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {"leo": leo, "smokey": smokey})
     monkeypatch.setattr(zeev, "sweep_for_subject",
-                         lambda s, **kw: ("Smokey is on the basement cam.", 1))
+                         lambda s, **kw: (f"{s['name']} is on the basement cam.", 1))
     spoken = []
     skip_espeak_flags = []
     fake_audio = type("FakeAudio", (), {
@@ -218,12 +229,27 @@ def test_find_smokey_speaks_through_audio_daemon_when_available(watch_server, ze
     _ws, port = watch_server
     status, data = _post(port, "/watch", {"cmd": "find_smokey"})
     assert status == 200
-    assert spoken == ["Smokey is on the basement cam."]
+    assert spoken == ["Leo is on the basement cam. Smokey is on the basement cam."]
     assert skip_espeak_flags == [True]
 
 
+def test_find_smokey_partially_configured(watch_server, zeev, monkeypatch):
+    # Leo missing from ZEEV_SUBJECTS, Smokey present -- still a successful
+    # sweep (of just Smokey), not a total failure.
+    smokey = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {"smokey": smokey})
+    monkeypatch.setattr(zeev, "sweep_for_subject",
+                         lambda s, **kw: ("Smokey is on the basement cam.", 1))
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "find_smokey"})
+    assert status == 200
+    assert data["ok"] is True
+    assert "Leo isn't configured" in data["message"]
+    assert "Smokey is on the basement cam." in data["message"]
+
+
 def test_find_smokey_unconfigured(watch_server, zeev, monkeypatch):
-    monkeypatch.setattr(zeev, "resolve_subject", lambda text: None)
+    monkeypatch.setattr(zeev, "WYZE_SUBJECTS", {})
     _ws, port = watch_server
     status, data = _post(port, "/watch", {"cmd": "find_smokey"})
     assert status == 200

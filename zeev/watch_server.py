@@ -38,7 +38,13 @@ import zeev  # noqa: E402  (import after sys.path patch)
 _BLE_TARGET_MAC = "94:4B:F8:6B:08:08"
 _BLE_TARGET_NAME = "TOZO NC9"
 
-_FIND_SMOKEY_TRANSCRIPT = "find Smokey"
+# "Find Leo and/or Smokey" (widened 2026-08-22, was Smokey-only): Leo the dog
+# and Smokey the cat, swept in sequence. Direct zeev.WYZE_SUBJECTS lookups by
+# key, not zeev.resolve_subject(text) -- this is a fixed watch-button tap,
+# not free user text the conversational trigger/tail-matching gate needs to
+# handle, so going straight at the dict is simpler and matches the exact-ref
+# lookups the blessings already use for the same reason.
+_FIND_SUBJECT_KEYS = ("leo", "smokey")
 
 # import_sefaria.py strips the <i class="footnote">...</i> body but leaves the
 # bare superscript reference digit stuck to the preceding word ("Blessed1
@@ -289,12 +295,22 @@ def _cmd_world_news():
 
 
 def _cmd_find_smokey():
-    subj = zeev.resolve_subject(_FIND_SMOKEY_TRANSCRIPT)
-    if not subj:
-        return False, "Smokey isn't configured as a subject (check ZEEV_SUBJECTS)."
-    reply, _frames = zeev.sweep_for_subject(subj)
-    _speak(reply)
-    return True, reply
+    replies = []
+    any_configured = False
+    for key in _FIND_SUBJECT_KEYS:
+        subj = zeev.WYZE_SUBJECTS.get(key)
+        if not subj:
+            replies.append(f"{key.capitalize()} isn't configured as a subject "
+                            f"(check ZEEV_SUBJECTS).")
+            continue
+        any_configured = True
+        reply, _frames = zeev.sweep_for_subject(subj)
+        replies.append(reply)
+    combined = " ".join(replies)
+    if not any_configured:
+        return False, combined
+    _speak(combined)
+    return True, combined
 
 
 def _speak_blessing_and_return(en, he):

@@ -283,6 +283,7 @@ FTS5 DB `data/torah.db` (Tanakh, Mishna, Talmud, Apocrypha, Siddur/Haggadah, Zoh
 - **`ref` is `UNINDEXED` in FTS5 — only `en` is searchable.** A passage findable by title alone (most of the siddur) needs `_torah_ref_lookup()`'s `LIKE` probe, not `MATCH`.
 - Every Torah/parsha call site must force `MODELS["2"]` (70B) + `max_tokens >= 1200` — the 8B's 6k TPM limit cannot carry a full passage. There are 5 call sites; a missed one silently truncates.
 - `MAX_PASSAGE_CHARS = 20000` (raised from 4000) — a plain re-run of `import_sefaria.py` will NOT pick up a cap change; the `done` table must be cleared first.
+- **`_TORAH_RE`'s named-prayer alternation matches by literal spelling, not phonetically** — `netilat.yadayim` only matched the Sephardi/scholarly "t" ending, not the Ashkenazi "Netilas Yadayim" (the blessing after washing hands before bread). Widened to `netila[st].yadayim` (2026-08-22) to catch both; same fix applied to the `al.netila[st].yadayim` full-phrase form. A future named-prayer addition should check for this same Ashkenazi/Sephardi transliteration split rather than assuming one spelling covers both.
 
 ### Weekly reflection
 

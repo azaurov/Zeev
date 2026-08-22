@@ -73,15 +73,30 @@ def _strip_footnote_markers(text):
 # (vowel-point combining marks, U+0591-U+05C7) between each consonant since
 # the DB text is fully vowelized and a plain "יהוה" literal would never
 # match it.
-_HEBREW_NIQUD = r"[֑-ׇ]*"
+_NIQUD_CHARS = r"[֑-ׇ]"
 _TETRAGRAMMATON_RE = re.compile(
-    r"י" + _HEBREW_NIQUD + r"ה" + _HEBREW_NIQUD + r"ו" + _HEBREW_NIQUD + r"ה" + _HEBREW_NIQUD
+    r"י" + _NIQUD_CHARS + r"*ה" + _NIQUD_CHARS + r"*ו" + _NIQUD_CHARS + r"*ה" + _NIQUD_CHARS + r"*"
 )
 _ADONAI = "אֲדֹנָי"
 
 
 def _substitute_tetragrammaton(text):
     return _TETRAGRAMMATON_RE.sub(_ADONAI, text)
+
+
+# Google's Hebrew TTS is trained almost entirely on plain, unvocalized modern
+# Hebrew -- the heavily-pointed liturgical text in torah.db is a different
+# register it handles poorly, garbling ordinary words like "Eloheinu" (found
+# live 2026-08-22, right after fixing the Tetragrammaton). Stripping niqud
+# reduces the text to the standard printed form of the same words (verified:
+# this exact blessing's niqud-stripped text matches how a siddur prints it
+# unvocalized) -- a root-cause fix rather than patching one mispronounced
+# word at a time.
+_NIQUD_RE = re.compile(_NIQUD_CHARS + "+")
+
+
+def _strip_niqud(text):
+    return _NIQUD_RE.sub("", text)
 
 
 # Blessing audio is Hebrew at half speed (Alex explicitly wants to hear the
@@ -215,7 +230,7 @@ def _make_blessing_cmd(query):
         # the English text: Zepp OS's bitmap fonts aren't guaranteed to
         # render Hebrew glyphs, and the English is what's actually readable.
         if he:
-            speak_text = _substitute_tetragrammaton(_strip_footnote_markers(he))
+            speak_text = _strip_niqud(_substitute_tetragrammaton(_strip_footnote_markers(he)))
             _speak_hebrew_slow(speak_text)
         else:
             _speak(text)

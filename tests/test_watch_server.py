@@ -283,6 +283,19 @@ def test_substitute_tetragrammaton():
     assert ws._substitute_tetragrammaton("שלום עליכם") == "שלום עליכם"
 
 
+def test_strip_niqud():
+    import watch_server as ws
+    # Live 2026-08-22: Google's Hebrew TTS mispronounced "Eloheinu" from the
+    # DB's heavily vowel-pointed text. Stripped niqud must equal the standard
+    # unvocalized printed form of the same words.
+    text = ("בָּרוּךְ אַתָּה אֲדֹנָי אֱלֹהֵֽינוּ מֶֽלֶךְ הָעוֹלָם אֲשֶׁר קִדְּ֒שָֽׁנוּ "
+            "בְּמִצְוֹתָיו וְצִוָּנוּ עַל נְטִילַת יָדָֽיִם:")
+    assert ws._strip_niqud(text) == \
+        "ברוך אתה אדני אלהינו מלך העולם אשר קדשנו במצותיו וצונו על נטילת ידים:"
+    # No niqud present must pass through untouched.
+    assert ws._strip_niqud("שלום עליכם") == "שלום עליכם"
+
+
 def test_blessing_speaks_hebrew_slow_when_he_text_available(watch_server, zeev, monkeypatch):
     # Alex wants to hear the actual pronunciation, not a fast English
     # reading -- Hebrew (when the DB has it) goes through the gTTS+ffmpeg
@@ -296,7 +309,10 @@ def test_blessing_speaks_hebrew_slow_when_he_text_available(watch_server, zeev, 
     monkeypatch.setattr(ws, "_speak", lambda text: daemon_spoken.append(text))
     status, data = _post(port, "/watch", {"cmd": "blessing_netilas_yadayim"})
     assert status == 200
-    assert spoken_he == ["בָּרוּךְ אַתָּה"]
+    # Niqud is stripped before synthesis (Google's Hebrew TTS mispronounces
+    # heavily vowel-pointed text -- see test_strip_niqud), so the spoken text
+    # is the unvocalized form, not the DB's raw vowelized string.
+    assert spoken_he == ["ברוך אתה"]
     assert daemon_spoken == []
     # Watch screen still shows the English text -- Zepp OS bitmap fonts
     # aren't guaranteed to render Hebrew glyphs.

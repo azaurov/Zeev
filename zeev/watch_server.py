@@ -98,11 +98,12 @@ def _strip_niqud(text):
 # record register, at the cost of a bit of extra ffmpeg CPU on the Pi Zero.
 _BLESSING_TEMPO = 0.6
 
-# +5% louder than whatever the current playback device is already set to
-# (requested 2026-08-22). Applied via ffmpeg's volume filter, same chain as
-# the atempo slowdown, rather than touching system/device volume -- this
-# must only affect blessing playback, not every other TTS path.
-_BLESSING_VOLUME = 1.05
+# +15% louder than whatever the current playback device is already set to
+# (requested 2026-08-22; started at +5%, raised after "too quiet"). Applied
+# via ffmpeg's volume filter, same chain as the atempo slowdown, rather than
+# touching system/device volume -- this must only affect blessing playback,
+# not every other TTS path.
+_BLESSING_VOLUME = 1.15
 
 
 def _current_audio_dev():

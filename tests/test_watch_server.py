@@ -566,7 +566,7 @@ def test_speak_hebrew_slow_pipeline(zeev, monkeypatch):
     assert ffmpeg_cmd[0] == "ffmpeg"
     af = ffmpeg_cmd[ffmpeg_cmd.index("-af") + 1]
     assert "atempo=0.6" in af
-    assert "volume=1.05" in af
+    assert "volume=1.15" in af
     assert mpg123_cmd[0] == "mpg123"
     assert "bluealsa:DEV=AA:BB,PROFILE=a2dp" in mpg123_cmd
 

@@ -49,7 +49,8 @@ Then drive it with curl:
 curl -s -N -X POST http://127.0.0.1:5057/chat \
   -H "Content-Type: application/json" \
   -d '{"message":"Say hello in exactly three words."}'
-# -> data: {"model": "8B"}
+# -> data: {"model": "GPT-OSS-20B"}   (model label — re-verify if it drifts again,
+#                                      it's read from the live Groq model table)
 #    data: {"token": "Hello"}  data: {"token": ","}  ...  data: [DONE]
 
 # Memory facts
@@ -59,6 +60,9 @@ curl -s http://127.0.0.1:5057/memory        # {"facts": [...]}
 curl -s http://127.0.0.1:5057/volume        # {"volume": 70}
 curl -s -X POST http://127.0.0.1:5057/volume -d '{"volume":50}' \
   -H "Content-Type: application/json"
+# -> 200 {"volume": 70} -- POST is a graceful no-op off-Pi (no ALSA device to
+#    set), same "no hardware, no error" pattern as /health and /battery below.
+#    Don't expect the value to actually change in this environment.
 
 # Health / battery / thermal / notes / gps — all return graceful nulls/empty
 # off the Pi, not errors, since there's no hardware to read:
@@ -109,7 +113,9 @@ them as part of a suite.
 python3 -m pytest tests/ -q
 ```
 
-989 tests as of this writing. **This is slow — budget 5+ minutes, not the
+1118 tests as of this writing (was 989 — re-verify count with
+`python3 -m pytest tests/ -q --collect-only` rather than trusting this
+number long-term). **This is slow — budget 5+ minutes, not the
 usual pytest jog.** It imports the full `zeev.py` (heavy top-level module,
 many mocked subsystems) once per collection and exercises large gated
 logic trees (call flows, memory extraction, RAG reranking, etc.) with real
@@ -136,8 +142,11 @@ means it hung — let it run.
   only defines functions/classes and loads `.env` — no server starts, no
   hardware is touched.
 - **`/transcribe` and `/snap` need real audio/camera input** to do anything
-  useful; hit with no body they return clean 400s (`{"error": "no audio"}`)
-  rather than crashing — good enough to confirm routing without hardware.
+  useful, but they fail differently — `/transcribe` with no body returns a
+  clean `400 {"error": "no audio"}`; `/snap` with no body returns `200` with
+  an SSE stream (`data: {"error": "Camera not available"}` then
+  `data: [DONE]`), not a 400. Both are good enough to confirm routing
+  without hardware, just check status code vs. stream shape correctly.
 - **Device mode (`--device`) cannot be launched here at all** — it imports
   Whisplay HAT display/GPIO/I2C libraries at module load inside
   `run_device_mode`, which don't exist off the Pi. Don't attempt it; this
@@ -148,5 +157,5 @@ means it hung — let it run.
 | Symptom | Fix |
 |---|---|
 | `curl` to `/` returns `{"error":"Unauthorized"}` / 401 with `WWW-Authenticate: Basic` | That's a different app already on that port (confirmed: an unrelated production Flask site on 5000 on this box). Pick a different `--port` for the driver. |
-| `/chat` SSE stream returns only `data: {"model": "8B"}` and then nothing for a long time | Normal on a cold Groq/OpenRouter connection — first token can take several seconds. Give it 30-40s before assuming it's stuck (confirmed live: a 20s curl timeout cut off a stream that completed fine at 40s). |
+| `/chat` SSE stream returns only a `data: {"model": ...}` line and then nothing for a long time | Normal on a cold Groq/OpenRouter connection — first token can take several seconds. Give it 30-40s before assuming it's stuck (confirmed live: a 20s curl timeout cut off a stream that completed fine at 40s). |
 | Driver won't bind, `OSError: [Errno 98] Address already in use` | Something (maybe your own previous driver run) is still holding the port — `pkill -f 'driver.py --port <N>'` or pick a new port. |

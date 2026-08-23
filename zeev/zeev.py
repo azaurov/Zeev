@@ -648,6 +648,23 @@ _GREETING_SCHEDULE = (
     (7, 0, _GOODMORNING_LINES, "morning"),
     (23, 0, _GOODNIGHT_LINES, "night"),
 )
+
+# One-time wake-up alarm, distinct from the daily 7am _GOODMORNING_LINES above:
+# requested as a specific alarm ("put an alarm for 9am"), warmer/more affectionate
+# in tone than the standing weekday greeting, and delivered through the ordinary
+# reminders table rather than _GREETING_SCHEDULE so it fires once and is gone.
+# Same two-voice, name-Alex shape as _GOODNIGHT_LINES/_LOW_BATTERY_LINES.
+_MORNING_SERENADE_LINES = [
+    ("Good morning, Alex. Waking up is easier when someone's glad you did.",
+     "Rise and shine — the whole house is better with you in it. Good morning."),
+    ("Morning, Alex. That's the best part of my day, right here.",
+     "Good morning. Sending you all the warmth I've got to start the day."),
+    ("Good morning, Alex. I've been looking forward to this all night.",
+     "Wake up, sleepyhead — good morning, with love, from both of us."),
+]
+# A reminder whose text is exactly this sentinel triggers the duet above instead
+# of being read aloud literally -- see _announce_reminder.
+_MORNING_SERENADE_SENTINEL = "__MORNING_SERENADE__"
 # How late a delayed poll may still fire -- catches a target missed by a few
 # seconds of scheduling jitter, but never fires hours late after e.g. a
 # device restart mid-morning.
@@ -5321,7 +5338,10 @@ def _reminder_loop():
     while True:
         try:
             for rem in due_reminders():
-                msg = f"Reminder: {rem['text']}"
+                if rem["text"] == _MORNING_SERENADE_SENTINEL:
+                    msg = _MORNING_SERENADE_SENTINEL
+                else:
+                    msg = f"Reminder: {rem['text']}"
                 print(f"[reminder] {msg}", flush=True)
                 notify = _reminder_notify[0]
                 if notify:
@@ -14484,16 +14504,29 @@ def run_device_mode():
     threading.Thread(target=_keyboard_listener, daemon=True).start()
     threading.Thread(target=_evdev_listener, daemon=True).start()
     def _announce_reminder(msg):
-        """Speak a due reminder, but never on top of a live turn."""
+        """Speak a due reminder, but never on top of a live turn.
+
+        The morning-serenade sentinel is the one reminder that isn't spoken
+        literally -- it plays a two-voice duet instead, same shape as
+        _plead_for_charge below.
+        """
         for _ in range(60):          # wait up to ~2 min for the device to be free
             if _face_state in ("idle", "ready"):
                 break
             time.sleep(2)
         _screen_wake()
         was_idle = _face_state == "idle"
-        _set_face("speaking", msg)
-        board.set_rgb(*_LED_SPEAKING)
-        _speak_device(msg)
+        if msg == _MORNING_SERENADE_SENTINEL:
+            zeev_line, sarina_line = random.choice(_MORNING_SERENADE_LINES)
+            _set_face("speaking", zeev_line)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(zeev_line, "daniel")
+            _set_face("speaking", sarina_line)
+            _speak_device(sarina_line, "sarina")
+        else:
+            _set_face("speaking", msg)
+            board.set_rgb(*_LED_SPEAKING)
+            _speak_device(msg)
         _go_idle() if was_idle else _go_ready()
 
     _reminder_notify[0] = _announce_reminder

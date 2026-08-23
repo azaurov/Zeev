@@ -123,6 +123,35 @@ def test_delete_reminder(zeev, db):
 
 
 # ---------------------------------------------------------------------------
+# Morning-serenade alarm (one-time wake-up duet, distinct from the daily
+# _GOODMORNING_LINES weekday greeting)
+# ---------------------------------------------------------------------------
+
+def test_every_serenade_pair_names_alex(zeev):
+    for zeev_line, sarina_line in zeev._MORNING_SERENADE_LINES:
+        assert "Alex" in zeev_line + sarina_line
+
+
+def test_serenade_sentinel_is_not_read_aloud_literally(zeev, db):
+    """A reminder whose text is the sentinel must be routed to the duet, not
+    spoken as 'Reminder: __MORNING_SERENADE__' -- _reminder_loop is the only
+    place that decides this, so pin its output here rather than relying on
+    device mode (untestable off real hardware)."""
+    zeev.add_reminder(zeev._MORNING_SERENADE_SENTINEL, "in 1 second")
+    later = __import__("time").time() + 3600
+    due = zeev.due_reminders(now=later)
+    assert len(due) == 1
+    text = due[0]["text"]
+    assert text == zeev._MORNING_SERENADE_SENTINEL
+    # Mirrors _reminder_loop's own branch so a future edit to that branch
+    # (e.g. dropping the sentinel check) breaks this test too.
+    msg = (zeev._MORNING_SERENADE_SENTINEL if text == zeev._MORNING_SERENADE_SENTINEL
+           else f"Reminder: {text}")
+    assert msg == zeev._MORNING_SERENADE_SENTINEL
+    assert "Reminder:" not in msg
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
 

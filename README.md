@@ -2,7 +2,7 @@
 
 A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](https://groq.com) for fast cloud inference and speaks back in human-quality voices. Supports a terminal REPL, a mobile-friendly web UI, and a standalone push-to-talk device mode via the Whisplay HAT.
 
-**[Landing page →](https://claude.ai/code/artifact/685adeed-74be-4400-8375-b2710b40e64f)**
+**[Landing page →](https://sogdiana-gematria.net/zeev/)**
 
 ## Features
 

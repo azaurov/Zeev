@@ -1385,11 +1385,25 @@ def _quantum_llm(msgs, max_tokens=300, json_mode=False):
        prompts; quantum.py's own default of 400 (in _llm_circuit_spec's
        hardcoded llm_fn call) was sized for a model with no hidden
        reasoning at all and is far too low for this one.
+
+    A third quirk found live 2026-08-25 (chasing a 12-day gap in
+    quantum_daily.py's separate, non-shared _llm_fn -- same underlying bug,
+    never wired up here originally): even gpt-oss-20b's hidden reasoning
+    is drawn from the same visible max_tokens budget, and qwen3.6-27b's
+    plain (non-json) interpretation calls can burn the *entire* budget
+    still inside an unclosed <think> block on this open-ended a prompt --
+    verified live up to max_tokens=900, finish_reason "length" every time,
+    stripped to "" since no real answer was ever generated. Groq's
+    reasoning_effort fixes both at the root: qwen3.6-27b only accepts
+    "none"/"default" (not "low"), and "none" suppresses <think> entirely;
+    gpt-oss-20b's "low" mirrors the identical fix news_digest.py already
+    uses for this same reasoning-eats-budget pattern.
     """
     if json_mode:
-        return _llm_complete(msgs, MODELS["1"][0], max_tokens=max(max_tokens, 1500),
-                              json_mode=False)
-    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=False)
+        return _llm_complete(msgs, MODELS["1"][0], max_tokens=max(max_tokens, 500),
+                              json_mode=False, reasoning_effort="low")
+    return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=False,
+                          reasoning_effort="none")
 # Groq deprecated llama-3.1-8b-instant and llama-3.3-70b-versatile
 # (announced 2026-06-17, cutoff 2026-08-16); replaced per Groq's own
 # migration recommendations (console.groq.com/docs/deprecations).
@@ -8081,8 +8095,13 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
     return resp, err, "groq"
 
 
-def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
-    """Non-streaming LLM call. Returns (text, error). Used for memory extraction etc."""
+def _llm_complete(msgs, model, max_tokens=300, json_mode=False, reasoning_effort=None):
+    """Non-streaming LLM call. Returns (text, error). Used for memory extraction etc.
+
+    reasoning_effort is opt-in and only forwarded on the groq/openai/openrouter
+    branch (Groq's own param; see _quantum_llm for why this exists) -- omitted
+    entirely when None so every other caller's request body is unchanged.
+    """
     msgs = _apply_language_suffix(msgs)
     provider = LLM_SERVER
 
@@ -8125,6 +8144,8 @@ def _llm_complete(msgs, model, max_tokens=300, json_mode=False):
                 "temperature": 0.1, "max_tokens": max_tokens, "stream": False}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         try:
             r = requests.post(url, json=body,
                               headers={"Authorization": f"Bearer {key}"}, timeout=30)

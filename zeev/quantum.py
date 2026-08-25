@@ -166,7 +166,13 @@ def _llm_interpret(idea, spec, result, llm_fn, past_insights=None):
         {"role": "system", "content": "You are Zeev, a humble, calm, insightful AI companion."},
         {"role": "user", "content": prompt},
     ]
-    text, err = llm_fn(msgs, max_tokens=350)
+    # llm_fn is expected to pass reasoning_effort="none"/"low" for the
+    # model it routes to (see quantum_daily.py's _llm_fn and zeev.py's
+    # _quantum_llm) -- without that, qwen3.6-27b inlines its <think>
+    # reasoning into content and can burn the whole budget without ever
+    # reaching the answer (finish_reason "length", empty after stripping).
+    # Found live 2026-08-25 chasing a 12-day gap in quantum_insights.
+    text, err = llm_fn(msgs, max_tokens=400)
     return text or "", err
 
 

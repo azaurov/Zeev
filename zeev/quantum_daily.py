@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -39,8 +40,25 @@ if not GROQ_API_KEY:
 import requests
 from quantum import quantum_reason
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL    = "qwen/qwen3.6-27b"
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+MODEL      = "qwen/qwen3.6-27b"
+JSON_MODEL = "openai/gpt-oss-20b"
+
+# qwen3.6-27b inlines its <think>...</think> reasoning into plain-text
+# completions too, not just json_mode ones (see _llm_fn below) — without
+# this, the interpretation step would store raw chain-of-thought straight
+# into quantum_insights.interpretation. Same pattern as zeev.py's
+# _strip_think_text / world_news.py's strip_think_text.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_text(text):
+    if not text:
+        return text
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_UNCLOSED_RE.sub("", text)
+    return text.strip()
 
 # ---------------------------------------------------------------------------
 # Canonical scenarios — timeless human dilemmas that map cleanly to circuits
@@ -59,14 +77,43 @@ SCENARIOS = [
 
 
 def _llm_fn(msgs, max_tokens=400, json_mode=False):
+    # Found live 2026-08-25 chasing a 12-day gap in quantum_insights: commit
+    # 0720a50 (2026-08-14) migrated MODEL off a deprecated Groq model onto
+    # qwen3.6-27b, which inlines a <think>...</think> reasoning block into
+    # `content` instead of a separate field. That broke this call two ways:
+    #
+    # 1. json_mode circuit-mapping: Groq's response_format=json_object
+    #    validator rejects a <think>-prefixed body outright
+    #    (json_validate_failed, empty failed_generation) -- not fixable by
+    #    stripping client-side, Groq never returns usable text at all. So
+    #    json_mode routes to gpt-oss-20b instead, which keeps reasoning out
+    #    of `content`, and response_format is never set regardless of model:
+    #    with it set, gpt-oss-20b's own "phases" array comes back as one
+    #    concatenated string ("0.53.61.4") instead of separate numbers --
+    #    the identical prompt with no response_format returns a clean array.
+    #    quantum.py's _llm_circuit_spec already does its own json.loads()
+    #    on the text, so a plain completion is exactly what it needs.
+    # 2. Plain interpretation calls on qwen3.6-27b: the model reasons so
+    #    verbosely for this open-ended "interpret the pattern" prompt that
+    #    it burns the entire token budget still inside <think> and never
+    #    closes it -- verified live up to max_tokens=900, finish_reason
+    #    "length" every time, so _strip_think_text correctly reduces it to
+    #    "" (an unclosed <think> means no real answer was ever generated).
+    #
+    # reasoning_effort fixes both at the root instead of chasing budgets:
+    # qwen3.6-27b only accepts "none"/"default" (not "low"), and "none"
+    # suppresses the <think> block entirely (74 clean tokens, finish_reason
+    # stop, verified live). gpt-oss-20b's "low" mirrors the same fix
+    # news_digest.py already uses for this exact reasoning-eats-budget
+    # pattern (46-258 reasoning tokens there; 22-25 seen here).
+    model = JSON_MODEL if json_mode else MODEL
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": msgs,
         "max_tokens": max_tokens,
         "temperature": 0.7,
+        "reasoning_effort": "low" if json_mode else "none",
     }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
     try:
         r = requests.post(
             GROQ_URL,
@@ -75,7 +122,7 @@ def _llm_fn(msgs, max_tokens=400, json_mode=False):
             timeout=30,
         )
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"], None
+        return _strip_think_text(r.json()["choices"][0]["message"]["content"]), None
     except Exception as e:
         return None, str(e)
 

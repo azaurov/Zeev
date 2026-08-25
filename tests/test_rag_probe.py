@@ -113,7 +113,7 @@ def test_torah_question_prompt_has_no_ref_placeholder():
 def test_gen_torah_question_never_sends_the_ref(monkeypatch):
     captured = {}
 
-    def fake_llm_complete(msgs, model, max_tokens=300, json_mode=False):
+    def fake_llm_complete(msgs, model, max_tokens=300, json_mode=False, reasoning_effort=None):
         captured["prompt"] = msgs[0]["content"]
         return "What does this passage teach?", None
 
@@ -568,7 +568,7 @@ def test_torah_probe_rerolls_when_generated_question_gets_no_retrieval(zeev, tmp
     # Question generator produces ordinary text with none of _TORAH_RE's
     # vocabulary, so needs_torah() never fires and no retrieval happens.
     monkeypatch.setattr(zeev, "_llm_complete",
-                         lambda msgs, model, max_tokens=300, json_mode=False:
+                         lambda msgs, model, max_tokens=300, json_mode=False, reasoning_effort=None:
                              ("what happened first", None))
 
     result = rag_probe._run_torah_probe(zeev, verbose=False, max_attempts=2)
@@ -601,7 +601,7 @@ def test_torah_probe_rerolls_when_retrieval_misses_seed_passage(zeev, tmp_path, 
     # but torah_search is stubbed to return an UNRELATED ref -- simulating a
     # retrieval miss on the seed passage (Genesis 1).
     monkeypatch.setattr(zeev, "_llm_complete",
-                         lambda msgs, model, max_tokens=300, json_mode=False:
+                         lambda msgs, model, max_tokens=300, json_mode=False, reasoning_effort=None:
                              ("What does the Torah say about this passage?", None))
     monkeypatch.setattr(zeev, "torah_search",
                          lambda query, k=3: [("Exodus 3", "And Moses said unto God, Who am I.", "")])

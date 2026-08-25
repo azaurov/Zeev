@@ -102,7 +102,15 @@ def _gen_torah_question(zeev_mod, en_text):
     what it was never told."""
     excerpt = (en_text or "")[:2000]
     msgs = [{"role": "user", "content": _TORAH_QUESTION_PROMPT.format(excerpt=excerpt)}]
-    text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["1"][0], max_tokens=80)
+    # gpt-oss-20b's hidden reasoning is drawn from the same max_tokens budget
+    # as visible content even without response_format (see zeev.py's
+    # _quantum_llm docstring) -- at 80 tokens it burned the whole budget on
+    # reasoning and returned empty text with no error, so every torah probe
+    # silently stopped being generated at all starting 2026-08-13 (found
+    # live 2026-08-25 chasing a stalled rag_probe grounded rate).
+    # reasoning_effort="low" fixes it the same way it did for quantum.py.
+    text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["1"][0], max_tokens=150,
+                                        reasoning_effort="low")
     if err or not text:
         return None, err
     return text.strip().strip('"'), None
@@ -372,7 +380,14 @@ def parse_grade(raw):
 
 def _grade(zeev_mod, context, answer):
     msgs = [{"role": "user", "content": _GRADE_PROMPT.format(context=context, answer=answer)}]
-    text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["2"][0], max_tokens=150)
+    # qwen3.6-27b (MODELS["2"]) inlines <think> reasoning into content; at
+    # 150 tokens with no reasoning_effort it burned the whole budget on
+    # reasoning and never reached a GROUNDED/UNGROUNDED verdict, so every
+    # history probe since 2026-08-13 graded as UNSURE (None) rather than a
+    # real verdict -- same root cause as the quantum_daily.py cron bug,
+    # found live 2026-08-25 while investigating the 30-day grounded rate.
+    text, err = zeev_mod._llm_complete(msgs, zeev_mod.MODELS["2"][0], max_tokens=200,
+                                        reasoning_effort="none")
     if err or not text:
         return None, f"grader call failed: {err}"
     return parse_grade(text)

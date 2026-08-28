@@ -294,6 +294,23 @@ def _cmd_world_news():
     return True, text
 
 
+def _cmd_find_subject(name, speak=True):
+    """Sweep for any single configured subject by key/alias -- the general
+    form _cmd_find_smokey's fixed leo+smokey pair is built on. `speak=False`
+    is for callers with their own display surface (the web chat's /chat
+    handler): the whole point there is a silent text answer, not announcing
+    the lookup through the Pi's physical speaker on every remote chat turn.
+    """
+    key = (name or "").strip().lower()
+    subj = zeev.WYZE_SUBJECTS.get(key)
+    if not subj:
+        return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS)."
+    reply, _frames = zeev.sweep_for_subject(subj)
+    if speak:
+        _speak(reply)
+    return True, reply
+
+
 def _cmd_find_smokey():
     replies = []
     any_configured = False
@@ -507,6 +524,20 @@ def _make_handler():
                 self._json(400, {"ok": False, "error": "malformed JSON body"})
                 return
             cmd = data.get("cmd")
+            # find_subject takes a request-body param (which subject), unlike
+            # every other command here -- handled separately from the plain
+            # zero-arg _COMMANDS dispatch below rather than widening every
+            # command's signature for the one that needs an argument.
+            if cmd == "find_subject":
+                try:
+                    ok, message = _cmd_find_subject(
+                        data.get("name"), speak=bool(data.get("speak", True)))
+                except Exception as e:
+                    print(f"[watch] find_subject failed: {e}", flush=True)
+                    self._json(500, {"ok": False, "error": str(e)})
+                    return
+                self._json(200, {"ok": ok, "message": message})
+                return
             fn = _COMMANDS.get(cmd)
             if not fn:
                 self._json(400, {"ok": False, "error": f"unknown cmd {cmd!r}"})

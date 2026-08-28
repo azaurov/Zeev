@@ -78,6 +78,13 @@ FEIERGENTE_URL     = os.environ.get("FEIERGENTE_URL",     "")   # e.g. http://10
 FEIERGENTE_MODEL   = os.environ.get("FEIERGENTE_MODEL",   "qwen2.5:7b-instruct-q4_K_M")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 ZEEV_WATCH_KEY     = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
+# Same host the nginx /watch location already proxies to for the Zepp watch
+# app -- reachable over Tailscale from any box on the tailnet, not just the
+# home LAN. Lets a Zeev instance running off-Pi (e.g. serve_web.py on the
+# public web server, which has no route to the Wyze cameras itself) relay a
+# subject check through the Pi's watch_server.py instead of duplicating the
+# camera-sweep code somewhere that can't actually reach the cameras.
+ZEEV_WATCH_URL     = os.environ.get("ZEEV_WATCH_URL",     "http://ragnarok.tail9c2c7c.ts.net:5050/watch")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 
@@ -11147,6 +11154,41 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 sse({"token": get_shpeel()})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
+                return
+
+            # ── Named subject on the house cameras ("check on Smokey") ─────
+            # This instance (serve_web.py, off the Pi) has no route to the
+            # Wyze cameras itself -- relay through the Pi's already-running
+            # watch_server.py, which runs the exact same sweep_for_subject()
+            # device mode uses. speak=False: a web-chat turn answering in
+            # text shouldn't also make the Pi announce itself out loud.
+            _subj = resolve_subject(user_msg) if WYZE_SUBJECTS else None
+            if _subj and ZEEV_WATCH_KEY:
+                sse({"info": f"[checking the cameras for {_subj['name']}...]"})
+                try:
+                    watch_resp = requests.post(
+                        ZEEV_WATCH_URL,
+                        json={"cmd": "find_subject", "name": _subj["name"], "speak": False},
+                        headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
+                        timeout=45,
+                    )
+                    reply = (watch_resp.json().get("message")
+                             if watch_resp.status_code == 200 else None)
+                except Exception as e:
+                    print(f"[watch-relay] {e}", flush=True)
+                    reply = None
+                if not reply:
+                    reply = f"I couldn't reach the cameras to check on {_subj['name']} right now."
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
                 return
 
             with lock:

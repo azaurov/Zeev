@@ -11274,6 +11274,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # device mode uses. speak=False: a web-chat turn answering in
             # text shouldn't also make the Pi announce itself out loud.
             _subj = resolve_subject(user_msg) if WYZE_SUBJECTS else None
+            # resolve_subject() requires a check/find/where's-style trigger
+            # word; "show me a picture of Smokey" has none, just photo
+            # wording plus the name in one phrase -- found live testing this
+            # exact feature, the trigger-less phrasing fell all the way
+            # through to plain chat instead of firing the relay below.
+            if not _subj and WYZE_SUBJECTS and _WYZE_PHOTO_RE.search(user_msg):
+                for _key, _info in WYZE_SUBJECTS.items():
+                    if re.search(rf"\b{re.escape(_key)}\b", user_msg, re.IGNORECASE):
+                        _subj = _info
+                        break
             if _subj and ZEEV_WATCH_KEY:
                 _want_photo = bool(_WYZE_PHOTO_RE.search(user_msg))
                 sse({"info": f"[checking the cameras for {_subj['name']}...]"})

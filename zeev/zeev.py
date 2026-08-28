@@ -9725,7 +9725,9 @@ def wyze_snapshot(stream: str, timeout: float | None = None):
             print(f"[wyze] {stream} grab failed: {_scrub_rtsp(r.stderr)[:200]}", flush=True)
             return None
         with open(out, "rb") as fh:
-            return base64.b64encode(fh.read()).decode()
+            data = fh.read()
+        print(f"[wyze] {stream} snapshot ok ({len(data)} bytes)", flush=True)
+        return base64.b64encode(data).decode()
     except subprocess.TimeoutExpired:
         # Battery cameras sleep and the bridge starts streams on demand, so a
         # timeout is an ordinary outcome here, not an exception worth a trace.

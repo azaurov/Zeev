@@ -7526,11 +7526,17 @@ def _gcal_reminder_loop():
 # Groq streaming
 # ---------------------------------------------------------------------------
 
-def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
+def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None, reasoning_effort=None):
     """POST to Groq (OpenAI-compatible). Returns (response, error_str).
 
     `tools` sends an OpenAI-style tool schema; callers using it must pass
     stream=False, since tool calls only arrive complete.
+
+    `reasoning_effort`: see _quantum_llm's docstring -- qwen3.6-27b (MODELS["2"])
+    inlines hidden reasoning into `content` and can burn the entire max_tokens
+    budget on an unclosed <think> block, yielding an empty reply after
+    stripping. Passing "none" suppresses it; qwen3.6-27b only accepts
+    "none"/"default", not "low".
     """
     msgs = _apply_language_suffix(msgs)
     global _groq_model_rate_limited_until
@@ -7544,6 +7550,8 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None):
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
             resp = requests.post(
                 GROQ_URL,
                 json=payload,
@@ -7601,11 +7609,12 @@ _OPENROUTER_FREE_CANDIDATES = [
 ]
 
 
-def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400):
+def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning_effort=None):
     """Like _groq_post, but on a 429/cooldown falls through to OpenRouter's
     free tier so a Groq rate limit doesn't stall the whole reply."""
     msgs = _apply_language_suffix(msgs)
-    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
+                            reasoning_effort=reasoning_effort)
     rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
     if rate_limited and OPENROUTER_API_KEY:
         for or_model in _OPENROUTER_FREE_CANDIDATES:
@@ -11154,23 +11163,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         tok_limit = 600
                     thermal_reply = ""
                     try:
-                        resp, err = _groq_post_with_fallback(payload, model_id, max_tokens=tok_limit)
+                        reasoning_effort = "none" if model_id == MODELS["2"][0] else None
+                        resp, err = _groq_post_with_fallback(payload, model_id, max_tokens=tok_limit,
+                                                              reasoning_effort=reasoning_effort)
                         if err:
                             thermal_sse({"error": err})
                         else:
-                            for line in resp.iter_lines():
-                                if not line or not line.startswith(b"data: "):
-                                    continue
-                                chunk = line[6:]
-                                if chunk == b"[DONE]":
-                                    break
-                                try:
-                                    delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
-                                    if delta:
-                                        thermal_reply += delta
-                                        thermal_sse({"token": delta})
-                                except (json.JSONDecodeError, KeyError, IndexError):
-                                    pass
+                            for delta in _iter_llm_tokens(resp, "groq"):
+                                if delta:
+                                    thermal_reply += delta
+                                    thermal_sse({"token": delta})
                     except requests.RequestException as e:
                         thermal_sse({"error": str(e)})
 
@@ -11545,29 +11547,23 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             full_reply = ""
             finish_reason = None
             try:
-                resp, err = _groq_post_with_fallback(payload_msgs, model, max_tokens=tok_limit)
+                reasoning_effort = "none" if model == MODELS["2"][0] else None
+                resp, err = _groq_post_with_fallback(payload_msgs, model, max_tokens=tok_limit,
+                                                      reasoning_effort=reasoning_effort)
                 if err:
                     sse({"error": err})
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                     return
 
-                for line in resp.iter_lines():
-                    if not line or not line.startswith(b"data: "):
-                        continue
-                    chunk = line[6:]
-                    if chunk == b"[DONE]":
-                        break
-                    try:
-                        choice = json.loads(chunk)["choices"][0]
-                        delta = choice.get("delta", {}).get("content", "")
-                        if delta:
-                            full_reply += delta
-                            sse({"token": delta})
-                        if choice.get("finish_reason"):
-                            finish_reason = choice["finish_reason"]
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        pass
+                def _on_finish(reason):
+                    nonlocal finish_reason
+                    finish_reason = reason
+
+                for delta in _iter_llm_tokens(resp, "groq", on_finish=_on_finish):
+                    if delta:
+                        full_reply += delta
+                        sse({"token": delta})
 
             except requests.RequestException as e:
                 sse({"error": str(e)})

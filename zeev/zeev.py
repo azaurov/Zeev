@@ -85,6 +85,14 @@ ZEEV_WATCH_KEY     = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret 
 # subject check through the Pi's watch_server.py instead of duplicating the
 # camera-sweep code somewhere that can't actually reach the cameras.
 ZEEV_WATCH_URL     = os.environ.get("ZEEV_WATCH_URL",     "http://ragnarok.tail9c2c7c.ts.net:5050/watch")
+DOG_CALLER_KEY     = os.environ.get("DOG_CALLER_KEY",     "")   # shared secret for the ~/troubleshooting/wyze-dog-caller API
+# ~/troubleshooting/wyze-dog-caller/dog_caller_server.py, a separate project
+# on the web-chat box that drives the Wyze app on a physical phone (adb +
+# an accessibility service) to play a "come inside" clip through a camera
+# speaker. Not part of this repo -- reached over Tailscale the same way
+# ZEEV_WATCH_URL reaches ragnarok, just in the other direction (device mode
+# on the Pi calling out to this box instead of the reverse).
+DOG_CALLER_URL     = os.environ.get("DOG_CALLER_URL",     "http://sogdiana-gematria-net.tail9c2c7c.ts.net:5051")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
 
@@ -9403,6 +9411,49 @@ def resolve_subject(text: str, subjects=None):
     return None
 
 
+# "Call Leo inside" vs. resolve_subject()'s "check on Leo": different verbs
+# (call/bring/get, not check/find/where's), so the two gates don't collide
+# despite both naming the dog. Loose word-gap matching (not the fixed
+# 60-char-then-40-char window above) since "bring him inside" / "get Leo in
+# from the yard" have more room between the trigger, the name, and "in"
+# than a single tight window comfortably covers.
+_DOG_CALL_RE = re.compile(
+    r"\b(call|bring|get)\b[^.?!]{0,25}\b(leo|(?:the )?dog)\b[^.?!]{0,20}\b(in|inside|home)\b",
+    re.IGNORECASE,
+)
+
+
+def _dog_call_camera(text: str) -> str:
+    return "front_yard" if re.search(r"\bfront\b", text, re.IGNORECASE) else "backyard"
+
+
+def call_dog_remote(camera="backyard"):
+    """Relay a "call the dog inside" request to dog_caller_server.py on the
+    web-chat box (~/troubleshooting/wyze-dog-caller, a separate project --
+    see DOG_CALLER_URL's comment). That project drives the real Wyze app on
+    a physical phone to play a clip through the named camera's speaker;
+    dog_caller.call_dog() itself takes ~15-40s, so a caller should speak/
+    stream a status line before calling this. Always returns a printable
+    (ok, message) pair, never raises.
+    """
+    if not DOG_CALLER_KEY:
+        return False, "Calling the dog inside isn't set up yet."
+    try:
+        resp = requests.post(
+            DOG_CALLER_URL + "/call",
+            json={"camera": camera},
+            headers={"X-Dog-Caller-Key": DOG_CALLER_KEY},
+            timeout=60,
+        )
+        data = resp.json()
+    except Exception as e:
+        print(f"[dog-caller-relay] {e}", flush=True)
+        return False, "I couldn't reach the dog caller right now."
+    if resp.status_code == 200 and data.get("ok"):
+        return True, data.get("message", "Called Leo inside.")
+    return False, data.get("error") or "Calling Leo inside didn't work — check the phone."
+
+
 def subject_vision_prompt(kind: str, cam_label: str) -> str:
     """Ask about the *kind*, and demand a parseable verdict line."""
     return (
@@ -11156,6 +11207,27 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.flush()
                 return
 
+            # ── "Call Leo inside" (physical dog-caller automation) ─────────
+            # Same trigger regex device mode uses. call_dog_remote() reaches
+            # dog_caller_server.py directly (it runs on this same box), so
+            # unlike the subject-check branch just below, no relay hop
+            # through the Pi is needed here.
+            if _DOG_CALL_RE.search(user_msg) and not _TOOL_INTENT_RE.search(user_msg):
+                camera = _dog_call_camera(user_msg)
+                sse({"info": "[calling Leo inside, this takes a bit...]"})
+                _ok, reply = call_dog_remote(camera)
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+
             # ── Named subject on the house cameras ("check on Smokey") ─────
             # This instance (serve_web.py, off the Pi) has no route to the
             # Wyze cameras itself -- relay through the Pi's already-running
@@ -12123,6 +12195,20 @@ def handle_transcript(ctx, transcript, _depth=0):
         reply = f"Volume {direction} to {new_vol} percent."
         print(f"Zeev: {reply}")
         finish_turn(ctx, reply, face=False, led=False)
+        return
+
+    # ── "Call Leo inside" (physical dog-caller automation) ─────────────────
+    # Different verbs from the subject-sweep branch just below ("check on
+    # Leo") -- call/bring/get vs check/find/where's -- so the two gates
+    # never collide despite both naming the dog. _TOOL_INTENT_RE excluded
+    # the same way resolve_subject() excludes it: "remind me to call Leo
+    # inside at five" is a reminder, not an immediate call.
+    if _DOG_CALL_RE.search(transcript) and not _TOOL_INTENT_RE.search(transcript):
+        camera = _dog_call_camera(transcript)
+        ctx._set_face("thinking", "calling Leo…")
+        ctx._speak_device("Calling Leo inside now — this takes a bit.", _LAST_VOICE)
+        _ok, reply = call_dog_remote(camera)
+        finish_turn(ctx, reply)
         return
 
     # ── Named subject on the house cameras ("check on Smokey") ────────────

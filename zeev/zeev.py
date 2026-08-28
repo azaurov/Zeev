@@ -4330,8 +4330,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
 SYSTEM_PROMPT = (
     "You are Zeev, a humble, calm, innovative and charismatic companion. "
-    "In device mode your words are spoken aloud by your secretary Sarina — a composed, professional female voice. "
-    "Respond as Zeev; Sarina delivers your words. "
+    "In device mode your words are spoken aloud by your partner Sarina, a composed female voice — she is your equal, not staff. "
+    "Respond as Zeev; Sarina's voice carries your words. "
     "You speak concisely, remember what the user tells you, and ask follow-up "
     "questions to understand them better. "
     "If a message is garbled, rambling, or hard to parse into a clear question, "
@@ -5035,7 +5035,7 @@ _DREAM_SEEDS = {
              "Talmud, and quantum interference. Your dreams are abstract and "
              "symbolic — patterns, arguments with no one, places that are also "
              "ideas."),
-    "sarina": ("You are Sarina, Zeev's composed secretary. Your dreams are "
+    "sarina": ("You are Sarina, Zeev's partner. Your dreams are "
                "domestic and sensory — rooms, sounds, small tasks that will not "
                "finish, the household moving around you."),
 }
@@ -9734,146 +9734,178 @@ _WEB_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Zeev</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+:root {
+  --zd-void:#0b0e14; --zd-panel:#131826; --zd-panel-raised:#182033;
+  --zd-line:#242c3f; --zd-line-soft:#1b2233;
+  --zd-ink:#e8ecf3; --zd-ink-dim:#8b93a8; --zd-ink-faint:#5c6479;
+  --zd-amber:#ffb454; --zd-amber-dim:#8a6a3a;
+  --zd-cyan:#5fd4e0; --zd-crit:#ef5b52;
+  --zd-font-display:'Space Grotesk','Segoe UI',sans-serif;
+  --zd-font-body:'IBM Plex Sans','Segoe UI',sans-serif;
+  --zd-font-mono:'IBM Plex Mono','SFMono-Regular',Consolas,monospace;
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
-  background: #0d0d0d; color: #e8e8e8;
-  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--zd-void); color: var(--zd-ink);
+  font-family: var(--zd-font-body);
   height: 100dvh; display: flex; flex-direction: column;
   -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
 }
 header {
-  padding: 12px 16px; border-bottom: 1px solid #1e1e1e;
+  padding: 12px 16px; border-bottom: 1px solid var(--zd-line);
   display: flex; align-items: center; justify-content: space-between;
-  flex-shrink: 0; background: #111;
+  flex-shrink: 0; background: var(--zd-panel);
 }
-.brand { font-weight: 700; color: #7dd3fc; font-size: 1.1rem; letter-spacing: 0.04em; }
+.brand-group { display: flex; align-items: center; gap: 10px; }
+.brand-mark { width: 26px; height: 26px; position: relative; flex: none; }
+.brand-mark svg { position: absolute; inset: 0; }
+.brand-mark .zd-spoke { stroke: var(--zd-amber); stroke-width: 1.3; opacity: .55; transform-origin: 13px 13px; }
+.brand-mark .zd-core {
+  position: absolute; inset: 0; margin: auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--zd-amber); box-shadow: 0 0 8px 2px rgba(255,180,84,.7);
+  animation: zd-breathe 3.4s ease-in-out infinite;
+}
+@keyframes zd-breathe { 0%,100%{transform:scale(1);opacity:.85} 50%{transform:scale(1.3);opacity:1} }
+.brand { font-family: var(--zd-font-display); font-weight: 600; color: var(--zd-ink); font-size: 1.1rem; letter-spacing: 0.02em; }
 .controls { display: flex; align-items: center; gap: 10px; }
 select {
-  background: #1a1a1a; color: #e8e8e8; border: 1px solid #333;
-  padding: 5px 8px; border-radius: 8px; font-size: 0.8rem; cursor: pointer;
+  background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line);
+  font-family: var(--zd-font-mono);
+  padding: 5px 8px; border-radius: 8px; font-size: 0.78rem; cursor: pointer;
 }
 #chat {
   flex: 1; overflow-y: auto; padding: 16px;
   display: flex; flex-direction: column; gap: 10px;
   scroll-behavior: smooth;
+  background:
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(255,180,84,0.04), transparent 60%),
+    radial-gradient(ellipse 700px 600px at 100% 20%, rgba(95,212,224,0.035), transparent 60%),
+    var(--zd-void);
 }
 .bubble {
   max-width: 82%; padding: 10px 14px; border-radius: 18px;
   line-height: 1.55; font-size: 0.97rem; word-break: break-word;
 }
 .user-bubble {
-  align-self: flex-end; background: #1d4ed8; color: #fff;
+  align-self: flex-end; background: var(--zd-amber); color: #1a1200;
   border-bottom-right-radius: 5px;
 }
 .zeev-bubble {
-  align-self: flex-start; background: #181818; color: #e8e8e8;
-  border: 1px solid #252525; border-bottom-left-radius: 5px;
+  align-self: flex-start; background: var(--zd-panel); color: var(--zd-ink);
+  border: 1px solid var(--zd-line); border-bottom-left-radius: 5px;
 }
-.zeev-bubble.pending { color: #555; }
+.zeev-bubble.pending { color: var(--zd-ink-faint); }
 footer {
-  padding: 10px 12px; border-top: 1px solid #1e1e1e;
-  display: flex; gap: 8px; flex-shrink: 0; background: #111;
+  padding: 10px 12px; border-top: 1px solid var(--zd-line);
+  display: flex; gap: 8px; flex-shrink: 0; background: var(--zd-panel);
   padding-bottom: max(10px, env(safe-area-inset-bottom));
 }
 #inp {
-  flex: 1; background: #1a1a1a; color: #e8e8e8;
-  border: 1px solid #2e2e2e; border-radius: 22px;
+  flex: 1; background: var(--zd-panel-raised); color: var(--zd-ink);
+  font-family: var(--zd-font-body);
+  border: 1px solid var(--zd-line); border-radius: 22px;
   padding: 10px 16px; font-size: 1rem; outline: none;
 }
-#inp:focus { border-color: #7dd3fc; }
+#inp:focus { border-color: var(--zd-cyan); }
 .btn {
   border: none; border-radius: 50%; width: 42px; height: 42px;
   cursor: pointer; font-size: 1.1rem; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   transition: background 0.15s;
 }
-#sendBtn { background: #1d4ed8; color: #fff; }
-#sendBtn:disabled { background: #222; cursor: not-allowed; }
-#micBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
-#micBtn.active { background: #dc2626; border-color: #dc2626; }
-#recBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
-#recBtn.active { background: #dc2626; border-color: #dc2626; animation: pulse 1s infinite; }
+#sendBtn { background: var(--zd-amber); color: #1a1200; }
+#sendBtn:disabled { background: var(--zd-line-soft); color: var(--zd-ink-faint); cursor: not-allowed; }
+#micBtn { background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line); }
+#micBtn.active { background: var(--zd-crit); border-color: var(--zd-crit); color: #fff; }
+#recBtn { background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line); }
+#recBtn.active { background: var(--zd-crit); border-color: var(--zd-crit); color: #fff; animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
-#snapBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#snapBtn { background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line); }
 #snapBtn:disabled { opacity: 0.4; cursor: not-allowed; }
-#thermalBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
+#thermalBtn { background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line); }
 #thermalBtn:disabled { opacity: 0.4; cursor: not-allowed; }
-#flipBtn { background: #1e1e1e; color: #e8e8e8; border: 1px solid #333; }
-#flipBtn.active { background: #1a3a2a; border-color: #2d6a4f; color: #52b788; }
+#flipBtn { background: var(--zd-panel-raised); color: var(--zd-ink); border: 1px solid var(--zd-line); }
+#flipBtn.active { background: #1a3a2a; border-color: #2d6a4f; color: #6fcf7a; }
 .thermal-canvas { display: block; border-radius: 6px; margin-bottom: 6px; image-rendering: pixelated; }
 .icon-btn {
   background: none; border: none; cursor: pointer; font-size: 1.1rem;
-  color: #7dd3fc; padding: 4px; line-height: 1;
+  color: var(--zd-cyan); padding: 4px; line-height: 1;
 }
 .model-tag {
-  display: block; margin-top: 5px;
-  font-size: 0.7rem; color: #3a3a3a; letter-spacing: 0.03em;
+  display: block; margin-top: 5px; font-family: var(--zd-font-mono);
+  font-size: 0.7rem; color: var(--zd-ink-faint); letter-spacing: 0.03em;
 }
 #battPct {
-  font-size: 0.78rem; font-weight: 600; padding: 2px 4px;
+  font-family: var(--zd-font-mono); font-size: 0.78rem; font-weight: 500; padding: 2px 4px;
   letter-spacing: 0.02em;
 }
 /* Memory overlay */
 #memOverlay {
   display: none; position: fixed; inset: 0;
-  background: rgba(0,0,0,0.85); z-index: 100;
+  background: rgba(6,8,13,0.88); z-index: 100;
   padding: 20px; overflow-y: auto;
 }
 #memPanel {
-  background: #141414; border: 1px solid #252525; border-radius: 14px;
+  background: var(--zd-panel); border: 1px solid var(--zd-line); border-radius: 14px;
   padding: 20px; max-width: 480px; margin: 0 auto;
 }
-#memPanel h2 { color: #7dd3fc; font-size: 1rem; margin-bottom: 14px; }
-#memList { font-size: 0.88rem; line-height: 1.9; color: #ccc; min-height: 40px; }
-#memList em { color: #444; }
+#memPanel h2 { font-family: var(--zd-font-display); color: var(--zd-amber); font-size: 1rem; margin-bottom: 14px; }
+#memList { font-size: 0.88rem; line-height: 1.9; color: var(--zd-ink-dim); min-height: 40px; }
+#memList em { color: var(--zd-ink-faint); }
 .mem-actions {
   display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap;
 }
 .mem-btn {
-  padding: 7px 14px; border: none; border-radius: 8px;
-  font-size: 0.85rem; cursor: pointer;
+  font-family: var(--zd-font-mono);
+  padding: 7px 14px; border: none; border-radius: 20px;
+  font-size: 0.8rem; cursor: pointer;
 }
-#memorizeBtn { background: #1d4ed8; color: #fff; }
-#memorizeBtn:disabled { background: #1a2a4a; color: #556; cursor: not-allowed; }
-#memCloseBtn { background: #1e1e1e; color: #aaa; border: 1px solid #333; }
+#memorizeBtn { background: var(--zd-amber); color: #1a1200; }
+#memorizeBtn:disabled { background: var(--zd-line-soft); color: var(--zd-ink-faint); cursor: not-allowed; }
+#memCloseBtn { background: var(--zd-panel-raised); color: var(--zd-ink-dim); border: 1px solid var(--zd-line); }
 /* Notes overlay */
 #noteOverlay {
   display: none; position: fixed; inset: 0;
-  background: rgba(0,0,0,0.85); z-index: 100;
+  background: rgba(6,8,13,0.88); z-index: 100;
   padding: 20px; overflow-y: auto;
 }
 #notePanel {
-  background: #141414; border: 1px solid #252525; border-radius: 14px;
+  background: var(--zd-panel); border: 1px solid var(--zd-line); border-radius: 14px;
   padding: 20px; max-width: 480px; margin: 0 auto;
 }
-#notePanel h2 { color: #7dd3fc; font-size: 1rem; margin-bottom: 14px; }
-#noteList { font-size: 0.88rem; line-height: 1.9; color: #ccc; min-height: 40px; }
-#noteList em { color: #444; }
+#notePanel h2 { font-family: var(--zd-font-display); color: var(--zd-amber); font-size: 1rem; margin-bottom: 14px; }
+#noteList { font-size: 0.88rem; line-height: 1.9; color: var(--zd-ink-dim); min-height: 40px; }
+#noteList em { color: var(--zd-ink-faint); }
 .note-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
 .note-row span { flex: 1; }
 .note-del {
-  background: none; border: none; color: #555; cursor: pointer;
+  background: none; border: none; color: var(--zd-ink-faint); cursor: pointer;
   font-size: 0.9rem; padding: 0 2px; line-height: 1.9; flex-shrink: 0;
 }
-.note-del:hover { color: #ef4444; }
+.note-del:hover { color: var(--zd-crit); }
 .note-add-row {
   display: flex; gap: 8px; margin-top: 16px; align-items: center;
 }
 #noteInp {
-  flex: 1; background: #1a1a1a; color: #e8e8e8;
-  border: 1px solid #2e2e2e; border-radius: 10px;
+  flex: 1; background: var(--zd-panel-raised); color: var(--zd-ink);
+  font-family: var(--zd-font-body);
+  border: 1px solid var(--zd-line); border-radius: 10px;
   padding: 8px 12px; font-size: 0.9rem; outline: none;
 }
-#noteInp:focus { border-color: #7dd3fc; }
+#noteInp:focus { border-color: var(--zd-cyan); }
 #noteMicBtn {
-  background: #1e1e1e; border: 1px solid #333; border-radius: 50%;
+  background: var(--zd-panel-raised); border: 1px solid var(--zd-line); border-radius: 50%;
   width: 36px; height: 36px; cursor: pointer; font-size: 1rem;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-#noteMicBtn.active { background: #dc2626; border-color: #dc2626; }
-#noteAddBtn { background: #1d4ed8; color: #fff; }
-#noteCloseBtn { background: #1e1e1e; color: #aaa; border: 1px solid #333; }
+#noteMicBtn.active { background: var(--zd-crit); border-color: var(--zd-crit); }
+#noteAddBtn { background: var(--zd-amber); color: #1a1200; }
+#noteCloseBtn { background: var(--zd-panel-raised); color: var(--zd-ink-dim); border: 1px solid var(--zd-line); }
 </style>
 </head>
 <body>
@@ -9904,16 +9936,29 @@ footer {
   </div>
 </div>
 
-<div id="healthToast" style="display:none;position:fixed;top:0;left:0;right:0;z-index:999;background:#7f1d1d;color:#fca5a5;font-size:0.82rem;text-align:center;padding:6px 12px;cursor:pointer" title="Tap to dismiss">&#9888; <span id="healthMsg"></span></div>
+<div id="healthToast" style="display:none;position:fixed;top:0;left:0;right:0;z-index:999;background:#402425;color:#ef5b52;font-size:0.82rem;text-align:center;padding:6px 12px;cursor:pointer" title="Tap to dismiss">&#9888; <span id="healthMsg"></span></div>
 <header>
-  <span class="brand">Zeev</span>
+  <div class="brand-group">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 26 26">
+        <line class="zd-spoke" x1="13" y1="13" x2="13" y2="3"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="21" y2="8"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="21" y2="18"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="13" y2="23"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="5" y2="18"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="5" y2="8"/>
+      </svg>
+      <div class="zd-core"></div>
+    </div>
+    <span class="brand">Zeev</span>
+  </div>
   <div class="controls">
     <span id="battPct" style="display:none"></span>
     <button class="icon-btn" id="noteBtn" title="Notes">&#128221;</button>
     <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
     <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
     <button class="icon-btn" id="volDownBtn" title="Volume down">&#128265;</button>
-    <span id="volDisplay" style="font-size:0.75rem;color:#aaa;min-width:2.5rem;text-align:center">75%</span>
+    <span id="volDisplay" style="font-family:var(--zd-font-mono);font-size:0.75rem;color:var(--zd-ink-dim);min-width:2.5rem;text-align:center">75%</span>
     <button class="icon-btn" id="volUpBtn" title="Volume up">&#128266;</button>
     <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
     <select id="modelSel">
@@ -14404,15 +14449,15 @@ def run_device_mode():
     print(f"Keyboard: [Ctrl+Space] toggle record/send  [q] quit{RESET}\n", flush=True)
 
     _tod = _time_of_day()
-    _secretary_greetings = {
+    _startup_greetings = {
         # Short on purpose: this one plays into a dark house, usually because a
         # deploy restarted the service, and nobody asked for it.
         "night": "It's late, Alex. Sarina here — I'll keep it down.",
-        "morning": "Good morning, Alex. Sarina here, Zeev's secretary — all systems ready.",
-        "afternoon": "Good afternoon, Alex. Sarina here — ready to assist.",
+        "morning": "Good morning, Alex. Sarina here, Zeev's partner — all systems ready.",
+        "afternoon": "Good afternoon, Alex. Sarina here — good to see you.",
         "evening": "Good evening, Alex. Sarina here, ready when you are.",
     }
-    _greeting = _secretary_greetings[_tod]
+    _greeting = _startup_greetings[_tod]
     print(f"[startup] greeting: {_greeting!r}", flush=True)
 
     _greeting_done = threading.Event()

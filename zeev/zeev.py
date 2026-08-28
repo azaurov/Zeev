@@ -8750,13 +8750,18 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         for m in session[-2:]
     )
 
+    _phone_cam_named = bool(resolve_phone_camera(user_text))
+
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
-            or _CAMERA_RE.search(user_text) or _subj_named or _prior_asked_which_cam):
+            or _CAMERA_RE.search(user_text) or _subj_named or _prior_asked_which_cam
+            or _phone_cam_named):
         if WYZE_CAMERAS:
             cam_names = ", ".join(wyze_cam_label(c) for c in sorted(WYZE_CAMERAS)[:8])
-            have = f"The only cameras that exist are: {cam_names}."
+            have = f"The only cameras that exist are: {cam_names}"
         else:
-            have = "No cameras are configured."
+            have = "The only cameras that exist are"
+        have += (", Living Room, Backyard, Front Yard (these three take about "
+                 "30s to check, through the phone, not instant like the others).")
         parts.append(
             "\n\n## Cameras: you have NOT been given any camera image on this "
             f"turn. {have} You cannot see through any of them right now, and "
@@ -9449,6 +9454,36 @@ _WYZE_PHOTO_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Cameras with NO RTSP path at all -- Backyard/Front Yard (model WVOD1)
+# never got RTSP firmware from Wyze, ever, and Living Room was flashed
+# once, bricked, and recovered to stock ("do not retry", see
+# docs/wyze-cameras.md). Deliberately kept out of WYZE_CAMERAS/
+# WYZE_SUBJECTS -- adding them there would make wyze_snapshot() try a real
+# RTSP connection that can only ever time out. Instead these route to
+# ~/troubleshooting/wyze-dog-caller's phone-screenshot relay (DOG_CALLER_URL)
+# -- the same physical phone that plays call_dog()'s "come inside" clip
+# can also just look at the app's own live view and screenshot it.
+_PHONE_CAMERA_ALIASES = {
+    "living room": "living_room",
+    "livingroom": "living_room",
+    "backyard": "backyard",
+    "back yard": "backyard",
+    "front yard": "front_yard",
+    "frontyard": "front_yard",
+}
+
+
+def resolve_phone_camera(text: str):
+    """The phone-relay camera key named in `text`, or None. Longest alias
+    first so 'front yard' doesn't get shadowed by a hypothetical shorter
+    match -- mirrors resolve_wyze_cam()'s own longest-label-wins reasoning."""
+    t = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
+    t = re.sub(r"\s+", " ", t)
+    for alias in sorted(_PHONE_CAMERA_ALIASES, key=len, reverse=True):
+        if f" {alias} " in t:
+            return _PHONE_CAMERA_ALIASES[alias]
+    return None
+
 
 def _dog_call_camera(text: str) -> str:
     return "front_yard" if re.search(r"\bfront\b", text, re.IGNORECASE) else "backyard"
@@ -9479,6 +9514,34 @@ def call_dog_remote(camera="backyard"):
     if resp.status_code == 200 and data.get("ok"):
         return True, data.get("message", "Called Leo inside.")
     return False, data.get("error") or "Calling Leo inside didn't work — check the phone."
+
+
+def phone_camera_snapshot_remote(camera_key: str):
+    """Relay a photo request for a phone-relay-only camera (Living Room,
+    Backyard, Front Yard -- see _PHONE_CAMERA_ALIASES) to
+    dog_caller_server.py's /snapshot route. Slower than the RTSP path
+    (navigates the real Wyze app on a physical phone, ~10-30s) and can
+    fail fast with a "busy" message if a call_dog() or another snapshot is
+    already using the phone -- both are expected outcomes, not errors to
+    raise. Always returns a printable (ok, message, image_b64_or_None)
+    triple, never raises.
+    """
+    if not DOG_CALLER_KEY:
+        return False, "That camera isn't set up yet.", None
+    try:
+        resp = requests.post(
+            DOG_CALLER_URL + "/snapshot",
+            json={"camera": camera_key},
+            headers={"X-Dog-Caller-Key": DOG_CALLER_KEY},
+            timeout=60,
+        )
+        data = resp.json()
+    except Exception as e:
+        print(f"[dog-caller-relay] {e}", flush=True)
+        return False, "I couldn't reach that camera right now.", None
+    if resp.status_code == 200 and data.get("ok"):
+        return True, data.get("message", "Here's the camera."), data.get("image")
+    return False, data.get("error") or "Couldn't get a look through that camera right now.", None
 
 
 def subject_vision_prompt(kind: str, cam_label: str) -> str:
@@ -11349,6 +11412,33 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         session[:] = session[-60:]
                 return
 
+            # ── Phone-relay camera ("show me the backyard cam") ────────────
+            # Living Room / Backyard / Front Yard have no RTSP path at all
+            # (see _PHONE_CAMERA_ALIASES) -- relayed through the physical
+            # phone at ~/troubleshooting/wyze-dog-caller instead of the Pi.
+            # No photo-wording gate like the RTSP branch above: a photo is
+            # the only thing this relay can ever produce for these three,
+            # so naming one is enough on its own.
+            _phone_cam = resolve_phone_camera(user_msg)
+            if _phone_cam and DOG_CALLER_KEY:
+                _phone_cam_label = _phone_cam.replace("_", " ").title()
+                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone, "
+                              "this can take up to 30s...]"})
+                _ok, reply, image = phone_camera_snapshot_remote(_phone_cam)
+                if image:
+                    sse({"image": f"data:image/jpeg;base64,{image}"})
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+
             with lock:
                 session.append({"role": "user", "content": user_msg})
                 append_message("user", user_msg)
@@ -12320,6 +12410,30 @@ def handle_transcript(ctx, transcript, _depth=0):
         # visual read, not just a canned failure message like "asleep or
         # offline" (frames == 0).
         finish_turn(ctx, reply, vision=bool(frames))
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
+    # ── Phone-relay camera ("show me the backyard cam") ────────────────────
+    # Living Room / Backyard / Front Yard have no RTSP path at all -- relayed
+    # through the physical phone (~/troubleshooting/wyze-dog-caller) instead
+    # of a real camera connection. Device mode has no screen to show a photo
+    # on, so the image is described aloud via vision_complete() the same way
+    # every other camera branch here speaks a real description rather than
+    # just announcing "here's a photo."
+    _phone_cam = resolve_phone_camera(transcript)
+    if _phone_cam and DOG_CALLER_KEY:
+        _phone_cam_label = _phone_cam.replace("_", " ").title()
+        ctx._set_face("thinking", f"{_phone_cam_label}…")
+        ctx._speak_device(
+            f"Checking the {_phone_cam_label} cam through the phone, this takes a bit.",
+            _LAST_VOICE)
+        _ok, _msg, _image = phone_camera_snapshot_remote(_phone_cam)
+        if _image:
+            desc, verr = vision_complete(_image, f"Describe what's visible on the {_phone_cam_label} camera.")
+            reply = desc if desc else f"I got a look at {_phone_cam_label} but couldn't describe it: {verr}"
+            finish_turn(ctx, reply, vision=True)
+        else:
+            finish_turn(ctx, _msg)
         return
     # ─────────────────────────────────────────────────────────────────────
 

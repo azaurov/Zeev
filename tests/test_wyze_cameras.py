@@ -300,11 +300,18 @@ def test_capability_guard_absent_from_ordinary_turns(zeev, monkeypatch):
 
 
 def test_capability_guard_survives_no_cameras_configured(zeev, monkeypatch):
-    """WYZE_CAMERAS empty is exactly when the model has least to go on."""
+    """WYZE_CAMERAS empty is exactly when the model has least to go on.
+
+    The phone-relay cameras (Living Room/Backyard/Front Yard) always exist
+    regardless of WYZE_CAMERAS -- they're a separate, always-on relay, not
+    conditioned on any RTSP config -- so the guard text always lists them
+    even with zero real (RTSP) cameras configured.
+    """
     monkeypatch.setattr(zeev, "WYZE_CAMERAS", [])
     p = zeev._build_system_prompt("what do you see in the cameras")
     assert "## Cameras:" in p
-    assert "No cameras are configured." in p
+    assert "The only cameras that exist are" in p
+    assert "Living Room, Backyard, Front Yard" in p
 
 
 def test_pi_camera_phrasing_is_not_hijacked_when_a_camera_exists(zeev, monkeypatch):

@@ -2477,7 +2477,7 @@ def groq_tts(text, voice="daniel"):
             headers={"Authorization": f"Bearer {GROQ_API_KEY}",
                      "Content-Type": "application/json"},
             json={"model": "canopylabs/orpheus-v1-english",
-                  "input": clean[:4096], "voice": voice, "response_format": "wav"},
+                  "input": clean[:3999], "voice": voice, "response_format": "wav"},
             timeout=30,
         )
         if resp.status_code == 200:

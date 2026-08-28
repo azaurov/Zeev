@@ -294,21 +294,47 @@ def _cmd_world_news():
     return True, text
 
 
-def _cmd_find_subject(name, speak=True):
+def _cmd_find_subject(name, speak=True, include_image=False):
     """Sweep for any single configured subject by key/alias -- the general
     form _cmd_find_smokey's fixed leo+smokey pair is built on. `speak=False`
     is for callers with their own display surface (the web chat's /chat
     handler): the whole point there is a silent text answer, not announcing
     the lookup through the Pi's physical speaker on every remote chat turn.
+    Returns (ok, message, image_b64_or_None).
+
+    `include_image` grabs a second, fresh frame via wyze_snapshot() after
+    the sweep rather than reusing whatever frame sweep_for_subject()
+    inspected internally -- that frame is discarded inside sweep_for_subject
+    (it only ever returns a count, not the bytes), and threading it out
+    would mean changing sweep_for_subject's signature for every other
+    caller (device mode, the old fixed find_smokey command) just for this
+    one caller's needs. A few seconds of camera staleness between the two
+    grabs is a fine trade for not touching that shared function.
     """
     key = (name or "").strip().lower()
     subj = zeev.WYZE_SUBJECTS.get(key)
     if not subj:
-        return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS)."
+        return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS).", None
     reply, _frames = zeev.sweep_for_subject(subj)
     if speak:
         _speak(reply)
-    return True, reply
+    image = None
+    if include_image and subj.get("cams"):
+        image = zeev.wyze_snapshot(subj["cams"][0])
+    return True, reply, image
+
+
+def _cmd_snapshot(camera):
+    """Plain photo of a named camera, no subject/vision-verdict involved --
+    for "show me the bedroom cam" rather than "check on Smokey". Returns
+    (ok, message, image_b64_or_None)."""
+    cam = (camera or "").strip().lower()
+    if cam not in zeev.WYZE_CAMERAS:
+        return False, f"{camera!r} isn't a configured camera.", None
+    image = zeev.wyze_snapshot(cam)
+    if not image:
+        return False, f"Couldn't get a frame from {zeev.wyze_cam_label(cam)} right now.", None
+    return True, f"Here's {zeev.wyze_cam_label(cam)}.", image
 
 
 def _cmd_find_smokey():
@@ -524,19 +550,35 @@ def _make_handler():
                 self._json(400, {"ok": False, "error": "malformed JSON body"})
                 return
             cmd = data.get("cmd")
-            # find_subject takes a request-body param (which subject), unlike
-            # every other command here -- handled separately from the plain
+            # find_subject/snapshot take request-body params, unlike every
+            # other command here -- handled separately from the plain
             # zero-arg _COMMANDS dispatch below rather than widening every
-            # command's signature for the one that needs an argument.
+            # command's signature for the two that need arguments.
             if cmd == "find_subject":
                 try:
-                    ok, message = _cmd_find_subject(
-                        data.get("name"), speak=bool(data.get("speak", True)))
+                    ok, message, image = _cmd_find_subject(
+                        data.get("name"), speak=bool(data.get("speak", True)),
+                        include_image=bool(data.get("image", False)))
                 except Exception as e:
                     print(f"[watch] find_subject failed: {e}", flush=True)
                     self._json(500, {"ok": False, "error": str(e)})
                     return
-                self._json(200, {"ok": ok, "message": message})
+                payload = {"ok": ok, "message": message}
+                if image:
+                    payload["image"] = image
+                self._json(200, payload)
+                return
+            if cmd == "snapshot":
+                try:
+                    ok, message, image = _cmd_snapshot(data.get("camera"))
+                except Exception as e:
+                    print(f"[watch] snapshot failed: {e}", flush=True)
+                    self._json(500, {"ok": False, "error": str(e)})
+                    return
+                payload = {"ok": ok, "message": message}
+                if image:
+                    payload["image"] = image
+                self._json(200, payload)
                 return
             fn = _COMMANDS.get(cmd)
             if not fn:

@@ -8736,8 +8736,22 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "reflectively about having vision or what you can see, answer "
             "from that ability, not from a generic disclaimer.")
 
+    # A bare one-word reply to Zeev's own "Which camera? I can check bedroom
+    # cam, smokeys cam." ("Backyard", "Living room") names no real camera and
+    # matches none of the regexes above -- found live 2026-08-28: this exact
+    # sequence reached the LLM with no guard at all, and it invented "The
+    # backyard cam shows a patio... a gray dog—looks like Leo—sitting near
+    # the fence" wholesale. The guard below only ever fires on properties of
+    # THIS turn's text; a short reply immediately after Zeev's own
+    # disambiguation question needs the same guard even though it mentions
+    # no camera/subject word itself.
+    _prior_asked_which_cam = bool(session) and any(
+        m.get("role") == "assistant" and "which camera" in m.get("content", "").lower()
+        for m in session[-2:]
+    )
+
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
-            or _CAMERA_RE.search(user_text) or _subj_named):
+            or _CAMERA_RE.search(user_text) or _subj_named or _prior_asked_which_cam):
         if WYZE_CAMERAS:
             cam_names = ", ".join(wyze_cam_label(c) for c in sorted(WYZE_CAMERAS)[:8])
             have = f"The only cameras that exist are: {cam_names}."
@@ -8754,8 +8768,12 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "see. Any camera description that appears earlier in this "
             "conversation or under 'Relevant past exchanges' is a record of "
             "the PAST; repeating it as what a camera shows now is wrong even "
-            "if the room has not changed. Say plainly that you couldn't get a "
-            "look just now, and ask which camera to check if it is unclear."
+            "if the room has not changed. If it's genuinely unclear which "
+            "camera or subject is meant, ask which one to check. Otherwise, "
+            "if you cannot ground the answer in a real check, say exactly: "
+            "\"I can't produce that result as it's above my pay grade — this "
+            "might need a stronger model or a live camera check.\" Never "
+            "guess or fill in a plausible-sounding scene instead."
         )
 
     if needs_search(user_text) and TAVILY_API_KEY:
@@ -9419,6 +9437,15 @@ def resolve_subject(text: str, subjects=None):
 # than a single tight window comfortably covers.
 _DOG_CALL_RE = re.compile(
     r"\b(call|bring|get)\b[^.?!]{0,25}\b(leo|(?:the )?dog)\b[^.?!]{0,20}\b(in|inside|home)\b",
+    re.IGNORECASE,
+)
+
+# Web chat's cue that a Wyze reply should come with the actual photo, not
+# just a text description -- "check on Smokey" alone stays text-only (see
+# CLAUDE.md on this project's own image-vs-text bandwidth tradeoffs), but
+# "check on Smokey" + "show me"/"picture" gets the frame too.
+_WYZE_PHOTO_RE = re.compile(
+    r"\b(picture|photo|snapshot|image|show me|see (?:it|him|her|them))\b",
     re.IGNORECASE,
 )
 
@@ -10174,6 +10201,8 @@ async function send(msg) {
     const dec = new TextDecoder();
     let buf = "";
     let full = "";
+    let hasImage = false;
+    let textSpan = null;
 
     while (true) {
       const {done, value} = await reader.read();
@@ -10187,17 +10216,27 @@ async function send(msg) {
         if (d === "[DONE]") continue;
         try {
           const p = JSON.parse(d);
-          if (p.token) {
+          if (p.image) {
+            zd.classList.remove("pending");
+            const img = document.createElement("img");
+            img.src = p.image;
+            img.style.cssText = "max-width:100%;border-radius:8px;margin-bottom:6px;display:block;";
+            zd.insertBefore(img, zd.firstChild);
+            hasImage = true;
+          } else if (p.token) {
             zd.classList.remove("pending");
             full += p.token;
-            zd.textContent = full;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
             chat.scrollTop = chat.scrollHeight;
           } else if (p.error) {
             zd.classList.remove("pending");
-            zd.textContent = "Error: " + p.error;
-          } else if (p.info) {
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = "Error: " + p.error;
+          } else if (p.info && !hasImage) {
             zd.classList.remove("pending");
-            zd.textContent = p.info;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = p.info;
           } else if (p.model) {
             pendingModel = p.model;
           }
@@ -10205,7 +10244,7 @@ async function send(msg) {
       }
     }
     speak(full);
-    if (!full && !zd.textContent) zd.textContent = "(no response)";
+    if (!full && !hasImage && !zd.textContent) zd.textContent = "(no response)";
     if (pendingModel && full) {
       const tag = document.createElement("span");
       tag.className = "model-tag";
@@ -11236,21 +11275,58 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # text shouldn't also make the Pi announce itself out loud.
             _subj = resolve_subject(user_msg) if WYZE_SUBJECTS else None
             if _subj and ZEEV_WATCH_KEY:
+                _want_photo = bool(_WYZE_PHOTO_RE.search(user_msg))
                 sse({"info": f"[checking the cameras for {_subj['name']}...]"})
                 try:
                     watch_resp = requests.post(
                         ZEEV_WATCH_URL,
-                        json={"cmd": "find_subject", "name": _subj["name"], "speak": False},
+                        json={"cmd": "find_subject", "name": _subj["name"],
+                              "speak": False, "image": _want_photo},
                         headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
                         timeout=45,
                     )
-                    reply = (watch_resp.json().get("message")
-                             if watch_resp.status_code == 200 else None)
+                    resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
                 except Exception as e:
                     print(f"[watch-relay] {e}", flush=True)
-                    reply = None
+                    resp_data = {}
+                reply = resp_data.get("message")
                 if not reply:
                     reply = f"I couldn't reach the cameras to check on {_subj['name']} right now."
+                if resp_data.get("image"):
+                    sse({"image": f"data:image/jpeg;base64,{resp_data['image']}"})
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+
+            # ── Plain camera photo ("show me the bedroom cam") ─────────────
+            # A named real camera (not a subject) plus photo wording -- same
+            # relay, but the snapshot command rather than the vision-verdict
+            # subject sweep, since there's no subject to judge found/not-found.
+            _cam_name, _ = resolve_wyze_cam(user_msg) if WYZE_CAMERAS else (None, [])
+            if _cam_name and _WYZE_PHOTO_RE.search(user_msg) and ZEEV_WATCH_KEY:
+                sse({"info": f"[getting a frame from {wyze_cam_label(_cam_name)}...]"})
+                try:
+                    watch_resp = requests.post(
+                        ZEEV_WATCH_URL,
+                        json={"cmd": "snapshot", "camera": _cam_name},
+                        headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
+                        timeout=45,
+                    )
+                    resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
+                except Exception as e:
+                    print(f"[watch-relay] {e}", flush=True)
+                    resp_data = {}
+                reply = resp_data.get("message") or f"I couldn't reach {wyze_cam_label(_cam_name)} right now."
+                if resp_data.get("image"):
+                    sse({"image": f"data:image/jpeg;base64,{resp_data['image']}"})
                 sse({"token": reply})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()

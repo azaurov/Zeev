@@ -7601,11 +7601,30 @@ def _groq_post(msgs, model, stream=True, max_tokens=400, tools=None, reasoning_e
 # nvidia/nemotron-3-super-120b-a12b:free was tried and rejected 2026-08-22:
 # its `content` field is the reasoning monologue itself ("Okay, the user is
 # asking..."), same inlined-reasoning trap as qwen3.6-27b -- content_len
-# matched reasoning_len almost exactly on every trial. Add a new candidate
-# only after checking its streaming response shape the same way.
+# matched reasoning_len almost exactly on every trial. Re-tested 2026-08-28,
+# still the same trap (content_len == reasoning_len == 1774, verbatim
+# "Okay, the user is asking..." in content) -- stays rejected.
+#
+# nvidia/nemotron-3-nano-30b-a3b:free (the second candidate above) went
+# fully 404 by 2026-08-28 -- removed from OpenRouter's catalog entirely,
+# confirmed against GET /api/v1/models, not just a request-time failure.
+# Live logs the same night showed BOTH candidates failing simultaneously
+# (gemma-4-26b 429'd, nemotron-3-nano-30b-a3b 404'd) -- zero working
+# fallback at the moment it was actually needed. Replaced with two
+# re-verified candidates (same raw-streaming-request method, real
+# ~9KB system prompt) for actual redundancy against a single dead/busy
+# entry: poolside/laguna-xs-2.1:free (real content, zero reasoning
+# overhead, ~3.6s) and nvidia/nemotron-3-ultra-550b-a55b:free (real
+# content cleanly separate from reasoning, ~3.8s). Note poolside/laguna-s-2.1
+# was noted rejected in this comment's earlier history as reasoning-only --
+# re-tested 2026-08-28 and it now streams real content with zero reasoning
+# overhead too; the free-tier catalog changes underlying model behavior
+# over time, so a past rejection here is not permanent either. Add a new
+# candidate only after checking its streaming response shape the same way.
 _OPENROUTER_FREE_CANDIDATES = [
     "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "poolside/laguna-xs-2.1:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
 
 

@@ -261,7 +261,7 @@ def _persona_context(zeev_mod):
     Found live 2026-08-06, two fresh UNGROUNDED findings in one run: an
     answer musing about "quantum science and ancient philosophy" (Zeev's
     stated persona interests, verbatim in SYSTEM_PROMPT) and an answer
-    correcting a name to "Sarina" (the documented device-mode secretary
+    correcting a name to "Sarina" (the documented device-mode partner
     persona, also only in SYSTEM_PROMPT) both got flagged, because neither
     fact lives in history RAG, Torah retrieval, or the location block --
     only in the base persona text every single call actually receives."""
@@ -331,7 +331,7 @@ ANSWER:
 {answer}
 
 Note: the assistant is named Zeev, but its spoken words are voiced by a
-secretary persona named Sarina, so the answer may be labelled "Sarina:" or
+partner persona named Sarina, so the answer may be labelled "Sarina:" or
 speak in Sarina's voice even when the retrieved context only says "Zeev:" (or
 vice versa). Do not count that alone as ungrounded -- it is the same speaker
 under two names, not an invented character. Judge groundedness only on the

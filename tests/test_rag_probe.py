@@ -451,14 +451,14 @@ def test_history_retrieval_always_merges_persona():
     the torah/location merges, this one needs no presence check in sys_prompt
     itself. Live 2026-08-06: an answer musing about "quantum science and
     ancient philosophy" (verbatim in SYSTEM_PROMPT) and another correcting a
-    name to "Sarina" (the device-mode secretary persona, also only in
+    name to "Sarina" (the device-mode partner persona, also only in
     SYSTEM_PROMPT) both got flagged UNGROUNDED because neither fact lives in
     history RAG, Torah retrieval, or the location block."""
     sys_prompt = "## Relevant past exchanges:\nUser: hi\nZeev: hello\n\nReply in English only."
 
     class FakeZeev:
         _db_lock = __import__("threading").Lock()
-        SYSTEM_PROMPT = "You are Zeev. Your secretary is Sarina."
+        SYSTEM_PROMPT = "You are Zeev. Your partner is Sarina."
 
         @staticmethod
         def retrieve_semantic(q, **kw):
@@ -482,7 +482,7 @@ def test_history_retrieval_always_merges_persona():
             return con
 
     ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
-    assert "Your secretary is Sarina." in text
+    assert "Your partner is Sarina." in text
     assert "Zeev's persona/system instructions" in text
 
 

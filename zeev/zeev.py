@@ -1653,8 +1653,21 @@ _LOW_BATTERY_LINES = [
 
 _TEMP_WARN  = 75    # °C — first warning
 _TEMP_CRIT  = 82    # °C — critical (Pi throttles at ~80)
-_LOAD_WARN  = 3.0   # 1-min load avg — high (Pi Zero 2W: 4 cores)
-_LOAD_CRIT  = 3.8   # critical
+# 1-min load avg thresholds, scaled to actual core count rather than fixed --
+# the original fixed 3.0/3.8 was sized for the Pi Zero 2W's 4 cores (0.75/0.95
+# per-core), so on this project's other real deployment target, an 8-core dev
+# box running zeev-web, the same absolute numbers fired "critically
+# overloaded" at ~50% utilization, dozens of times a day (found live
+# 2026-08-28: journalctl showed load-average-4.x warnings going back to at
+# least Aug 18, well before any load this session's own work put on the box).
+# Ratios preserve the exact original thresholds on a 4-core Pi (3.0/3.8)
+# while scaling sensibly elsewhere. os.cpu_count() can return None on some
+# platforms; fall back to the Pi's 4 cores rather than dividing by zero.
+_LOAD_WARN_RATIO = 0.75
+_LOAD_CRIT_RATIO = 0.95
+_NCPU = os.cpu_count() or 4
+_LOAD_WARN  = _LOAD_WARN_RATIO * _NCPU   # high
+_LOAD_CRIT  = _LOAD_CRIT_RATIO * _NCPU   # critical
 
 def get_system_health():
     """Return dict: temp_c, load1, load5, warnings (list of str)."""

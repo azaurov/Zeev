@@ -9851,7 +9851,7 @@ def parse_subject_sighting(reply: str, kind: str = ""):
 
 
 def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | None = None,
-                       on_progress=None):
+                       on_progress=None, collect_frames: list | None = None):
     """Sweep `cams` (default: `subj["cams"]`, capped to `_SUBJECT_MAX_CAMS`) for
     the named subject in `subj` (a `resolve_subject()` result). Returns
     ``(reply, frames_seen, found_image_b64)`` -- the third element is the
@@ -9885,6 +9885,13 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     with the same spoken-style interim lines device mode used to speak
     directly ("Let me look for X.", "Not on the Y. Checking Z.") — callers
     that don't want narration (e.g. a synchronous HTTP request) pass None.
+
+    `collect_frames` (optional): a list the caller provides to receive every
+    frame actually grabbed during the sweep, as `(label, image_b64)` pairs,
+    regardless of verdict -- unlike `found_image_b64` this isn't limited to
+    the one frame that produced a "found". Added for the pet-report cron
+    script's request to attach a photo per camera checked, not just the
+    (rare, vision-backend-dependent) hit.
     """
     name, kind = subj["name"], subj["kind"]
     cams = (cams if cams is not None else list(subj["cams"]))[:_SUBJECT_MAX_CAMS]
@@ -9924,6 +9931,8 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
         if i + 1 < len(cams) and cams[i + 1] not in pending:
             pending[cams[i + 1]] = _grab(cams[i + 1])
         label = wyze_cam_label(stream)
+        if collect_frames is not None:
+            collect_frames.append((label, img))
         vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
         if not vreply:
             print(f"[subject] vision failed on {stream}: {verr}", flush=True)
@@ -9961,6 +9970,8 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
                 print(f"[subject] no frame from {pcam}: {msg}", flush=True)
                 continue
             frames += 1
+            if collect_frames is not None:
+                collect_frames.append((label, img))
             vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
             if not vreply:
                 print(f"[subject] vision failed on {pcam}: {verr}", flush=True)

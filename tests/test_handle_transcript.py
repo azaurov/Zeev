@@ -447,6 +447,46 @@ def test_subject_all_vision_failures_report_honestly_not_as_a_miss(zeev, ctx, mo
     assert "couldn't analyze" in reply or "vision" in reply, ctx.spoke
 
 
+def test_collect_frames_gets_every_frame_grabbed_regardless_of_verdict(zeev, ctx, monkeypatch):
+    """Added for the pet-report cron script's request to attach a photo per
+    camera checked, not just the (rare) frame that produced a "found"."""
+    _subject_env(zeev, monkeypatch, cams=("basement-cam", "upstairs"))
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: f"img-{s}")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: no\nEmpty.", None))
+    subj = zeev.WYZE_SUBJECTS["smokey"]
+    frames = []
+    zeev.sweep_for_subject(subj, collect_frames=frames)
+    assert frames == [
+        ("basement cam", "img-basement-cam"),
+        ("upstairs", "img-upstairs"),
+    ], frames
+
+
+def test_collect_frames_includes_vision_failures_too(zeev, ctx, monkeypatch):
+    """A frame that was grabbed but never judged (vision backend failure)
+    still belongs in the photo set -- the caller may want it even though
+    the sweep itself can't say anything about it."""
+    _subject_env(zeev, monkeypatch, cams=("basement-cam",))
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete", lambda *a, **k: (None, "HTTP 429"))
+    subj = zeev.WYZE_SUBJECTS["smokey"]
+    frames = []
+    zeev.sweep_for_subject(subj, collect_frames=frames)
+    assert frames == [("basement cam", "ZmFrZQ==")], frames
+
+
+def test_no_collect_frames_by_default(zeev, ctx, monkeypatch):
+    """Existing callers that don't pass collect_frames are unaffected."""
+    _subject_env(zeev, monkeypatch, cams=("basement-cam",))
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: ("FOUND: no\nEmpty.", None))
+    subj = zeev.WYZE_SUBJECTS["smokey"]
+    reply, frame_count, found_img = zeev.sweep_for_subject(subj)
+    assert reply and frame_count == 1 and found_img is None
+
+
 def test_named_room_narrows_the_sweep(zeev, ctx, monkeypatch):
     _subject_env(zeev, monkeypatch)
     _no_llm(monkeypatch, zeev)

@@ -9594,6 +9594,31 @@ _SCENE_FOLLOWUP_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _find_recent_camera_mention(history, max_back=20):
+    """Scan `history` (a list of {"role", "content"} dicts, newest last) for
+    the most recent user message naming a real camera, so a scene follow-up
+    with no cached frame (e.g. right after a service restart, which clears
+    the in-memory _last_cam cache -- see run_web_server) can still figure
+    out which camera to re-fetch instead of just declining. Returns
+    ``(camera_key, kind)`` where kind is "wyze" or "phone", or ``(None,
+    None)`` if nothing in the recent window names one.
+    """
+    for msg in reversed(history[-max_back:]):
+        if msg.get("role") != "user":
+            continue
+        text = msg.get("content", "")
+        if WYZE_CAMERAS:
+            cam, _ = resolve_wyze_cam(text)
+            if cam:
+                return cam, "wyze"
+        if DOG_CALLER_KEY:
+            pc = resolve_phone_camera(text)
+            if pc:
+                return pc, "phone"
+    return None, None
+
+
 # Cameras with NO RTSP path at all -- Backyard/Front Yard (model WVOD1)
 # never got RTSP firmware from Wyze, ever, and Living Room was flashed
 # once, bricked, and recovered to stock ("do not retry", see
@@ -11908,10 +11933,62 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             with lock:
                 _cam_image = _last_cam["image"]
                 _cam_label = _last_cam["label"]
-            _is_scene_followup = bool(_cam_image) and _SCENE_FOLLOWUP_RE.search(user_msg) and (
+            _wants_scene_followup = bool(_SCENE_FOLLOWUP_RE.search(user_msg)) and (
                 _prev_camera_turn or "try again" not in user_msg.lower())
+            # Same-evening second incident: _last_cam lives only in this
+            # process's memory, so a service restart (needed to load a code
+            # fix) silently emptied it -- the very next "describe the scene"
+            # had no cached frame, fell through to plain chat again, and got
+            # an inconsistent answer (sometimes an honest "above my pay
+            # grade" decline, sometimes a fabricated description) purely by
+            # luck of the model's sampling. Auto-fetch a fresh frame instead
+            # of requiring the user to notice the cache is cold and manually
+            # re-request a photo first: prefer a camera named in THIS
+            # message (_cam_name/_phone_cam, already resolved above), else
+            # fall back to the most recent camera named anywhere in the
+            # last 20 messages of session history (which survives a restart,
+            # unlike _last_cam -- it's reloaded from the DB via load_prior()).
+            if _wants_scene_followup and not _cam_image:
+                _fetch_cam, _fetch_kind = None, None
+                if _cam_name:
+                    _fetch_cam, _fetch_kind = _cam_name, "wyze"
+                elif _phone_cam:
+                    _fetch_cam, _fetch_kind = _phone_cam, "phone"
+                else:
+                    with lock:
+                        _hist = list(session)
+                    _fetch_cam, _fetch_kind = _find_recent_camera_mention(_hist)
+                if _fetch_cam and _fetch_kind == "wyze" and ZEEV_WATCH_KEY:
+                    sse({"info": f"[getting a fresh frame from {wyze_cam_label(_fetch_cam)}...]"})
+                    try:
+                        watch_resp = requests.post(
+                            ZEEV_WATCH_URL,
+                            json={"cmd": "snapshot", "camera": _fetch_cam},
+                            headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
+                            timeout=45,
+                        )
+                        resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
+                    except Exception as e:
+                        print(f"[watch-relay] {e}", flush=True)
+                        resp_data = {}
+                    if resp_data.get("image"):
+                        _cam_image = resp_data["image"]
+                        _cam_label = wyze_cam_label(_fetch_cam)
+                        sse({"image": f"data:image/jpeg;base64,{_cam_image}"})
+                elif _fetch_cam and _fetch_kind == "phone" and DOG_CALLER_KEY:
+                    _fetch_label = _fetch_cam.replace("_", " ").title()
+                    sse({"info": f"[getting a fresh frame from {_fetch_label}...]"})
+                    _ok, _msg, _img = phone_camera_snapshot_remote(_fetch_cam)
+                    if _img:
+                        _cam_image = _img
+                        _cam_label = _fetch_label
+                        sse({"image": f"data:image/jpeg;base64,{_cam_image}"})
+            _is_scene_followup = bool(_cam_image) and _wants_scene_followup
             if _is_scene_followup:
-                sse({"info": f"[looking again at {_cam_label}...]"})
+                if _cam_image != _last_cam.get("image"):
+                    sse({"info": f"[looking at {_cam_label}...]"})
+                else:
+                    sse({"info": f"[looking again at {_cam_label}...]"})
                 vquestion = user_msg if "try again" not in user_msg.lower() else (
                     f"Describe what's visible on the {_cam_label} camera.")
                 try:
@@ -11923,12 +12000,33 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 with lock:
+                    _last_cam["image"] = _cam_image
+                    _last_cam["label"] = _cam_label
                     _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
                     # Tag the stored copy only, same as /snap -- see _VISION_TAG.
                     append_message("assistant", (_VISION_TAG + reply) if vreply else reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+            if _wants_scene_followup:
+                # Matched the follow-up intent but couldn't get any frame at
+                # all (no cache, nothing named, nothing in recent history,
+                # or the fetch itself failed) -- decline honestly rather
+                # than falling through to plain chat, which is exactly the
+                # ungrounded-fabrication path this whole branch exists to
+                # avoid.
+                reply = "I don't have a recent camera frame to check — which camera would you like me to look at?"
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
                     if len(session) > 60:
                         session[:] = session[-60:]
                 return

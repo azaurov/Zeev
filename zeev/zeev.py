@@ -11407,6 +11407,44 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # relay, but the snapshot command rather than the vision-verdict
             # subject sweep, since there's no subject to judge found/not-found.
             _cam_name, _ = resolve_wyze_cam(user_msg) if WYZE_CAMERAS else (None, [])
+
+            # ── Multi-camera sweep ("show me what's on the cameras") ───────
+            # Mirrors device mode's inline sweep branch in handle_transcript
+            # (zeev.py ~line 12504) -- this handler had no equivalent at all,
+            # so "show me all the cameras" fell through to plain chat, which
+            # correctly (per the "Cameras" system-prompt guard) refused with
+            # "above my pay grade" instead of confabulating -- an honest
+            # answer, but not the sweep that was actually asked for. Only
+            # fires when no single named camera resolved (naming a room
+            # still wins, same as device mode).
+            if not _cam_name and WYZE_CAMERAS and resolve_wyze_sweep(user_msg) and ZEEV_WATCH_KEY:
+                sse({"info": "[checking the cameras...]"})
+                try:
+                    watch_resp = requests.post(
+                        ZEEV_WATCH_URL,
+                        json={"cmd": "sweep", "text": user_msg},
+                        headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
+                        timeout=90,
+                    )
+                    resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
+                except Exception as e:
+                    print(f"[watch-relay] {e}", flush=True)
+                    resp_data = {}
+                reply = resp_data.get("message") or "I couldn't reach the cameras right now."
+                for img in resp_data.get("images") or []:
+                    sse({"image": f"data:image/jpeg;base64,{img}"})
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+
             if _cam_name and _WYZE_PHOTO_RE.search(user_msg) and ZEEV_WATCH_KEY:
                 sse({"info": f"[getting a frame from {wyze_cam_label(_cam_name)}...]"})
                 try:

@@ -337,6 +337,51 @@ def _cmd_snapshot(camera):
     return True, f"Here's {zeev.wyze_cam_label(cam)}.", image
 
 
+def _cmd_sweep(text):
+    """Multi-camera sweep for "show me what's on the cameras" / "all cameras"
+    phrasing -- the web chat's counterpart to device mode's inline sweep
+    branch in handle_transcript (zeev.py, the `if sweep:` block under the
+    camera gate). Device mode only ever speaks a combined description since
+    it has no display; this returns each camera's frame too, since the web
+    UI can show them. Sequential (not device mode's overlapped grab-under-
+    vision-call optimization) -- this is a one-shot server-side sweep behind
+    an HTTP request, not a live spoken turn where the next grab needs to
+    start before the current vision call to keep pace with speech.
+    Returns (ok, message, images_b64_list).
+    """
+    sweep = zeev.resolve_wyze_sweep(text)
+    if not sweep:
+        return False, "That didn't resolve to a camera sweep.", []
+    seen_parts, missing, images = [], [], []
+    for s in sweep:
+        img = zeev.wyze_snapshot(s)
+        label = zeev.wyze_cam_label(s)
+        if not img:
+            print(f"[watch] sweep: no frame from {s}", flush=True)
+            missing.append(label)
+            continue
+        vreply, verr = zeev.vision_complete(img, zeev.sweep_vision_prompt(label))
+        if not vreply:
+            print(f"[watch] sweep: vision failed on {s}: {verr}", flush=True)
+            missing.append(label)
+            continue
+        clean = zeev._strip_stage_directions(vreply).strip()
+        if not clean:
+            missing.append(label)
+            continue
+        seen_parts.append((label, clean))
+        images.append(img)
+    if seen_parts:
+        message = " ".join(f"On the {lb}: {d}" for lb, d in seen_parts)
+        if missing:
+            message += (" I couldn't get a picture from the "
+                         + " or the ".join(missing) + ".")
+        return True, message, images
+    where = " or the ".join(missing) or "cameras"
+    return False, (f"I couldn't get a picture from the {where} just now "
+                    "— they may be asleep or offline."), []
+
+
 def _cmd_find_smokey():
     replies = []
     any_configured = False
@@ -578,6 +623,18 @@ def _make_handler():
                 payload = {"ok": ok, "message": message}
                 if image:
                     payload["image"] = image
+                self._json(200, payload)
+                return
+            if cmd == "sweep":
+                try:
+                    ok, message, images = _cmd_sweep(data.get("text", ""))
+                except Exception as e:
+                    print(f"[watch] sweep failed: {e}", flush=True)
+                    self._json(500, {"ok": False, "error": str(e)})
+                    return
+                payload = {"ok": ok, "message": message}
+                if images:
+                    payload["images"] = images
                 self._json(200, payload)
                 return
             fn = _COMMANDS.get(cmd)

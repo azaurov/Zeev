@@ -314,29 +314,33 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     "find Leo on all the cameras" even after the first fix landed, since
     naming zero *specific* cameras isn't the same as naming none at all.
 
-    `include_image` grabs a second, fresh frame after the sweep rather than
-    reusing whatever frame sweep_for_subject() inspected internally -- that
-    frame is discarded inside sweep_for_subject (it only ever returns a
-    count, not the bytes), and threading it out would mean changing
-    sweep_for_subject's signature for every other caller (device mode, the
-    old fixed find_smokey command) just for this one caller's needs. Prefers
+    On an actual find, the exact frame that produced the "found" verdict
+    (sweep_for_subject()'s third return value, already grabbed during the
+    sweep -- no second fetch) is always attached, regardless of
+    `include_image`/photo-wording in the request. Found live 2026-08-28: a
+    plain-text "found Leo" answer gave Alex no way to independently check
+    whether it was a real sighting or a vision-model slip, and there's no
+    good reason to gate photographic evidence of a genuine find behind
+    whether the user happened to also say "picture" -- `include_image` still
+    controls the miss/inconclusive case, where a second fresh grab (prefers
     the first RTSP camera actually swept, falling back to the first
     phone-relay camera swept if that's all that was named -- a fixed
     subj["cams"][0] would grab the wrong camera's image whenever a request
-    named phone-relay cameras only. A few seconds of camera staleness
-    between the two grabs is a fine trade for not touching that shared
-    function.
+    named phone-relay cameras only) is the best available evidence, a few
+    seconds of camera staleness being a fine trade for not re-plumbing
+    sweep_for_subject's signature for every other caller (device mode, the
+    old fixed find_smokey command) just for this one caller's needs.
     """
     key = (name or "").strip().lower()
     subj = zeev.WYZE_SUBJECTS.get(key)
     if not subj:
         return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS).", None
     cams, named_phone_cams = zeev.resolve_subject_cams(text, subj)
-    reply, _frames = zeev.sweep_for_subject(subj, cams=cams, phone_cams=named_phone_cams)
+    reply, _frames, found_img = zeev.sweep_for_subject(subj, cams=cams, phone_cams=named_phone_cams)
     if speak:
         _speak(reply)
-    image = None
-    if include_image:
+    image = found_img
+    if not image and include_image:
         if cams:
             image = zeev.wyze_snapshot(cams[0])
         elif named_phone_cams:
@@ -412,7 +416,7 @@ def _cmd_find_smokey():
                             f"(check ZEEV_SUBJECTS).")
             continue
         any_configured = True
-        reply, _frames = zeev.sweep_for_subject(subj)
+        reply, _frames, _found_img = zeev.sweep_for_subject(subj)
         replies.append(reply)
     combined = " ".join(replies)
     if not any_configured:

@@ -9714,7 +9714,16 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
                        on_progress=None):
     """Sweep `cams` (default: `subj["cams"]`, capped to `_SUBJECT_MAX_CAMS`) for
     the named subject in `subj` (a `resolve_subject()` result). Returns
-    ``(reply, frames_seen)``.
+    ``(reply, frames_seen, found_image_b64)`` -- the third element is the
+    exact frame that produced a "found" verdict (already grabbed during the
+    sweep, not a second fetch), or None on a miss/inconclusive read.
+    Callers that can display an image (the web UI) should always attach it
+    on a find rather than gating it behind photo-wording in the request --
+    found live 2026-08-28: a plain-text "found" answer gave Alex no way to
+    independently check whether it was a real sighting or a vision-model
+    slip, and re-fetching a fresh frame after the fact is both slower (up to
+    another ~10-30s for a phone-relay camera) and no longer the actual frame
+    that was judged.
 
     `phone_cams` (optional): phone-relay-only camera keys (see
     _PHONE_CAMERA_ALIASES) -- Living Room/Backyard/Front Yard have no RTSP
@@ -9757,6 +9766,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     if on_progress:
         on_progress(f"Let me look for {name}.")
     found = best = None      # best = an inconclusive read worth reporting
+    found_img = None         # the frame that produced the "found" verdict
     frames = 0
     for i, stream in enumerate(cams):
         th, box = pending.get(stream) or _grab(stream)
@@ -9785,6 +9795,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
         print(f"[subject] {stream}: found={seen} {desc[:200]!r}", flush=True)
         if seen is True:
             found = (label, desc)
+            found_img = img
             break
         if seen is None and desc and best is None:
             best = (label, desc)
@@ -9816,6 +9827,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
             print(f"[subject] {pcam}: found={seen} {desc[:200]!r}", flush=True)
             if seen is True:
                 found = (label, desc)
+                found_img = img
                 break
             if seen is None and desc and best is None:
                 best = (label, desc)
@@ -9842,7 +9854,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
         # dark cat on a dark couch is the wrong-city failure class again.
         reply = f"I didn't see {name} on the {where}."
     print(f"Zeev [subject/{name}]: {reply}\n", flush=True)
-    return reply, frames
+    return reply, frames, found_img
 
 
 def wyze_snapshot(stream: str, timeout: float | None = None):
@@ -12579,7 +12591,7 @@ def handle_transcript(ctx, transcript, _depth=0):
             finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
             return
         ctx._set_face("thinking", f"{name}…")
-        reply, frames = sweep_for_subject(
+        reply, frames, _found_img = sweep_for_subject(
             _subj, cams=cams, phone_cams=phone_cams,
             on_progress=lambda msg: ctx._speak_device(msg, _LAST_VOICE))
         # vision=True whenever at least one camera actually returned a frame

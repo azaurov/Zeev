@@ -183,12 +183,13 @@ Migrated off Groq-deprecated `llama-3.1-8b-instant`/`llama-3.3-70b-versatile` (c
 
 House cameras reach the same vision path as the Pi's own eye. Full incident history (bridge-vs-flashed-firmware saga, camera-gate hallucination bugs, credential leaks, flashing recovery) moved to `docs/wyze-cameras.md` — read it before touching camera code.
 
-**Current state**: two cameras (`smokeys-cam` at 10.0.0.217, `bedroom-cam` at 10.0.0.84) run Wyze's own RTSP firmware directly (`/stream0`, not `/live`) and work; the other six are bridge-blocked on a hardware DTLS handshake issue with no software fix, and only two cameras can safely take the flashing route (see `docs/wyze-rtsp-flashing.md`).
+**Current state**: two cameras (`smokeys-cam` at 10.0.0.217, `bedroom-cam` at 10.0.0.84) run Wyze's own RTSP firmware directly (`/stream0`, not `/live`) and work; the other six are bridge-blocked on a hardware DTLS handshake issue with no software fix, and only two cameras can safely take the flashing route (see `docs/wyze-rtsp-flashing.md`). Four non-RTSP cameras — **Living Room, Backyard, Front Yard, and Secret** (Solar Cam Pan) — are reachable via the phone-relay snapshot path: `_PHONE_CAMERA_ALIASES` → `phone_camera_snapshot_remote()` → `DOG_CALLER_URL/snapshot` (the Android phone navigates to the Wyze app's live view and screenshots it, ~30s latency, announced). `DOG_CALLER_KEY` and `DOG_CALLER_URL` must be set in `.env`.
 
 **Non-obvious gotchas that bite immediately**:
 - `_scrub_rtsp()` before logging anything from ffmpeg — it echoes the password in every error line.
 - `resolve_wyze_cam()` asks rather than guesses; a missed camera gate does NOT fail safe — the 8B has invented entire fabricated camera feeds before.
 - Never put a camera password in a URL or shell command (`%`/`@` characters break `printf`/URL parsing) — `WYZE_RTSP_USER`/`WYZE_RTSP_PASS` are plain values, percent-encoded by `wyze_stream_url()`.
+- `"secret"` alone is NOT a matched phone-relay alias — it's an ordinary English word; the match requires `"secret cam"`/`"secret camera"` to avoid false-positive on unrelated speech.
 
 ### Named subjects ("check on Smokey")
 

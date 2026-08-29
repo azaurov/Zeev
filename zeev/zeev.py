@@ -8801,8 +8801,12 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             have = f"The only cameras that exist are: {cam_names}"
         else:
             have = "The only cameras that exist are"
-        have += (", Living Room, Backyard, Front Yard (these three take about "
-                 "30s to check, through the phone, not instant like the others).")
+        _phone_labels = sorted(set(
+            k.replace("_", " ").title() for k in _PHONE_CAMERA_ALIASES.values()
+        ))
+        have += (", " + ", ".join(_phone_labels) +
+                 " (these take about 30s to check, through the phone, not "
+                 "instant like the others).")
         parts.append(
             "\n\n## Cameras: you have NOT been given any camera image on this "
             f"turn. {have} You cannot see through any of them right now, and "

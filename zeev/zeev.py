@@ -11507,7 +11507,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                               "speak": False, "image": _want_photo,
                               "text": user_msg},
                         headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
-                        timeout=90,
+                        # "all/every cameras" phrasing (resolve_subject_cams())
+                        # can sweep up to 2 RTSP + 3 phone-relay cameras
+                        # sequentially on a miss -- phone-relay alone is
+                        # ~10-30s navigation + ~21-25s vision per camera, so a
+                        # full 5-camera miss can run past 200s. 90s cut this
+                        # off mid-sweep live 2026-08-28 ("I couldn't reach the
+                        # cameras") even though the Pi's own sweep succeeded
+                        # moments later. Stays under nginx's 300s
+                        # proxy_read_timeout on the public /chat route.
+                        timeout=270,
                     )
                     resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
                 except Exception as e:

@@ -9563,6 +9563,23 @@ _WYZE_PHOTO_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Web chat's cue that a follow-up is asking about the scene in whatever
+# camera frame was just shown -- "describe the scene", "any people in it",
+# "who's there", "try again" -- rather than requesting a fresh, differently
+# framed photo. Found live 2026-08-29: none of these match a camera name or
+# _WYZE_PHOTO_RE, so they fell through to plain chat with no image at all,
+# and the model either honestly declined or (on "try again") confidently
+# fabricated a detailed room description. "try again" alone is too generic
+# to gate on this regex -- it's only treated as a scene follow-up when the
+# immediately preceding reply actually came from a camera branch (see
+# _last_cam["camera_turn"] in run_web_server).
+_SCENE_FOLLOWUP_RE = re.compile(
+    r"\b(describe|analyz(?:e|ing)|what.{0,20}(?:see|show|happening|going on)|"
+    r"any(?:one|body)?\b.{0,15}\b(?:scene|there|visible|room)|"
+    r"who(?:'s| is).{0,15}(?:there|in)|try again)\b",
+    re.IGNORECASE,
+)
+
 # Cameras with NO RTSP path at all -- Backyard/Front Yard (model WVOD1)
 # never got RTSP firmware from Wyze, ever, and Living Room was flashed
 # once, bricked, and recovered to stock ("do not retry", see
@@ -11152,6 +11169,12 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     init_thermal()
     session = load_prior()
     lock = threading.Lock()
+    # Last camera frame shown over /chat or /snap, so a follow-up like
+    # "describe the scene" can run vision on the actual image instead of
+    # falling through to text-only chat. "camera_turn" gates _SCENE_FOLLOWUP_RE's
+    # bare "try again" match -- only reinterpreted as a vision follow-up when
+    # the immediately preceding reply really was a camera branch.
+    _last_cam = {"image": None, "label": "the camera", "camera_turn": False}
 
     start_health_monitor(lambda msg: print(f"[health] ⚠  {msg}", flush=True))
 
@@ -11572,6 +11595,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 if snap_reply:
                     q_text = question or "What do you see?"
                     with lock:
+                        _last_cam["image"] = img
+                        _last_cam["label"] = "the Pi's own camera"
+                        _last_cam["camera_turn"] = True
                         session.append({"role": "user", "content": f"[camera] {q_text}"})
                         session.append({"role": "assistant", "content": snap_reply})
                         append_message("user", f"[camera] {q_text}")
@@ -11607,6 +11633,15 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_response(400)
                 self.end_headers()
                 return
+
+            # Snapshot the previous turn's camera-turn flag before resetting
+            # it -- the scene-followup branch below needs to know whether
+            # the turn immediately before THIS one was a camera reply (to
+            # gate a bare "try again"), and every branch that runs this turn
+            # sets its own fresh value before returning.
+            with lock:
+                _prev_camera_turn = _last_cam["camera_turn"]
+                _last_cam["camera_turn"] = False
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -11713,6 +11748,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 with lock:
+                    if resp_data.get("image"):
+                        _last_cam["image"] = resp_data["image"]
+                        _last_cam["label"] = _subj["name"]
+                        _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
@@ -11750,12 +11789,20 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     print(f"[watch-relay] {e}", flush=True)
                     resp_data = {}
                 reply = resp_data.get("message") or "I couldn't reach the cameras right now."
-                for img in resp_data.get("images") or []:
+                _sweep_images = resp_data.get("images") or []
+                for img in _sweep_images:
                     sse({"image": f"data:image/jpeg;base64,{img}"})
                 sse({"token": reply})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 with lock:
+                    if _sweep_images:
+                        # Multiple cameras in one sweep -- keep only the last
+                        # frame shown, since that's what "describe the scene"
+                        # would mean without a named camera to disambiguate.
+                        _last_cam["image"] = _sweep_images[-1]
+                        _last_cam["label"] = "the cameras"
+                        _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
@@ -11784,6 +11831,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 with lock:
+                    if resp_data.get("image"):
+                        _last_cam["image"] = resp_data["image"]
+                        _last_cam["label"] = wyze_cam_label(_cam_name)
+                        _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
@@ -11816,10 +11867,54 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 with lock:
+                    if image:
+                        _last_cam["image"] = image
+                        _last_cam["label"] = _phone_cam_label
+                        _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
                     append_message("assistant", reply)
+                    if len(session) > 60:
+                        session[:] = session[-60:]
+                return
+
+            # ── Scene follow-up about the last shown camera frame ──────────
+            # "Describe the scene", "any people in it", "try again" -- none
+            # of these name a camera or match _WYZE_PHOTO_RE, so without this
+            # branch they fell through to plain chat with no image at all.
+            # Found live 2026-08-29: the model then either honestly declined
+            # ("above my pay grade") or, on "try again", confidently
+            # fabricated a detailed room description with zero grounding.
+            # Re-runs vision on the actual last frame instead. A bare "try
+            # again" only counts if the immediately preceding reply really
+            # was a camera turn (_prev_camera_turn) -- the phrase alone is
+            # too generic (used to retry unrelated things) to safely assume
+            # it means "the camera" otherwise.
+            with lock:
+                _cam_image = _last_cam["image"]
+                _cam_label = _last_cam["label"]
+            _is_scene_followup = bool(_cam_image) and _SCENE_FOLLOWUP_RE.search(user_msg) and (
+                _prev_camera_turn or "try again" not in user_msg.lower())
+            if _is_scene_followup:
+                sse({"info": f"[looking again at {_cam_label}...]"})
+                vquestion = user_msg if "try again" not in user_msg.lower() else (
+                    f"Describe what's visible on the {_cam_label} camera.")
+                try:
+                    vreply, verr = vision_complete(_cam_image, vquestion)
+                except requests.RequestException as e:
+                    vreply, verr = None, str(e)
+                reply = vreply or (verr or "I couldn't analyze that image right now.")
+                sse({"token": reply})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                with lock:
+                    _last_cam["camera_turn"] = True
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    session.append({"role": "assistant", "content": reply})
+                    # Tag the stored copy only, same as /snap -- see _VISION_TAG.
+                    append_message("assistant", (_VISION_TAG + reply) if vreply else reply)
                     if len(session) > 60:
                         session[:] = session[-60:]
                 return

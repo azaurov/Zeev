@@ -1430,14 +1430,26 @@ _MODEL_SHORT = {
 PRIOR_TURNS  = 15
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # Groq removed every vision model (verified 2026-07-30 against /v1/models: 15
-# models, none accept images), so VISION_MODEL 404s and the camera paths that
-# depend on it are dead there. Vision now goes to OpenRouter's free tier.
+# models, none accept images, re-checked 2026-08-29 -- still true), so
+# VISION_MODEL 404s and the camera paths that depend on it are dead there.
+# Vision now goes to OpenRouter's free tier.
 # Ordered by what actually answered a real frame: gemma-4-26b returned a correct
 # description in 9.8s, gemma-4-31b was 429 rate-limited, and the nvidia VL model
 # did not respond inside 60s. Free-tier 429s are routine, hence the list.
+#
+# Third entry is the PAID version of the same gemma-4-26b model already above
+# -- not a different model, just outside the free tier's shared-congestion
+# pool. Added 2026-08-29 after both free candidates were 429'd on every call
+# across 4 consecutive real sweeps in one morning (a genuine outage, not a
+# momentary blip -- see vision_complete()'s retry comment). Cost is
+# negligible for this use case (~500-1500 tokens/call incl. image, at
+# $0.07/$0.34 per 1M input/output tokens -- well under a cent per call), and
+# it's a strict last resort: only reached, and only billed, when both free
+# models above have already failed.
 VISION_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-26b-a4b-it",
 ]
 VISION_TIMEOUT = float(os.environ.get("VISION_TIMEOUT", "60"))
 

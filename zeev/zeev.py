@@ -9573,10 +9573,24 @@ _WYZE_PHOTO_RE = re.compile(
 # to gate on this regex -- it's only treated as a scene follow-up when the
 # immediately preceding reply actually came from a camera branch (see
 # _last_cam["camera_turn"] in run_web_server).
+#
+# Widened same day, second live incident: a user directly disputing an
+# already-given "no people" answer -- "are you hallucinating because
+# there's people in the bedroom cam", "looks like there's people in there
+# isn't there" -- matched none of the original alternatives either (no
+# "describe"/"analyze"/"any...scene" shape), so the dispute fell through to
+# plain chat too, which just repeated the same unverified "no people"
+# claim from session history instead of re-checking the actual frame.
+# Added explicit person/animal-sighting words and "hallucinat*" as their
+# own triggers, since a direct factual dispute about who/what is in frame
+# is exactly the case this branch exists for.
 _SCENE_FOLLOWUP_RE = re.compile(
-    r"\b(describe|analyz(?:e|ing)|what.{0,20}(?:see|show|happening|going on)|"
+    r"\b(describe|analyz(?:e|ing)|hallucinat|"
+    r"what.{0,20}(?:see|show|happening|going on)|"
     r"any(?:one|body)?\b.{0,15}\b(?:scene|there|visible|room)|"
-    r"who(?:'s| is).{0,15}(?:there|in)|try again)\b",
+    r"who(?:'s| is).{0,15}(?:there|in)|"
+    r"people|person|human|someone|somebody|"
+    r"try again)\b",
     re.IGNORECASE,
 )
 

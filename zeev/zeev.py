@@ -11866,6 +11866,21 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 reply = resp_data.get("message") or f"I couldn't reach {wyze_cam_label(_cam_name)} right now."
                 if resp_data.get("image"):
                     sse({"image": f"data:image/jpeg;base64,{resp_data['image']}"})
+                # A message can carry BOTH photo wording and a descriptive
+                # ask in one breath ("describe the picture of the bedroom
+                # cam") -- _WYZE_PHOTO_RE alone routed it here before it
+                # ever got a chance to hit the scene-followup branch below,
+                # so it got a bare "Here's X." with no analysis. Run vision
+                # right here too when that's the case, same as that branch.
+                vreply = None
+                if resp_data.get("image") and _SCENE_FOLLOWUP_RE.search(user_msg):
+                    sse({"info": f"[looking at {wyze_cam_label(_cam_name)}...]"})
+                    try:
+                        vreply, verr = vision_complete(resp_data["image"], user_msg)
+                    except requests.RequestException as e:
+                        vreply, verr = None, str(e)
+                    if vreply:
+                        reply = vreply
                 sse({"token": reply})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
@@ -11877,7 +11892,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
-                    append_message("assistant", reply)
+                    # Tag the stored copy only when this really was a vision
+                    # reply, same convention as /snap and the scene-followup
+                    # branch -- see _VISION_TAG.
+                    append_message("assistant", (_VISION_TAG + reply) if vreply else reply)
                     if len(session) > 60:
                         session[:] = session[-60:]
                 return
@@ -11902,6 +11920,23 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
                 if image:
                     sse({"image": f"data:image/jpeg;base64,{image}"})
+                # Same gap as the RTSP branch above: naming a phone-relay
+                # camera used to always short-circuit to a bare "Here's X."
+                # with zero vision -- even for "describe the scene of the
+                # Living Room cam" -- since this branch has no photo-wording
+                # gate and always intercepts before the scene-followup
+                # branch below gets a turn. Run vision here too on a
+                # descriptive ask; a bare "show me X" stays fast (no vision
+                # call), same tradeoff the RTSP branch makes.
+                vreply = None
+                if image and _SCENE_FOLLOWUP_RE.search(user_msg):
+                    sse({"info": f"[looking at {_phone_cam_label}...]"})
+                    try:
+                        vreply, verr = vision_complete(image, user_msg)
+                    except requests.RequestException as e:
+                        vreply, verr = None, str(e)
+                    if vreply:
+                        reply = vreply
                 sse({"token": reply})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
@@ -11913,7 +11948,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
                     session.append({"role": "assistant", "content": reply})
-                    append_message("assistant", reply)
+                    append_message("assistant", (_VISION_TAG + reply) if vreply else reply)
                     if len(session) > 60:
                         session[:] = session[-60:]
                 return

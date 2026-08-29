@@ -9519,12 +9519,20 @@ _WYZE_PHOTO_RE = re.compile(
 # Cameras with NO RTSP path at all -- Backyard/Front Yard (model WVOD1)
 # never got RTSP firmware from Wyze, ever, and Living Room was flashed
 # once, bricked, and recovered to stock ("do not retry", see
-# docs/wyze-cameras.md). Deliberately kept out of WYZE_CAMERAS/
-# WYZE_SUBJECTS -- adding them there would make wyze_snapshot() try a real
-# RTSP connection that can only ever time out. Instead these route to
+# docs/wyze-cameras.md). "secret" (Wyze Solar Cam Pan, ME_WCO3/WYZESCPWH)
+# fails the bridge with IOTC_ER_UNLICENSE, a harder failure than the DTLS
+# timeout the other three hit -- no working RTSP route exists or is
+# expected to. Deliberately kept out of WYZE_CAMERAS/WYZE_SUBJECTS --
+# adding them there would make wyze_snapshot() try a real RTSP connection
+# that can only ever time out. Instead these route to
 # ~/troubleshooting/wyze-dog-caller's phone-screenshot relay (DOG_CALLER_URL)
 # -- the same physical phone that plays call_dog()'s "come inside" clip
-# can also just look at the app's own live view and screenshot it.
+# can also just look at the app's own live view and take a real photo.
+#
+# "secret" alone is deliberately NOT a matched alias -- it's an ordinary
+# English word ("keep this a secret") unlike the room names above, so the
+# match requires "secret" alongside "cam"/"camera" to avoid a false
+# positive on unrelated speech.
 _PHONE_CAMERA_ALIASES = {
     "living room": "living_room",
     "livingroom": "living_room",
@@ -9532,6 +9540,8 @@ _PHONE_CAMERA_ALIASES = {
     "back yard": "backyard",
     "front yard": "front_yard",
     "frontyard": "front_yard",
+    "secret cam": "secret",
+    "secret camera": "secret",
 }
 
 

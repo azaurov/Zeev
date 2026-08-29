@@ -8,8 +8,10 @@ A personal AI companion running on a **Raspberry Pi Zero 2W**. Zeev uses [Groq](
 
 - **Fast chat** — auto-routes each message to the right model (8B fast, 70B smart, DeepSeek R1 for reasoning)
 - **Web search** — keyword heuristic triggers [Tavily](https://tavily.com) search and injects results into the reply; weather replies spell out units in full words (e.g. "degrees Fahrenheit", "miles per hour") instead of symbols, since replies are spoken aloud
-- **Persistent memory** — extracts facts about you from conversations and recalls them on every turn
-- **History RAG** — keyword-indexes past conversations and injects relevant exchanges into context
+- **Persistent memory** — extracts facts about you from conversations and recalls them on every turn, scoped to what you actually said (not Zeev's own prior assertions) and excluding one-time/temporary events
+- **History RAG** — semantic retrieval (remote embeddings, local dot-product search) with a keyword-index fallback for offline use; recency-weighted so a relevant-but-old exchange can still win, deduped so the same question asked on different days doesn't crowd out other context
+- **House cameras** — beyond the Pi's own camera, Zeev can look through Wyze cameras around the house: some via direct RTSP, others via a phone-relay snapshot path (including two with pan/tilt and spotlight control). Ask "check on \<pet name\>" to sweep multiple cameras looking for a named subject, with a faithful "I didn't see them" rather than a guess when nothing is found
+- **Reminders & timers** — "remind me to call Dave at 4" sets a real reminder via LLM tool calling; Zeev announces it aloud when due, waiting for a free moment rather than talking over you
 - **Torah RAG** — local SQLite FTS5 database of Tanakh, Mishna, Talmud, Apocrypha, Liturgy, Zohar, Dead Sea Scrolls, and Sumerian literature; relevant passages injected into context automatically; scripture replies use an expanded 1,200-token limit so passages are never cut off mid-verse
 - **Multilingual TTS** — speaks English, Spanish, Russian, and Hebrew with distinct voices; language defaults to English and switches via explicit `/lang` command in terminal/web, or by voice in device mode ("speak Russian", "switch to Hebrew") — no character-based auto-detection; device mode voice is **Sarina** (Zeev's partner, Kokoro `af_heart`); Zeev's own voice is Groq Orpheus `daniel`; voice selectable per-request via the Go daemon
 - **Volume control** — adjust system volume from the terminal (`/vol`, `/vol+`, `/vol-`, `/vol N`) or the web UI (`🔉` / `🔊` buttons); works with both standard ALSA and the WM8960 HAT
@@ -83,26 +85,28 @@ For driving the web server headlessly (e.g. from an agent, or when port 5000 is 
 | Key | Model | Use case |
 |-----|-------|----------|
 | Auto | *(routed per message)* | Default |
-| 1 | `llama-3.1-8b-instant` | Fast — casual chat, simple Q&A |
-| 2 | `llama-3.3-70b-versatile` | Smart — code, explanations, writing |
-| 3 | `deepseek-r1-distill-llama-70b` | Reasoning — math, logic, proofs |
+| 1 | `openai/gpt-oss-20b` | Fast — casual chat |
+| 2 | `qwen/qwen3.6-27b` | Smart — code, writing |
+| 3 | `openai/gpt-oss-120b` | Reasoning — math, logic |
 
 Use `/model` in the terminal or the model selector in the web UI to lock to a specific model. `/model 0` returns to auto-routing.
 
-**Rate-limit resilience**: if 70B or R1 hits a Groq 429 (TPM burst or daily TPD limit), Zeev automatically retries with 8B instead of surfacing an error. Cooldowns are tracked per-model so a 70B limit never blocks 8B. If Groq itself is rate-limited (any model, including 8B), Zeev falls back to [OpenRouter](https://openrouter.ai)'s free tier for that reply when `OPENROUTER_API_KEY` is set. In device mode, the Whisplay display shows a specific message ("Rate limited", "No network") and errors are logged to `data/zeev_errors.log`.
+**Rate-limit resilience**: if 70B-equivalent or reasoning-tier hits a Groq 429 (TPM burst or daily TPD limit), Zeev automatically retries with the fast tier instead of surfacing an error. Cooldowns are tracked per-model so one model's limit never blocks another. If Groq itself is rate-limited (any model, including the fast tier), Zeev falls back to [OpenRouter](https://openrouter.ai)'s free tier for that reply when `OPENROUTER_API_KEY` is set (a short ordered candidate list, verified to stream real reply text rather than hidden reasoning tokens). In device mode, the Whisplay display shows a specific message ("Rate limited", "No network") and errors are logged to `data/zeev_errors.log`.
+
+**Vision**: Groq no longer serves any vision model, so photos (Pi camera, house cameras, web `/snap`) are described via OpenRouter's free-tier vision models instead, walked in order with fallback on a 429 or stall.
 
 **Refusal resilience**: real-world-topic questions ("use Talmudic knowledge to form an opinion about [a named court case]") are first grounded in live web search results so the model has real facts to reason from instead of declining outright; if it still refuses, device mode detects the canned refusal and retries once through a second local LLM (qwen2.5 on a home LAN box) before giving up.
 
 ## TTS
 
-| Language | Set via | Terminal | Web UI | Device mode |
-|----------|---------|----------|--------|-------------|
-| English | default (always) | Piper via Go daemon (warm, ~4s) | Groq Orpheus `daniel` | Groq Orpheus `daniel` |
-| Spanish | `/lang es` (terminal/web) or say "speak Spanish" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
-| Russian | `/lang ru` (terminal/web) or say "speak Russian" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | **local Piper voice "Irina"**, gTTS if Piper fails |
-| Hebrew | `/lang he` (terminal/web) or say "speak Hebrew" (device) | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 | Google Translate TTS + mpg123 |
+| Language | Set via | Terminal/device | Web UI |
+|----------|---------|------------------|--------|
+| English | default (always) | Kokoro TTS (remote, via Go daemon), Piper local fallback | Groq Orpheus `daniel` |
+| Spanish | `/lang es` (terminal/web) or say "speak Spanish" (device) | remote Piper `es_AR-daniela-high` (female) first, local Piper/gTTS fallback | gTTS MP3 → browser speech synthesis |
+| Russian | `/lang ru` (terminal/web) or say "speak Russian" (device) | remote Piper `ru_RU-irina-medium` (female) first, local Piper/gTTS fallback | gTTS MP3 → browser speech synthesis |
+| Hebrew | `/lang he` (terminal/web) or say "speak Hebrew" (device) | gTTS + mpg123 | gTTS MP3 → browser speech synthesis |
 
-Language always defaults to English — no automatic detection from character sets. In the terminal and web UI, switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). In device mode, say a phrase like "speak Russian", "switch to Hebrew", or "answer in Spanish" — Zeev confirms the switch aloud in the new language; say "switch back to English" to reset. Device mode tries Groq Orpheus first (English only, ~200ms); Russian instead goes straight to a local Piper voice (female, "Irina") since the Go audio daemon only speaks Piper for English, falling back to Google Translate TTS if Piper fails; other non-English languages use Google Translate TTS, then Piper (via Go daemon), then espeak-ng. The Go daemon keeps Piper's ONNX model warm — no per-call reload on the Pi Zero 2W.
+Language always defaults to English — no automatic detection from character sets. In the terminal and web UI, switch explicitly with `/lang he`, `/lang es`, `/lang ru`, or `/lang auto` (resets to English). In device mode, say a phrase like "speak Russian", "switch to Hebrew", or "answer in Spanish" — Zeev confirms the switch aloud in the new language; say "switch back to English" to reset. Device mode's primary voice is **Sarina** (Kokoro `af_heart`), Zeev's own voice is Groq Orpheus `daniel`; Russian/Spanish route to a dedicated remote Piper voice rather than English TTS, since a small on-device model mispronounces Cyrillic/accented text badly. The Go daemon keeps everything warm — no per-call model reload on the Pi Zero 2W.
 
 ### Installing Piper (terminal TTS)
 
@@ -223,7 +227,7 @@ sudo apt install -y python3-picamera2
 
 Zeev auto-detects the camera at startup via `picamera2`. In the terminal use `/look [question]` to take a photo and ask Zeev about it. The web UI shows a 📷 button (with optional flip toggle). Use `/flip` or the ↕ button to rotate the image 180° (saved persistently).
 
-In **device mode** (Whisplay push-to-talk), natural language camera phrases work hands-free — say "what do you see", "take a photo", or "can you see anything" and Zeev captures a JPEG and describes it via the Llama 4 Scout vision model.
+In **device mode** (Whisplay push-to-talk), natural language camera phrases work hands-free — say "what do you see", "take a photo", or "can you see anything" and Zeev captures a JPEG and describes it via an OpenRouter free-tier vision model.
 
 ---
 

@@ -9771,6 +9771,35 @@ def subject_vision_prompt(kind: str, cam_label: str) -> str:
 
 _SUBJECT_FOUND_RE = re.compile(r"^[^\w]*found\s*[:\-]?\s*(yes|no)\b", re.I | re.M)
 
+# Words that turn "kind" into a compound referring to an object, not the
+# animal itself -- "a cat tree" or "the dog bed" isn't a sighting.
+_KIND_COMPOUND_SUFFIXES = {
+    "tree", "bed", "toy", "toys", "house", "food", "bowl", "tower", "condo",
+    "scratcher", "leash", "collar", "flap", "carrier", "crate", "kennel",
+}
+_NEGATION_WORDS = {"no", "not", "without", "nor", "none", "n't"}
+
+
+def _kind_mentioned_positively(desc: str, kind: str) -> bool:
+    """True if `desc` describes an actual sighting of `kind`, not just the
+    word appearing in a negated clause ("no cat is visible") or as part of a
+    furniture/object compound ("a cat tree", "the dog bed"). Found live
+    2026-08-29: both of those false-positive shapes hit the contradiction
+    guard in the same real sweep (smokeys-cam: "...a cat tree...but no cat is
+    visible"; bedroom-cam: "There is no dog visible...") and downgraded two
+    genuine misses into "not sure" instead of a clean "didn't see them".
+    """
+    for m in re.finditer(rf"\b{re.escape(kind)}s?\b", desc, re.IGNORECASE):
+        after = desc[m.end():m.end() + 20].strip().split()
+        if after and after[0].lower().rstrip(".,;:!?") in _KIND_COMPOUND_SUFFIXES:
+            continue
+        before_words = re.findall(r"[A-Za-z']+", desc[:m.start()])[-4:]
+        if any(w.lower() in _NEGATION_WORDS or w.lower().endswith("n't")
+               for w in before_words):
+            continue
+        return True
+    return False
+
 
 def parse_subject_sighting(reply: str, kind: str = ""):
     """``(found, description)`` where `found` is True, False or None.
@@ -9814,7 +9843,7 @@ def parse_subject_sighting(reply: str, kind: str = ""):
     # that quotes what it saw and lets Alex judge. Same reasoning as the
     # three-state verdict itself -- never overclaim in either direction.
     if found is False and kind:
-        if re.search(rf"\b{re.escape(kind)}s?\b", desc, re.IGNORECASE):
+        if _kind_mentioned_positively(desc, kind):
             print(f"[subject] verdict 'no' contradicts its own description "
                   f"(mentions {kind!r}) — treating as uncertain", flush=True)
             return None, desc

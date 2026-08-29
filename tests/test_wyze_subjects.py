@@ -246,3 +246,31 @@ def test_no_kind_keeps_old_behaviour(zeev):
     """Callers that pass no kind (and the existing tests) are unchanged."""
     seen, _ = zeev.parse_subject_sighting("FOUND: no. I see a cat.")
     assert seen is False
+
+
+def test_negated_mention_does_not_trigger_the_guard(zeev):
+    """"no cat is visible" mentions the word but negates it -- this is a
+    genuine miss, not a contradiction. Live 2026-08-29, bedroom-cam: "There
+    is no dog visible in the image; instead, a multi-panel wolf artwork
+    hangs above the bed." was downgraded to uncertain when it should have
+    stayed a clean "no"."""
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: no. There is no dog visible in the image; instead, a "
+        "multi-panel wolf artwork hangs above the bed.", kind="dog")
+    assert seen is False, seen
+
+
+def test_furniture_compound_does_not_trigger_the_guard(zeev):
+    """"a cat tree" names furniture, not a cat -- live 2026-08-29,
+    smokeys-cam: "...a cat tree, and various household items, but no cat is
+    visible" was downgraded to uncertain by the furniture mention alone."""
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: no. The room contains a window, bookshelves, a cat tree, "
+        "and various household items, but no cat is visible.", kind="cat")
+    assert seen is False, seen
+
+
+def test_dog_bed_furniture_compound_does_not_trigger_the_guard(zeev):
+    seen, _ = zeev.parse_subject_sighting(
+        "FOUND: no. I can see an empty dog bed by the window.", kind="dog")
+    assert seen is False, seen

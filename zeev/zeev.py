@@ -9075,47 +9075,68 @@ def _build_vision_msgs(image_b64, question=""):
     ]
 
 
+# Free-tier OpenRouter vision models sit behind a *shared* worker pool, not a
+# per-account quota -- found live 2026-08-29, sweep_for_subject's cron report
+# hit "Worker local total request limit reached (16/16)" on nemotron-omni and
+# HTTP 429 on gemma after only 4 total vision calls, with the Pi's own device
+# mode confirmed idle at the time (no way this account exhausted anything
+# itself). That kind of congestion is often gone a few seconds later, so one
+# retry pass over the whole model list -- after every candidate has already
+# failed once -- costs one short sleep and often turns a hard failure into a
+# real answer, rather than the two config knobs immediately below adding to a
+# background sweep's tolerance for a slow answer.
+VISION_RETRIES = int(os.environ.get("ZEEV_VISION_RETRIES", "1"))
+VISION_RETRY_DELAY_S = float(os.environ.get("ZEEV_VISION_RETRY_DELAY", "3"))
+
+
 def vision_complete(image_b64, question="", models=None, timeout=None):
     """Describe an image. Returns ``(text, error)``; text is None on failure.
 
     Walks `VISION_MODELS` in order because these are free-tier endpoints: a 429
     or a stall on one is an ordinary Tuesday, not a reason to fail the turn.
     Replaces the old single `_groq_post(VISION_MODEL)` call, which now 404s --
-    Groq dropped vision entirely.
+    Groq dropped vision entirely. If every model in the list fails, the whole
+    list is retried up to `VISION_RETRIES` more times after a short delay --
+    see the module-level comment above for why that's worth doing here.
     """
     if not OPENROUTER_API_KEY:
         return None, "no OPENROUTER_API_KEY (Groq no longer serves vision models)"
     msgs = _build_vision_msgs(image_b64, question)
     last = "no models tried"
-    for m in (models or VISION_MODELS):
-        try:
-            r = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                         "Content-Type": "application/json"},
-                json={"model": m, "messages": msgs, "max_tokens": 600},
-                timeout=timeout or VISION_TIMEOUT,
-            )
-            if r.status_code == 200:
-                body = r.json()
-                # OpenRouter can 200 an upstream failure instead of surfacing
-                # it as an HTTP status -- found live 2026-08-29, nemotron-omni
-                # returned {"error": {"message": "...ResourceExhausted..."}}
-                # with no "choices" at all. Indexing straight in raised a bare
-                # KeyError that told the log nothing about why.
-                if "error" in body:
-                    err = body["error"]
-                    last = f"{m}: {err.get('message', err) if isinstance(err, dict) else err}"
+    for attempt in range(VISION_RETRIES + 1):
+        for m in (models or VISION_MODELS):
+            try:
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"model": m, "messages": msgs, "max_tokens": 600},
+                    timeout=timeout or VISION_TIMEOUT,
+                )
+                if r.status_code == 200:
+                    body = r.json()
+                    # OpenRouter can 200 an upstream failure instead of surfacing
+                    # it as an HTTP status -- found live 2026-08-29, nemotron-omni
+                    # returned {"error": {"message": "...ResourceExhausted..."}}
+                    # with no "choices" at all. Indexing straight in raised a bare
+                    # KeyError that told the log nothing about why.
+                    if "error" in body:
+                        err = body["error"]
+                        last = f"{m}: {err.get('message', err) if isinstance(err, dict) else err}"
+                    else:
+                        txt = _strip_think_text(body["choices"][0]["message"]["content"])
+                        if txt:
+                            return txt, None
+                        last = f"{m}: empty reply"
                 else:
-                    txt = _strip_think_text(body["choices"][0]["message"]["content"])
-                    if txt:
-                        return txt, None
-                    last = f"{m}: empty reply"
-            else:
-                last = f"{m}: HTTP {r.status_code}"
-        except Exception as e:
-            last = f"{m}: {type(e).__name__}"
-        print(f"[vision] {last}, trying next", flush=True)
+                    last = f"{m}: HTTP {r.status_code}"
+            except Exception as e:
+                last = f"{m}: {type(e).__name__}"
+            print(f"[vision] {last}, trying next", flush=True)
+        if attempt < VISION_RETRIES:
+            print(f"[vision] all models failed, retrying in {VISION_RETRY_DELAY_S}s "
+                  f"(attempt {attempt + 1}/{VISION_RETRIES})", flush=True)
+            time.sleep(VISION_RETRY_DELAY_S)
     return None, last
 
 
@@ -9858,6 +9879,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     found = best = None      # best = an inconclusive read worth reporting
     found_img = None         # the frame that produced the "found" verdict
     frames = 0
+    vision_failures = 0      # frames grabbed but never actually judged
     for i, stream in enumerate(cams):
         th, box = pending.get(stream) or _grab(stream)
         th.join(WYZE_SNAP_TIMEOUT + 5)
@@ -9876,6 +9898,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
         vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
         if not vreply:
             print(f"[subject] vision failed on {stream}: {verr}", flush=True)
+            vision_failures += 1
             continue
         seen, desc = parse_subject_sighting(vreply, kind)
         # 200, not 80: the first live sweep logged "...and a cat" on a
@@ -9912,6 +9935,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
             vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
             if not vreply:
                 print(f"[subject] vision failed on {pcam}: {verr}", flush=True)
+                vision_failures += 1
                 continue
             seen, desc = parse_subject_sighting(vreply, kind)
             print(f"[subject] {pcam}: found={seen} {desc[:200]!r}", flush=True)
@@ -9937,6 +9961,22 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
                                  + [p.replace("_", " ") for p in phone_cams])
         reply = (f"I couldn't get a picture from the {where} just "
                  "now — it may be asleep or offline.")
+    elif vision_failures >= frames:
+        # Every frame we grabbed never actually got judged -- the vision
+        # backend itself failed (rate limit, outage, etc.), not a real look
+        # that came up empty. Reporting this as "I didn't see X" would be a
+        # confident negative built on zero actual observations -- the same
+        # honesty guardrail parse_subject_sighting() already enforces for an
+        # unparseable reply, just one failure mode earlier: found live
+        # 2026-08-29 when both OpenRouter free vision models were exhausted/
+        # 429'd on every single frame, and the sweep still emailed Alex and
+        # Maria a plain "I didn't see smokey/leo" as if the cameras had been
+        # checked.
+        where = " or the ".join([wyze_cam_label(c) for c in cams]
+                                 + [p.replace("_", " ") for p in phone_cams])
+        reply = (f"I got a picture from the {where}, but couldn't analyze "
+                 f"it just now — the vision service is unavailable, so I "
+                 f"can't say whether {name} is there.")
     else:
         where = " or the ".join([wyze_cam_label(c) for c in cams]
                                  + [p.replace("_", " ") for p in phone_cams])

@@ -430,6 +430,23 @@ def test_subject_reports_a_dead_camera_as_such(zeev, ctx, monkeypatch):
     assert "couldn't get a picture" in ctx.spoke[-1].lower(), ctx.spoke
 
 
+def test_subject_all_vision_failures_report_honestly_not_as_a_miss(zeev, ctx, monkeypatch):
+    """A frame was grabbed but never actually judged (vision backend
+    exhausted/429 on every camera) must not be reported as "I didn't see
+    Smokey" -- that's a confident negative built on zero real observations.
+    Found live 2026-08-29: both OpenRouter free vision models were
+    rate-limited on every frame, and the sweep still said "I didn't see"."""
+    _subject_env(zeev, monkeypatch)
+    _no_llm(monkeypatch, zeev)
+    monkeypatch.setattr(zeev, "wyze_snapshot", lambda s, **k: "ZmFrZQ==")
+    monkeypatch.setattr(zeev, "vision_complete",
+                        lambda *a, **k: (None, "HTTP 429"))
+    zeev.handle_transcript(ctx, "check on Smokey")
+    reply = ctx.spoke[-1].lower()
+    assert "didn't see" not in reply, ctx.spoke
+    assert "couldn't analyze" in reply or "vision" in reply, ctx.spoke
+
+
 def test_named_room_narrows_the_sweep(zeev, ctx, monkeypatch):
     _subject_env(zeev, monkeypatch)
     _no_llm(monkeypatch, zeev)

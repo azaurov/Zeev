@@ -9315,6 +9315,27 @@ def resolve_wyze_cam(text: str, cams: list[str] | None = None):
     return top[0], sorted(cams)
 
 
+def _all_named_wyze_cams(text: str, cams=None):
+    """All WYZE_CAMERAS keys explicitly named in `text` -- the multi-match
+    counterpart to resolve_wyze_cam(), which stops at a single best match
+    (or None on ambiguity between two same-length matches). A subject search
+    naming several cameras in one sentence ("look for Leo in the bedroom cam
+    and smokeys cam") needs all of them, not one match or a punt to "ask"."""
+    cams = WYZE_CAMERAS if cams is None else cams
+    if not cams or not text:
+        return []
+    t = " " + re.sub(r"[^a-z0-9 ]+", " ", text.lower()) + " "
+    t = re.sub(r"\s+", " ", t)
+    hits = []
+    for c in cams:
+        label = wyze_cam_label(c)
+        for phrase in (label, re.sub(r"\s+(cam|camera)$", "", label)):
+            if phrase and f" {phrase} " in t:
+                hits.append(c)
+                break
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # Named subjects ("check on Smokey")
 # ---------------------------------------------------------------------------
@@ -9526,6 +9547,21 @@ def resolve_phone_camera(text: str):
     return None
 
 
+def _all_named_phone_cams(text: str):
+    """All phone-relay camera keys (see _PHONE_CAMERA_ALIASES) explicitly
+    named in `text` -- the multi-match counterpart to resolve_phone_camera(),
+    same reasoning as _all_named_wyze_cams()."""
+    t = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
+    t = re.sub(r"\s+", " ", t)
+    hits = []
+    for alias in sorted(_PHONE_CAMERA_ALIASES, key=len, reverse=True):
+        if f" {alias} " in t:
+            key = _PHONE_CAMERA_ALIASES[alias]
+            if key not in hits:
+                hits.append(key)
+    return hits
+
+
 def _dog_call_camera(text: str) -> str:
     return "front_yard" if re.search(r"\bfront\b", text, re.IGNORECASE) else "backyard"
 
@@ -9648,10 +9684,25 @@ def parse_subject_sighting(reply: str, kind: str = ""):
     return found, desc
 
 
-def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
+def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | None = None,
+                       on_progress=None):
     """Sweep `cams` (default: `subj["cams"]`, capped to `_SUBJECT_MAX_CAMS`) for
     the named subject in `subj` (a `resolve_subject()` result). Returns
     ``(reply, frames_seen)``.
+
+    `phone_cams` (optional): phone-relay-only camera keys (see
+    _PHONE_CAMERA_ALIASES) -- Living Room/Backyard/Front Yard have no RTSP
+    path at all, so they can't go through the wyze_snapshot() grab loop
+    below; checked sequentially afterward via phone_camera_snapshot_remote()
+    instead. No next-frame-under-current-vision-call overlap for these the
+    way the RTSP loop does: each grab there is already ~10-30s (navigating a
+    physical phone's UI), so there's little to overlap against and the
+    caller has no `ctx` to keep speaking through regardless. Found live
+    2026-08-28: a request naming these cameras explicitly ("find Leo in the
+    living room, backyard, and front yard") was answered by silently
+    ignoring them and sweeping the subject's *default* RTSP cams instead --
+    both this sequential phone-cam pass and the callers now parsing which
+    cameras were actually named exist to fix that.
 
     Extracted from the inline device-mode handler so a second caller (the
     watch HTTP endpoint) can reuse the exact same sweep/verdict logic without
@@ -9662,9 +9713,11 @@ def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
     """
     name, kind = subj["name"], subj["kind"]
     cams = (cams if cams is not None else list(subj["cams"]))[:_SUBJECT_MAX_CAMS]
-    if not cams:
+    phone_cams = list(phone_cams or [])
+    if not cams and not phone_cams:
         return f"I don't have a camera set up to look for {name}.", 0
-    print(f"[subject] looking for {name} on {', '.join(cams)}", flush=True)
+    print(f"[subject] looking for {name} on "
+          f"{', '.join(cams + phone_cams) or '(none)'}", flush=True)
 
     def _grab(stream):
         box = []
@@ -9674,7 +9727,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
         return th, box
 
     # First grab runs under the announcement, same as the room branch below.
-    pending = {cams[0]: _grab(cams[0])}
+    pending = {cams[0]: _grab(cams[0])} if cams else {}
     if on_progress:
         on_progress(f"Let me look for {name}.")
     found = best = None      # best = an inconclusive read worth reporting
@@ -9719,6 +9772,27 @@ def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
                 on_progress(
                     f"Not on the {label}. Checking the {nxt}." if seen is False
                     else f"Checking the {nxt}.")
+    if not found:
+        for j, pcam in enumerate(phone_cams):
+            label = pcam.replace("_", " ")
+            if on_progress:
+                on_progress(f"Checking the {label}.")
+            _ok, msg, img = phone_camera_snapshot_remote(pcam)
+            if not img:
+                print(f"[subject] no frame from {pcam}: {msg}", flush=True)
+                continue
+            frames += 1
+            vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
+            if not vreply:
+                print(f"[subject] vision failed on {pcam}: {verr}", flush=True)
+                continue
+            seen, desc = parse_subject_sighting(vreply, kind)
+            print(f"[subject] {pcam}: found={seen} {desc[:200]!r}", flush=True)
+            if seen is True:
+                found = (label, desc)
+                break
+            if seen is None and desc and best is None:
+                best = (label, desc)
     # Labels already end in "cam" (wyze_cam_label('basement-cam') ->
     # 'basement cam'), so nothing here appends "camera" -- same reason the
     # room branch below speaks the bare label.
@@ -9731,11 +9805,13 @@ def sweep_for_subject(subj: dict, cams: list | None = None, on_progress=None):
         reply = (f"I'm not sure whether that's {name}. On the {label} "
                  f"I can see: {desc}")
     elif not frames:
-        where = " or the ".join(wyze_cam_label(c) for c in cams)
+        where = " or the ".join([wyze_cam_label(c) for c in cams]
+                                 + [p.replace("_", " ") for p in phone_cams])
         reply = (f"I couldn't get a picture from the {where} just "
                  "now — it may be asleep or offline.")
     else:
-        where = " or the ".join(wyze_cam_label(c) for c in cams)
+        where = " or the ".join([wyze_cam_label(c) for c in cams]
+                                 + [p.replace("_", " ") for p in phone_cams])
         # "I didn't see him", not "he isn't there": a small model missing a
         # dark cat on a dark couch is the wrong-city failure class again.
         reply = f"I didn't see {name} on the {where}."
@@ -11390,9 +11466,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     watch_resp = requests.post(
                         ZEEV_WATCH_URL,
                         json={"cmd": "find_subject", "name": _subj["name"],
-                              "speak": False, "image": _want_photo},
+                              "speak": False, "image": _want_photo,
+                              "text": user_msg},
                         headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
-                        timeout=45,
+                        timeout=90,
                     )
                     resp_data = watch_resp.json() if watch_resp.status_code == 200 else {}
                 except Exception as e:
@@ -12463,15 +12540,23 @@ def handle_transcript(ctx, transcript, _depth=0):
     if _subj:
         name = _subj["name"]
         # "check on Smokey in the basement" is a question about the basement.
-        # A named room narrows the sweep to that room rather than reordering it.
-        named_cam, _ = resolve_wyze_cam(transcript)
-        cams = ([named_cam] if named_cam else list(_subj["cams"]))[:_SUBJECT_MAX_CAMS]
-        if not cams:
+        # A named room narrows the sweep to that room rather than reordering
+        # it -- and unlike resolve_wyze_cam()'s single-best-match, all named
+        # cameras are honored, both RTSP (bedroom/smokeys) and phone-relay
+        # (living room/backyard/front yard, which resolve_wyze_cam can't see
+        # at all). Found live 2026-08-28: "find Leo in the living room and
+        # backyard and front yard" was answered by silently sweeping the
+        # subject's default RTSP cams instead of any camera actually named.
+        named_cams = _all_named_wyze_cams(transcript)
+        named_phone_cams = _all_named_phone_cams(transcript)
+        cams = (named_cams if (named_cams or named_phone_cams)
+                else list(_subj["cams"]))[:_SUBJECT_MAX_CAMS]
+        if not cams and not named_phone_cams:
             finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
             return
         ctx._set_face("thinking", f"{name}…")
         reply, frames = sweep_for_subject(
-            _subj, cams=cams,
+            _subj, cams=cams, phone_cams=named_phone_cams,
             on_progress=lambda msg: ctx._speak_device(msg, _LAST_VOICE))
         # vision=True whenever at least one camera actually returned a frame
         # that got inspected -- a clean "not there" is still a point-in-time

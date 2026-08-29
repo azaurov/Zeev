@@ -294,7 +294,7 @@ def _cmd_world_news():
     return True, text
 
 
-def _cmd_find_subject(name, speak=True, include_image=False):
+def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     """Sweep for any single configured subject by key/alias -- the general
     form _cmd_find_smokey's fixed leo+smokey pair is built on. `speak=False`
     is for callers with their own display surface (the web chat's /chat
@@ -302,25 +302,45 @@ def _cmd_find_subject(name, speak=True, include_image=False):
     the lookup through the Pi's physical speaker on every remote chat turn.
     Returns (ok, message, image_b64_or_None).
 
-    `include_image` grabs a second, fresh frame via wyze_snapshot() after
-    the sweep rather than reusing whatever frame sweep_for_subject()
-    inspected internally -- that frame is discarded inside sweep_for_subject
-    (it only ever returns a count, not the bytes), and threading it out
-    would mean changing sweep_for_subject's signature for every other
-    caller (device mode, the old fixed find_smokey command) just for this
-    one caller's needs. A few seconds of camera staleness between the two
-    grabs is a fine trade for not touching that shared function.
+    `text` (optional): the caller's original request text. If it names
+    specific cameras -- RTSP (bedroom/smokeys) or phone-relay (living
+    room/backyard/front yard) -- the sweep is restricted to those instead of
+    the subject's configured defaults, mirroring device mode's own
+    handle_transcript logic (zeev.py). Found live 2026-08-28: without this,
+    "find Leo in the living room and backyard and front yard" over the web
+    UI silently swept the subject's default RTSP cams instead, since this
+    endpoint had no way to see what was actually asked for.
+
+    `include_image` grabs a second, fresh frame after the sweep rather than
+    reusing whatever frame sweep_for_subject() inspected internally -- that
+    frame is discarded inside sweep_for_subject (it only ever returns a
+    count, not the bytes), and threading it out would mean changing
+    sweep_for_subject's signature for every other caller (device mode, the
+    old fixed find_smokey command) just for this one caller's needs. Prefers
+    the first RTSP camera actually swept, falling back to the first
+    phone-relay camera swept if that's all that was named -- a fixed
+    subj["cams"][0] would grab the wrong camera's image whenever a request
+    named phone-relay cameras only. A few seconds of camera staleness
+    between the two grabs is a fine trade for not touching that shared
+    function.
     """
     key = (name or "").strip().lower()
     subj = zeev.WYZE_SUBJECTS.get(key)
     if not subj:
         return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS).", None
-    reply, _frames = zeev.sweep_for_subject(subj)
+    named_cams = zeev._all_named_wyze_cams(text) if text else []
+    named_phone_cams = zeev._all_named_phone_cams(text) if text else []
+    cams = (named_cams if (named_cams or named_phone_cams)
+            else list(subj["cams"]))[:zeev._SUBJECT_MAX_CAMS]
+    reply, _frames = zeev.sweep_for_subject(subj, cams=cams, phone_cams=named_phone_cams)
     if speak:
         _speak(reply)
     image = None
-    if include_image and subj.get("cams"):
-        image = zeev.wyze_snapshot(subj["cams"][0])
+    if include_image:
+        if cams:
+            image = zeev.wyze_snapshot(cams[0])
+        elif named_phone_cams:
+            _ok, _msg, image = zeev.phone_camera_snapshot_remote(named_phone_cams[0])
     return True, reply, image
 
 
@@ -603,7 +623,8 @@ def _make_handler():
                 try:
                     ok, message, image = _cmd_find_subject(
                         data.get("name"), speak=bool(data.get("speak", True)),
-                        include_image=bool(data.get("image", False)))
+                        include_image=bool(data.get("image", False)),
+                        text=data.get("text", ""))
                 except Exception as e:
                     print(f"[watch] find_subject failed: {e}", flush=True)
                     self._json(500, {"ok": False, "error": str(e)})

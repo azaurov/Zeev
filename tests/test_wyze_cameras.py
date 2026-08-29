@@ -616,3 +616,62 @@ def test_pan_only_for_ptz_cameras(zeev):
     assert "front_yard" not in zeev._PTZ_PHONE_CAMERAS
     assert "secret" in zeev._PTZ_PHONE_CAMERAS
     assert "living_room" in zeev._PTZ_PHONE_CAMERAS
+
+
+# --- spotlight / light control ---------------------------------------------
+#
+# Cameras with a spotlight (e.g. secret cam / Solar Cam Pan) can illuminate
+# dark scenes. extract_spotlight_intent() detects explicit user requests.
+
+@pytest.mark.parametrize("text", [
+    "turn on the spotlight on secret cam",
+    "shine the light on secret camera",
+    "check the secret cam with spotlight",
+    "look at secret camera with the light",
+    "shine a light on the secret cam",
+    "turn on spotlight and pan left on secret cam",
+    "floodlight on secret cam",
+])
+def test_extract_spotlight_intent_matches(zeev, text):
+    assert zeev.extract_spotlight_intent(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "check the secret cam",
+    "pan the secret cam left",
+    "show me the living room",
+    "what's the weather",
+    "",
+])
+def test_extract_spotlight_intent_no_match(zeev, text):
+    assert zeev.extract_spotlight_intent(text) is False
+
+
+def test_phone_camera_snapshot_remote_payload(zeev, monkeypatch):
+    """Verify phone_camera_snapshot_remote includes pan and spotlight in the POST payload."""
+    monkeypatch.setattr(zeev, "DOG_CALLER_KEY", "test_key")
+    monkeypatch.setattr(zeev, "DOG_CALLER_URL", "http://localhost:5051")
+
+    posted_json = []
+
+    class MockResp:
+        status_code = 200
+        def json(self):
+            return {"ok": True, "message": "Here's the camera.", "image": "b64data"}
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        posted_json.append(json)
+        return MockResp()
+
+    monkeypatch.setattr(zeev.requests, "post", mock_post)
+
+    ok, msg, img = zeev.phone_camera_snapshot_remote("secret", pan_direction="left", pan_taps=2, spotlight=True)
+    assert ok is True
+    assert img == "b64data"
+    assert len(posted_json) == 1
+    assert posted_json[0] == {
+        "camera": "secret",
+        "pan": [{"direction": "left", "taps": 2}],
+        "spotlight": True,
+    }
+

@@ -9589,6 +9589,18 @@ def extract_pan_direction(text: str):
             else None)
 
 
+# Extracts spotlight / light intent ("turn on the spotlight", "with the light", "shine a light")
+_SPOTLIGHT_RE = re.compile(
+    r"\b(?:spotlight|floodlight|flashlight|(?:turn\s+on|with)\s+(?:the\s+)?light|shine(?:\s+a|\s+the)?\s+light)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_spotlight_intent(text: str) -> bool:
+    """Returns True if the user explicitly requested turning on the spotlight/light."""
+    return bool(_SPOTLIGHT_RE.search(text or ""))
+
+
 def resolve_phone_camera(text: str):
     """The phone-relay camera key named in `text`, or None. Longest alias
     first so 'front yard' doesn't get shadowed by a hypothetical shorter
@@ -9674,7 +9686,7 @@ def call_dog_remote(camera="backyard"):
 
 
 def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
-                                  pan_taps: int = 1):
+                                  pan_taps: int = 1, spotlight: bool = None):
     """Relay a photo request for a phone-relay-only camera (Living Room,
     Backyard, Front Yard, Secret -- see _PHONE_CAMERA_ALIASES) to
     dog_caller_server.py's /snapshot route. Slower than the RTSP path
@@ -9688,12 +9700,17 @@ def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
     sent alongside the snapshot request -- the dog_caller_server applies it
     before capturing, so the returned image reflects the new view angle.
     Only meaningful for PTZ cameras (see _PTZ_PHONE_CAMERAS).
+
+    If `spotlight` is True, forces the spotlight on for capture. If None,
+    the server auto-detects dark frames and shines the spotlight if too dark.
     """
     if not DOG_CALLER_KEY:
         return False, "That camera isn't set up yet.", None
     body = {"camera": camera_key}
     if pan_direction and camera_key in _PTZ_PHONE_CAMERAS:
         body["pan"] = [{"direction": pan_direction, "taps": pan_taps}]
+    if spotlight is not None:
+        body["spotlight"] = spotlight
     try:
         resp = requests.post(
             DOG_CALLER_URL + "/snapshot",
@@ -11684,11 +11701,13 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             if _phone_cam and DOG_CALLER_KEY:
                 _phone_cam_label = _phone_cam.replace("_", " ").title()
                 _pan_dir = extract_pan_direction(user_msg) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+                _spotlight = extract_spotlight_intent(user_msg) or None
                 _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
-                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone{_pan_msg}, "
+                _spot_msg = " with spotlight" if _spotlight else ""
+                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone{_pan_msg}{_spot_msg}, "
                               "this can take up to 30s...]"})
                 _ok, reply, image = phone_camera_snapshot_remote(
-                    _phone_cam, pan_direction=_pan_dir)
+                    _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
                 if image:
                     sse({"image": f"data:image/jpeg;base64,{image}"})
                 sse({"token": reply})
@@ -12688,13 +12707,15 @@ def handle_transcript(ctx, transcript, _depth=0):
     if _phone_cam and DOG_CALLER_KEY:
         _phone_cam_label = _phone_cam.replace("_", " ").title()
         _pan_dir = extract_pan_direction(transcript) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+        _spotlight = extract_spotlight_intent(transcript) or None
         _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
+        _spot_msg = " with spotlight" if _spotlight else ""
         ctx._set_face("thinking", f"{_phone_cam_label}…")
         ctx._speak_device(
-            f"Checking the {_phone_cam_label} cam through the phone{_pan_msg}, this takes a bit.",
+            f"Checking the {_phone_cam_label} cam through the phone{_pan_msg}{_spot_msg}, this takes a bit.",
             _LAST_VOICE)
         _ok, _msg, _image = phone_camera_snapshot_remote(
-            _phone_cam, pan_direction=_pan_dir)
+            _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
         if _image:
             desc, verr = vision_complete(_image, f"Describe what's visible on the {_phone_cam_label} camera.")
             reply = desc if desc else f"I got a look at {_phone_cam_label} but couldn't describe it: {verr}"

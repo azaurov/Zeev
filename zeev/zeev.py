@@ -9097,10 +9097,20 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
                 timeout=timeout or VISION_TIMEOUT,
             )
             if r.status_code == 200:
-                txt = _strip_think_text(r.json()["choices"][0]["message"]["content"])
-                if txt:
-                    return txt, None
-                last = f"{m}: empty reply"
+                body = r.json()
+                # OpenRouter can 200 an upstream failure instead of surfacing
+                # it as an HTTP status -- found live 2026-08-29, nemotron-omni
+                # returned {"error": {"message": "...ResourceExhausted..."}}
+                # with no "choices" at all. Indexing straight in raised a bare
+                # KeyError that told the log nothing about why.
+                if "error" in body:
+                    err = body["error"]
+                    last = f"{m}: {err.get('message', err) if isinstance(err, dict) else err}"
+                else:
+                    txt = _strip_think_text(body["choices"][0]["message"]["content"])
+                    if txt:
+                        return txt, None
+                    last = f"{m}: empty reply"
             else:
                 last = f"{m}: HTTP {r.status_code}"
         except Exception as e:

@@ -9645,6 +9645,17 @@ _PHONE_CAMERA_ALIASES = {
     "frontyard": "front_yard",
     "secret cam": "secret",
     "secret camera": "secret",
+    # HL_DB2 (Video Doorbell v2) -- no RTSP path either (see
+    # docs/wyze-cameras.md), same phone-relay route as the others.
+    # "doorbell" alone is unambiguous enough to leave bare (unlike
+    # "secret", an ordinary word). "front door" is NOT bare-matched --
+    # too common in unrelated speech ("lock the front door") -- so it
+    # only resolves alongside "cam"/"camera", same guard "secret" uses.
+    "doorbell": "doorbell",
+    "doorbell cam": "doorbell",
+    "doorbell camera": "doorbell",
+    "front door cam": "doorbell",
+    "front door camera": "doorbell",
 }
 
 # PTZ-capable phone-relay cameras -- only these support pan/tilt commands.

@@ -9562,6 +9562,32 @@ def _all_named_phone_cams(text: str):
     return hits
 
 
+def resolve_subject_cams(text: str, subj: dict):
+    """(cams, phone_cams) to actually sweep for a subject-search request.
+
+    Priority order:
+    1. Explicitly-named cameras win outright, RTSP or phone-relay
+       (_all_named_wyze_cams/_all_named_phone_cams).
+    2. "all/every/each/both cameras" phrasing (_ALL_CAMS_RE, the same regex
+       this project's general multi-camera sweep already uses) means check
+       every reachable camera in the house, not just this subject's usual
+       two. Found live 2026-08-28: "find Leo on all the cameras" still swept
+       only the subject's hardcoded defaults after the explicit-naming fix
+       landed, since naming zero *specific* cameras isn't the same as
+       naming none at all -- this case needs its own check, not just a
+       fallback to defaults.
+    3. Neither: the subject's own configured defaults (unchanged behavior).
+    """
+    named_cams = _all_named_wyze_cams(text)
+    named_phone_cams = _all_named_phone_cams(text)
+    if named_cams or named_phone_cams:
+        return named_cams[:_SUBJECT_MAX_CAMS], named_phone_cams
+    if _ALL_CAMS_RE.search(text or ""):
+        return (sweepable_cams()[:_SUBJECT_MAX_CAMS],
+                sorted(set(_PHONE_CAMERA_ALIASES.values())))
+    return list(subj["cams"])[:_SUBJECT_MAX_CAMS], []
+
+
 def _dog_call_camera(text: str) -> str:
     return "front_yard" if re.search(r"\bfront\b", text, re.IGNORECASE) else "backyard"
 
@@ -12541,22 +12567,20 @@ def handle_transcript(ctx, transcript, _depth=0):
         name = _subj["name"]
         # "check on Smokey in the basement" is a question about the basement.
         # A named room narrows the sweep to that room rather than reordering
-        # it -- and unlike resolve_wyze_cam()'s single-best-match, all named
-        # cameras are honored, both RTSP (bedroom/smokeys) and phone-relay
-        # (living room/backyard/front yard, which resolve_wyze_cam can't see
-        # at all). Found live 2026-08-28: "find Leo in the living room and
-        # backyard and front yard" was answered by silently sweeping the
-        # subject's default RTSP cams instead of any camera actually named.
-        named_cams = _all_named_wyze_cams(transcript)
-        named_phone_cams = _all_named_phone_cams(transcript)
-        cams = (named_cams if (named_cams or named_phone_cams)
-                else list(_subj["cams"]))[:_SUBJECT_MAX_CAMS]
-        if not cams and not named_phone_cams:
+        # it -- and unlike resolve_wyze_cam()'s single-best-match,
+        # resolve_subject_cams() honors all named cameras (RTSP and
+        # phone-relay) plus "all/every cameras" phrasing. Found live
+        # 2026-08-28: naming cameras explicitly and separately "find Leo on
+        # all the cameras" were BOTH answered by silently sweeping the
+        # subject's default RTSP cams instead -- two related gaps fixed by
+        # the same shared resolver, used identically by web /chat's relay.
+        cams, phone_cams = resolve_subject_cams(transcript, _subj)
+        if not cams and not phone_cams:
             finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
             return
         ctx._set_face("thinking", f"{name}…")
         reply, frames = sweep_for_subject(
-            _subj, cams=cams, phone_cams=named_phone_cams,
+            _subj, cams=cams, phone_cams=phone_cams,
             on_progress=lambda msg: ctx._speak_device(msg, _LAST_VOICE))
         # vision=True whenever at least one camera actually returned a frame
         # that got inspected -- a clean "not there" is still a point-in-time

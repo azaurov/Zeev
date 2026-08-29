@@ -302,14 +302,17 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     the lookup through the Pi's physical speaker on every remote chat turn.
     Returns (ok, message, image_b64_or_None).
 
-    `text` (optional): the caller's original request text. If it names
-    specific cameras -- RTSP (bedroom/smokeys) or phone-relay (living
-    room/backyard/front yard) -- the sweep is restricted to those instead of
-    the subject's configured defaults, mirroring device mode's own
-    handle_transcript logic (zeev.py). Found live 2026-08-28: without this,
-    "find Leo in the living room and backyard and front yard" over the web
-    UI silently swept the subject's default RTSP cams instead, since this
-    endpoint had no way to see what was actually asked for.
+    `text` (optional): the caller's original request text, passed straight
+    to zeev.resolve_subject_cams() -- explicitly-named cameras (RTSP or
+    phone-relay) win outright, "all/every cameras" phrasing means sweep
+    every reachable camera, and otherwise the subject's configured defaults
+    are used, mirroring device mode's own handle_transcript logic. Found
+    live 2026-08-28: without this, "find Leo in the living room and
+    backyard and front yard" over the web UI silently swept the subject's
+    default RTSP cams instead, since this endpoint had no way to see what
+    was actually asked for -- and, in a second round the same night, so did
+    "find Leo on all the cameras" even after the first fix landed, since
+    naming zero *specific* cameras isn't the same as naming none at all.
 
     `include_image` grabs a second, fresh frame after the sweep rather than
     reusing whatever frame sweep_for_subject() inspected internally -- that
@@ -328,10 +331,7 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     subj = zeev.WYZE_SUBJECTS.get(key)
     if not subj:
         return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS).", None
-    named_cams = zeev._all_named_wyze_cams(text) if text else []
-    named_phone_cams = zeev._all_named_phone_cams(text) if text else []
-    cams = (named_cams if (named_cams or named_phone_cams)
-            else list(subj["cams"]))[:zeev._SUBJECT_MAX_CAMS]
+    cams, named_phone_cams = zeev.resolve_subject_cams(text, subj)
     reply, _frames = zeev.sweep_for_subject(subj, cams=cams, phone_cams=named_phone_cams)
     if speak:
         _speak(reply)

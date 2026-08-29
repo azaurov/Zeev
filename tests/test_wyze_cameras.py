@@ -571,3 +571,48 @@ def test_capability_guard_lists_secret_cam(zeev, monkeypatch):
     assert "Front Yard" in p
     assert "Living Room" in p
 
+
+# --- pan direction extraction ----------------------------------------------
+#
+# PTZ phone-relay cameras (secret, living_room) accept pan commands via the
+# dog-caller phone app's D-pad. extract_pan_direction() must pick up
+# verb-anchored phrases first and fall back to bare direction words only
+# when no verb is present.
+
+@pytest.mark.parametrize("text,expected", [
+    ("pan the secret cam left",           "left"),
+    ("look right on the secret camera",   "right"),
+    ("turn the secret cam up",            "up"),
+    ("tilt the secret camera down",       "down"),
+    ("move the secret cam to the left",   "left"),
+    ("point the secret cam right",        "right"),
+    ("aim the secret camera up",          "up"),
+    ("rotate the secret cam down",        "down"),
+    ("pan left on the secret cam",        "left"),
+    ("face the secret cam right",         "right"),
+])
+def test_extract_pan_direction_verb_anchored(zeev, text, expected):
+    assert zeev.extract_pan_direction(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "check the secret cam",
+    "show me the backyard",
+    "tell me a joke",
+    "",
+])
+def test_extract_pan_direction_no_direction(zeev, text):
+    assert zeev.extract_pan_direction(text) is None
+
+
+def test_extract_pan_direction_empty_and_none(zeev):
+    assert zeev.extract_pan_direction("") is None
+    assert zeev.extract_pan_direction(None) is None
+
+
+def test_pan_only_for_ptz_cameras(zeev):
+    """backyard/front_yard are static WVOD1 cameras -- no D-pad."""
+    assert "backyard" not in zeev._PTZ_PHONE_CAMERAS
+    assert "front_yard" not in zeev._PTZ_PHONE_CAMERAS
+    assert "secret" in zeev._PTZ_PHONE_CAMERAS
+    assert "living_room" in zeev._PTZ_PHONE_CAMERAS

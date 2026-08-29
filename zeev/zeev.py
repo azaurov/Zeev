@@ -9548,6 +9548,46 @@ _PHONE_CAMERA_ALIASES = {
     "secret camera": "secret",
 }
 
+# PTZ-capable phone-relay cameras -- only these support pan/tilt commands.
+# backyard/front_yard are static WVOD1 cameras, no D-pad in the Wyze app.
+# PAN_COORDS in the Kotlin companion app are currently calibrated for the
+# Living Room Cam (Pan v1) -- the secret cam (Solar Cam Pan) is a different
+# model whose D-pad may be at different screen coordinates. If pan commands
+# produce no movement on the secret cam, the Kotlin PAN_COORDS need
+# recalibrating from a screenshot of its live view.
+_PTZ_PHONE_CAMERAS = {"living_room", "secret"}
+
+# Extracts a pan direction from natural speech alongside a phone-camera name.
+# Matches: "pan left", "look right", "turn it up", "move down", "point left",
+# "to the left", "leftward". Order matters: direction-bearing phrases are
+# checked first, then bare direction words adjacent to camera phrasing.
+_PAN_DIR_RE = re.compile(
+    r"\b(?:pan|turn|point|move|look|tilt|aim|face|rotate)\s+"
+    r"(?:it\s+|the\s+(?:camera\s+)?)?(?:to\s+the\s+)?"
+    r"(left|right|up|down)\b"
+    r"|\b(left|right|up|down)\s*(?:ward)?\b",
+    re.IGNORECASE,
+)
+
+
+def extract_pan_direction(text: str):
+    """The pan direction named in `text`, or None. Only the first explicit
+    verb-anchored direction wins ('pan left and then right' → 'left'); a bare
+    direction word ('left') is accepted only if no verb-anchored match exists,
+    to avoid false-positiving on 'he left the room'."""
+    if not text:
+        return None
+    verb_dirs = []
+    bare_dirs = []
+    for m in _PAN_DIR_RE.finditer(text):
+        if m.group(1):
+            verb_dirs.append(m.group(1).lower())
+        elif m.group(2):
+            bare_dirs.append(m.group(2).lower())
+    return (verb_dirs[0] if verb_dirs
+            else bare_dirs[0] if bare_dirs
+            else None)
+
 
 def resolve_phone_camera(text: str):
     """The phone-relay camera key named in `text`, or None. Longest alias
@@ -9633,22 +9673,31 @@ def call_dog_remote(camera="backyard"):
     return False, data.get("error") or "Calling Leo inside didn't work — check the phone."
 
 
-def phone_camera_snapshot_remote(camera_key: str):
+def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
+                                  pan_taps: int = 1):
     """Relay a photo request for a phone-relay-only camera (Living Room,
-    Backyard, Front Yard -- see _PHONE_CAMERA_ALIASES) to
+    Backyard, Front Yard, Secret -- see _PHONE_CAMERA_ALIASES) to
     dog_caller_server.py's /snapshot route. Slower than the RTSP path
     (navigates the real Wyze app on a physical phone, ~10-30s) and can
     fail fast with a "busy" message if a call_dog() or another snapshot is
     already using the phone -- both are expected outcomes, not errors to
     raise. Always returns a printable (ok, message, image_b64_or_None)
     triple, never raises.
+
+    If `pan_direction` is set ('left'/'right'/'up'/'down'), a pan step is
+    sent alongside the snapshot request -- the dog_caller_server applies it
+    before capturing, so the returned image reflects the new view angle.
+    Only meaningful for PTZ cameras (see _PTZ_PHONE_CAMERAS).
     """
     if not DOG_CALLER_KEY:
         return False, "That camera isn't set up yet.", None
+    body = {"camera": camera_key}
+    if pan_direction and camera_key in _PTZ_PHONE_CAMERAS:
+        body["pan"] = [{"direction": pan_direction, "taps": pan_taps}]
     try:
         resp = requests.post(
             DOG_CALLER_URL + "/snapshot",
-            json={"camera": camera_key},
+            json=body,
             headers={"X-Dog-Caller-Key": DOG_CALLER_KEY},
             timeout=60,
         )
@@ -11634,9 +11683,12 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             _phone_cam = resolve_phone_camera(user_msg)
             if _phone_cam and DOG_CALLER_KEY:
                 _phone_cam_label = _phone_cam.replace("_", " ").title()
-                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone, "
+                _pan_dir = extract_pan_direction(user_msg) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+                _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
+                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone{_pan_msg}, "
                               "this can take up to 30s...]"})
-                _ok, reply, image = phone_camera_snapshot_remote(_phone_cam)
+                _ok, reply, image = phone_camera_snapshot_remote(
+                    _phone_cam, pan_direction=_pan_dir)
                 if image:
                     sse({"image": f"data:image/jpeg;base64,{image}"})
                 sse({"token": reply})
@@ -12635,11 +12687,14 @@ def handle_transcript(ctx, transcript, _depth=0):
     _phone_cam = resolve_phone_camera(transcript)
     if _phone_cam and DOG_CALLER_KEY:
         _phone_cam_label = _phone_cam.replace("_", " ").title()
+        _pan_dir = extract_pan_direction(transcript) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+        _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
         ctx._set_face("thinking", f"{_phone_cam_label}…")
         ctx._speak_device(
-            f"Checking the {_phone_cam_label} cam through the phone, this takes a bit.",
+            f"Checking the {_phone_cam_label} cam through the phone{_pan_msg}, this takes a bit.",
             _LAST_VOICE)
-        _ok, _msg, _image = phone_camera_snapshot_remote(_phone_cam)
+        _ok, _msg, _image = phone_camera_snapshot_remote(
+            _phone_cam, pan_direction=_pan_dir)
         if _image:
             desc, verr = vision_complete(_image, f"Describe what's visible on the {_phone_cam_label} camera.")
             reply = desc if desc else f"I got a look at {_phone_cam_label} but couldn't describe it: {verr}"

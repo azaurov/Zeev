@@ -9727,6 +9727,19 @@ def _all_named_phone_cams(text: str):
     return hits
 
 
+# Leo (unlike Smokey the cat, mostly confined indoors) roams the whole
+# house AND the yard -- ZEEV_SUBJECTS' "leo:dog" entry has no explicit cam
+# list, so it falls back to parse_subjects()'s RTSP-only default (the same
+# 2-camera default Smokey gets), which never includes the phone-relay yard
+# cameras (Living Room/Backyard/Front Yard) unless the user also says "all
+# cameras" or names one directly. A plain "find Leo" should check
+# everywhere he could plausibly be without requiring that extra phrasing
+# every time. Matches on the subject's resolved name rather than the raw
+# text, so any alias/trigger phrasing that resolves to Leo gets the same
+# full-house sweep.
+_SUBJECT_ALWAYS_ALL_CAMS_RE = re.compile(r"^leo$", re.IGNORECASE)
+
+
 def resolve_subject_cams(text: str, subj: dict):
     """(cams, phone_cams) to actually sweep for a subject-search request.
 
@@ -9740,14 +9753,16 @@ def resolve_subject_cams(text: str, subj: dict):
        only the subject's hardcoded defaults after the explicit-naming fix
        landed, since naming zero *specific* cameras isn't the same as
        naming none at all -- this case needs its own check, not just a
-       fallback to defaults.
+       fallback to defaults. Also fires for Leo specifically with no "all
+       cameras" phrasing at all (_SUBJECT_ALWAYS_ALL_CAMS_RE) -- see its
+       own comment.
     3. Neither: the subject's own configured defaults (unchanged behavior).
     """
     named_cams = _all_named_wyze_cams(text)
     named_phone_cams = _all_named_phone_cams(text)
     if named_cams or named_phone_cams:
         return named_cams[:_SUBJECT_MAX_CAMS], named_phone_cams
-    if _ALL_CAMS_RE.search(text or ""):
+    if _ALL_CAMS_RE.search(text or "") or _SUBJECT_ALWAYS_ALL_CAMS_RE.search(subj.get("name", "")):
         return (sweepable_cams()[:_SUBJECT_MAX_CAMS],
                 sorted(set(_PHONE_CAMERA_ALIASES.values())))
     return list(subj["cams"])[:_SUBJECT_MAX_CAMS], []

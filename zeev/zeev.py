@@ -12584,6 +12584,18 @@ _TURN_DEPTH = [0]
 # A model that ends every reply with a question would otherwise hold the mic in
 # a loop the user cannot walk away from.
 _FOLLOWUP_MAX_DEPTH = 3
+# _followup_turn's generic "any question Zeev asked reopens the mic" path has
+# a much weaker acceptance gate than the pending-detail path above (just
+# \w{2,} -- see below -- vs. plain-affirmative/question matching), because it
+# has to accept an open-ended reply to an arbitrary question rather than a
+# yes/no. That combination is what let a false wake word on TV audio spiral
+# into a multi-minute fake conversation (found live 2026-08-30: "hey_zeev"
+# fired on TV narration, and three rounds of unrelated TV dialogue each got
+# accepted as a real follow-up turn before the cap finally shut the mic).
+# Bounding this path separately, tighter than the shared cap, shrinks that
+# blast radius without touching _FOLLOWUP_MAX_DEPTH=3, which is deliberately
+# sized for the pending-detail "read me the passage" flow instead.
+_FOLLOWUP_GENERIC_MAX_DEPTH = 1
 
 # A pivot or a question after "yes" means the answer is not a bare yes. Live
 # 2026-08-01 19:07, "Yes, but can you sing in harmony together with Zeev?" hit
@@ -12632,7 +12644,7 @@ def _followup_turn(ctx, spoken, depth):
     forced a wake word to answer a question the device had just asked.
     Reported live 2026-08-01.
     """
-    if depth >= _FOLLOWUP_MAX_DEPTH:
+    if depth >= _FOLLOWUP_GENERIC_MAX_DEPTH:
         return False
     if not _reply_invites_an_answer(spoken):
         return False

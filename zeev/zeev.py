@@ -5783,7 +5783,13 @@ _TORAH_RE = re.compile(
     r"tefillah|tefilla|tefillot|berakhah|brachah|bracha|brachot|"
     r"daven|davening|"
     r"seder|maggid|dayenu|afikomen|maror|matzah|matza|"
-    r"shema|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
+    # "schma" is a real Whisper mis-transcription of "shema" -- seen live
+    # twice in rag_probe.py's history probes (2026-08-27, 2026-08-29), both
+    # UNGROUNDED because needs_torah() never matched at all, so the real
+    # Shema text was never retrieved and the model answered from its own
+    # (unverified) knowledge instead. Same class as the netilat/netilas
+    # Ashkenazi/Sephardi spelling gap above.
+    r"shema|schma|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
     r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat"
     r")\b",
     re.I,
@@ -5943,6 +5949,14 @@ _BEDTIME_PRAYER_RE = re.compile(
     r"|\bal\s+ha.?mita\b|\bkeri.?at\s+shema\b|\bkriat\s+shema\b",
     re.I,
 )
+# The plain daily Shema Yisrael (Deuteronomy 6:4-9), distinct from the
+# bedtime service above -- that regex needs bedtime-specific wording, so a
+# bare "let's say the shema" doesn't match it and falls through to here
+# instead. "schma" is the same live Whisper mis-transcription that widened
+# _TORAH_RE above; without it here too, needs_torah() would fire but the
+# generic FTS keyword search still wouldn't find "Shema" text from a query
+# containing "schma" (FTS5 does exact token matching, not fuzzy).
+_SHEMA_ALIAS_RE = re.compile(r"\bshema\b|\bschma\b", re.I)
 _TORAH_REF_ALIASES = [
     # FIRST MATCH WINS, so this sits above the Yihyu entry: "the bedtime
     # angelic prayer" matches both, and the explicit word is the intent.
@@ -5970,6 +5984,20 @@ _TORAH_REF_ALIASES = [
      "Israel: at my right Michael, at my left Gabriel, before me Uriel, behind "
      "me Raphael, and above my head, the Presence of Almighty\" — together "
      "with its Hebrew"),
+
+    # Named outright -- the plain Shema itself, not the bedtime recitation
+    # (that already matched above if the phrasing was bedtime-specific).
+    # "Blessings of the Shema, Shema" is the exact ref tail for the plain
+    # recitation across all four Shacharit/Maariv x Weekday/Shabbat rows in
+    # data/torah.db (confirmed live via a direct query) -- it does NOT match
+    # the surrounding "Barchu"/"Blessing after/before Shema" rows in the same
+    # section, which don't share this contiguous substring. LIMIT k picks up
+    # to 3, so the model may see more than one service's version; the Shema's
+    # text itself is the same declaration regardless of which service recites it.
+    ((_SHEMA_ALIAS_RE,), ["Blessings of the Shema, Shema"],
+     (),
+     "the Shema Yisrael (Deuteronomy 6:4-9), the central declaration of "
+     "faith recited during Shacharit and Maariv, together with its Hebrew"),
 
     # Named outright -- resolves to the Amidah pair alone, no bedtime service.
     # The pair is probed together because Sefaria has no English for the
@@ -8075,8 +8103,14 @@ def _apply_language_suffix(msgs):
     return msgs
 
 
-def _llm_post(msgs, model, stream=True, max_tokens=400):
-    """Route to the active LLM provider. Returns (resp_or_iter, error, provider)."""
+def _llm_post(msgs, model, stream=True, max_tokens=400, reasoning_effort=None):
+    """Route to the active LLM provider. Returns (resp_or_iter, error, provider).
+
+    reasoning_effort is only forwarded to Groq -- see _groq_post's docstring
+    (qwen3.6-27b/MODELS["2"] inlines hidden reasoning into `content` unless
+    told "none"). Callers on the Groq path should pass it the same way the
+    /thermal and web /chat call sites already do.
+    """
     msgs = _apply_language_suffix(msgs)
     provider = LLM_SERVER
 
@@ -8102,7 +8136,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
             return None, f"litellm stream error: {e}", "litellm"
 
     if provider == "groq":
-        resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+        resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
+                                reasoning_effort=reasoning_effort)
         if err and any(k in err for k in ("NameResolution", "Failed to resolve", "Max retries", "ConnectionError", "Connection refused", "rate-limited")):
             label = "rate-limited" if "rate-limited" in err else "offline"
             # Fallback chain: OpenRouter → Gemini → bosgame (LAN last resort)
@@ -8159,7 +8194,8 @@ def _llm_post(msgs, model, stream=True, max_tokens=400):
         return resp, err, "openrouter"
 
     # fallback to groq
-    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens)
+    resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
+                            reasoning_effort=reasoning_effort)
     return resp, err, "groq"
 
 
@@ -10254,7 +10290,13 @@ def stream_reply(messages, model):
     else:
         tok_limit = 600
 
-    resp, err, provider = _llm_post(payload_msgs, model, max_tokens=tok_limit)
+    # Same suppression as the /thermal and web /chat call sites -- qwen3.6-27b
+    # (MODELS["2"]) can otherwise burn the whole tok_limit on hidden reasoning
+    # inlined into `content`. stream_reply is the shared completion path for
+    # both terminal call sites, so this covers the REPL in one place.
+    reasoning_effort = "none" if model == MODELS["2"][0] else None
+    resp, err, provider = _llm_post(payload_msgs, model, max_tokens=tok_limit,
+                                     reasoning_effort=reasoning_effort)
     if err:
         print(f"\nConnection error: {err}")
         return ""
@@ -13530,7 +13572,16 @@ def handle_transcript(ctx, transcript, _depth=0):
     # sounds exactly like the TTS being cut off, and is not.
     if _HE_CONTENT_RE.search(transcript) or FORCED_LANG in ("he", "ru"):
         tok_limit = max(tok_limit, 500)
-    resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
+    # See the /thermal and web /chat call sites (and _groq_post's docstring):
+    # qwen3.6-27b (MODELS["2"]) inlines hidden reasoning into `content` and can
+    # burn the whole tok_limit budget before any visible reply, unless told
+    # reasoning_effort="none". This call site -- the main device-chat
+    # completion -- was missing that suppression even though it routes here
+    # on every Torah/parsha/search/tool-call turn (model_id can be MODELS["2"]
+    # via the routing above or the tool-call branch reassigning model_id).
+    reasoning_effort = "none" if model_id == MODELS["2"][0] else None
+    resp, err    = _groq_post_with_fallback(payload_msgs, model_id, stream=STREAM_TTS,
+                                             max_tokens=tok_limit, reasoning_effort=reasoning_effort)
     print(f"[+{time.perf_counter()-t0:.1f}s] LLM done", flush=True)
 
     # 429 or per-model cooldown on 70B/R1 → fall back to 8B before giving up
@@ -13550,7 +13601,12 @@ def handle_transcript(ctx, transcript, _depth=0):
         while len(trim_payload) > 2:  # keep at least sys_prompt + current_user
             trim_payload = [trim_payload[0]] + trim_payload[3:]  # drop oldest user+assistant pair
             print(f"[llm] 413 — trimmed to {len(trim_payload)} msgs, retrying", flush=True)
-            resp, err = _groq_post(trim_payload, model_id, stream=STREAM_TTS, max_tokens=tok_limit)
+            # Recompute rather than reuse the outer reasoning_effort: model_id
+            # may have changed above (429 → 8B fallback), and a stale "none"
+            # from the qwen3.6-27b branch isn't necessarily valid for 8B.
+            reasoning_effort = "none" if model_id == MODELS["2"][0] else None
+            resp, err = _groq_post(trim_payload, model_id, stream=STREAM_TTS, max_tokens=tok_limit,
+                                    reasoning_effort=reasoning_effort)
             if resp is None or resp.status_code != 413:
                 break
 
@@ -16177,6 +16233,7 @@ def main():
             continue
 
         if user_input.lower() == "/flip":
+            global CAMERA_FLIP
             CAMERA_FLIP = not CAMERA_FLIP
             save_settings()
             state = "on (180° rotation)" if CAMERA_FLIP else "off"
@@ -16542,7 +16599,6 @@ def main():
 
         if bt_intent == "disconnect":
             devices = bt_list()
-            disconnected = [n for m, n, c in devices if c and not bt_disconnect(m)]  # type: ignore
             for mac, name, connected in devices:
                 if connected:
                     bt_disconnect(mac)

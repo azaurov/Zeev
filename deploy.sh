@@ -1,5 +1,7 @@
 #!/bin/bash
-# Deploy Zeev to the Pi. This is the ONLY sanctioned deploy path — see
+# Deploy Zeev to the Pi (zeev-device) and to this box's web service
+# (zeev-web, zeev.sogdiana-gematria.net) -- both run the same zeev.py, so
+# they ship together. This is the ONLY sanctioned deploy path — see
 # CLAUDE.md "Version Control / Deployment". Idempotent: safe to re-run with
 # no staged changes (commit/push become no-ops) and re-running after a
 # healthy deploy just re-verifies and re-prints the tail.
@@ -11,6 +13,7 @@ set -e
 PI_LAN="ragnar@ragnarok"
 PI_TS="ragnar@ragnarok.tail9c2c7c.ts.net"
 SERVICE="zeev-device"
+WEB_SERVICE="zeev-web"
 
 # Seconds to wait for the device to come up healthy before rolling back.
 # Cold start on a Pi Zero 2W: ~5s to the banner, ~25s once the wake model loads.
@@ -19,6 +22,14 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-75}"
 # Log line that means "really up". Overridable so the rollback path itself can
 # be tested against a marker that will never appear.
 HEALTH_MARKER="${HEALTH_MARKER:-Zeev Device Mode}"
+
+# zeev-web.service runs the same zeev.py on this same box (serve_web.py,
+# port 5057 behind zeev.sogdiana-gematria.net) -- no SSH/pull needed, it's
+# already at whatever HEAD was just pushed. Restarted after the Pi succeeds,
+# so a Pi-side problem is caught by its own rollback before anything
+# user-facing on the web side is touched.
+WEB_HEALTH_TIMEOUT="${WEB_HEALTH_TIMEOUT:-30}"
+WEB_HEALTH_MARKER="${WEB_HEALTH_MARKER:-Zeev Web}"
 
 COMMIT_MSG="$1"
 
@@ -152,7 +163,44 @@ if [ "$HEALTHY" = "1" ]; then
     echo
     echo "Deploy healthy."
     ssh "$PI" "journalctl -u $SERVICE -n 50 --no-pager"
-    exit 0
+
+    # ── zeev-web (local) ──────────────────────────────────────────────────────
+    # Same repo, same commit, no SSH -- just restart and confirm it came back.
+    # No rollback here: unlike the Pi's disposable deploy checkout, this
+    # checkout is the dev working tree, and a `git reset --hard` on failure
+    # would yank HEAD out from under whoever is sitting at this shell.
+    echo
+    echo "Restarting $WEB_SERVICE..."
+    sudo systemctl restart "$WEB_SERVICE" || true
+    echo "Waiting up to ${WEB_HEALTH_TIMEOUT}s for $WEB_SERVICE to come up..."
+    WEB_HEALTHY=0
+    for _ in $(seq 1 "$WEB_HEALTH_TIMEOUT"); do
+        sleep 1
+        if [ "$(systemctl is-active "$WEB_SERVICE")" = failed ]; then
+            echo "WEB HEALTH: service entered failed state" >&2
+            break
+        fi
+        if journalctl -u "$WEB_SERVICE" --since '-1 min' --no-pager 2>/dev/null | grep -q "$WEB_HEALTH_MARKER"; then
+            if journalctl -u "$WEB_SERVICE" --since '-1 min' --no-pager 2>/dev/null \
+               | grep -q 'Traceback (most recent call last)'; then
+                echo "WEB HEALTH: startup banner seen, but a traceback was logged" >&2
+                break
+            fi
+            WEB_HEALTHY=1
+            break
+        fi
+    done
+
+    if [ "$WEB_HEALTHY" = "1" ]; then
+        echo "$WEB_SERVICE healthy."
+        journalctl -u "$WEB_SERVICE" -n 20 --no-pager
+        exit 0
+    fi
+
+    echo "!! $WEB_SERVICE UNHEALTHY after restart — needs manual attention" >&2
+    echo "!! Pi device deploy already succeeded and was not affected." >&2
+    journalctl -u "$WEB_SERVICE" --since '-1 min' --no-pager >&2 || true
+    exit 3
 fi
 
 # ── Rollback ────────────────────────────────────────────────────────────────

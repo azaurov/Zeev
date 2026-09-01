@@ -11770,6 +11770,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 joke = random_joke(joke_lang(user_msg), sexual=bool(_SUPER_DIRTY_RE.search(user_msg)))
                 if joke:
                     sse({"token": joke})
+                    append_message("user", user_msg)
+                    append_message("assistant", joke)
                 else:
                     sse({"error": "No jokes loaded."})
                 self.wfile.write(b"data: [DONE]\n\n")

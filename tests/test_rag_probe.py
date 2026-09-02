@@ -399,6 +399,51 @@ def test_history_retrieval_merges_concurrently_injected_location_block():
     assert "Ambient location (real-time, not retrieved history):" in text
 
 
+def test_history_retrieval_merges_concurrently_injected_time_block():
+    """`## Right now: <local time>` is injected on every turn unconditionally
+    (zeev.py's _build_system_prompt), same shape as the location block right
+    next to it. Live 2026-08-26/2026-08-30: two "what time is it?" probes
+    were flagged UNGROUNDED for citing a specific clock time that was never
+    shown to the grader, only the narrow history-RAG slice."""
+    sys_prompt = (
+        "## Relevant past exchanges:\n"
+        "User: what is up\nZeev: not much\n\n"
+        "## Right now: 3:02 AM EDT on Wednesday, September 2\n\n"
+        "Reply in English only."
+    )
+
+    class FakeZeev:
+        _db_lock = __import__("threading").Lock()
+        SYSTEM_PROMPT = "TEST_PERSONA"
+
+        @staticmethod
+        def retrieve_semantic(q, **kw):
+            return [("what is up", "not much")]
+
+        @staticmethod
+        def retrieve_relevant(q, **kw):
+            return []
+
+        @staticmethod
+        def torah_search(q, k=3):
+            return []
+
+        @staticmethod
+        def _db():
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+            con.execute("INSERT INTO messages VALUES (7, 'user', 'what is up')")
+            con.commit()
+            return con
+
+    ref, text = rag_probe._history_retrieval(FakeZeev, "q", sys_prompt)
+    assert ref == "7"  # ambient time has no ref id, only text
+    assert "not much" in text
+    assert "3:02 AM EDT" in text
+    assert "Ambient time (real-time, not retrieved history):" in text
+
+
 def test_history_retrieval_merges_concurrently_injected_facts_block():
     """`## What I know about Alex:` (USER_FACTS) is injected whenever any
     facts are stored, independent of both RAG gates -- same class as the

@@ -2915,7 +2915,10 @@ def voice_coach_feedback(transcript: str) -> str:
         )},
         {"role": "user", "content": f"Here is the speech transcript:\n\n{transcript}"},
     ]
-    reply, err, _ = _llm_post(msgs, MODELS["2"][0], stream=False, max_tokens=200)
+    # qwen3.6-27b (MODELS["2"]) inlines hidden reasoning into content and can
+    # empty out the reply entirely without "none" (see _groq_post's docstring).
+    reply, err, _ = _llm_post(msgs, MODELS["2"][0], stream=False, max_tokens=200,
+                               reasoning_effort="none")
     if err or reply is None or reply.status_code != 200:
         return "I had trouble analyzing that. Try again?"
     return _strip_think_text(reply.json()["choices"][0]["message"]["content"])
@@ -5816,7 +5819,17 @@ _TORAH_RE = re.compile(
     # (unverified) knowledge instead. Same class as the netilat/netilas
     # Ashkenazi/Sephardi spelling gap above.
     r"shema|schma|tefillin|mezuzah|mitzvah|mitzvot|tzitzit|tzedakah|teshuvah|"
-    r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat"
+    r"kashrut|kosher|shabbos|yom.tov|chag|omer|sefirat|"
+    # "kohen"/"kohanim" are unambiguous Hebrew-specific terms (unlike bare
+    # "priest", ordinary English on its own, which needs the _ANGEL_PRAYER_RE
+    # proximity-guard treatment instead of going in this flat list) -- found
+    # live via rag_probe.py (2026-08-30): "Tell about the kohanim" never
+    # matched needs_torah() at all, so the real priestly-law passages in
+    # data/torah.db (2572 rows mention kohen/priest, e.g. Exodus 28) were
+    # never retrieved and the model invented specific claims (aliyah rules,
+    # mourning exemptions, marriage prohibitions) from unverified training
+    # knowledge instead -- same class as the schma/netilat spelling gaps above.
+    r"kohen|kohanim|kohan|kohain"
     r")\b",
     re.I,
 )
@@ -15938,7 +15951,16 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
         # 8B unreliably romanizes non-English scripts (see CLAUDE.md) — force the
         # smart tier for non-English calls instead of the usual auto-routed model.
         model = MODELS["2"][0] if lang in _LANG_NAMES else route_model(text)
-        resp, err, _ = _llm_post(msgs, model, stream=False, max_tokens=200)
+        # qwen3.6-27b (MODELS["2"]) inlines hidden reasoning into content and
+        # can empty out the reply entirely without "none"; gpt-oss models
+        # (MODELS["1"]/["3"]) draw reasoning from the same max_tokens budget
+        # and need "low" to leave room for the actual 1-2 sentence reply on
+        # this live call turn (see _groq_post's docstring).
+        _reasoning_effort = ("none" if model == MODELS["2"][0]
+                              else "low" if model in (MODELS["1"][0], MODELS["3"][0])
+                              else None)
+        resp, err, _ = _llm_post(msgs, model, stream=False, max_tokens=200,
+                                  reasoning_effort=_reasoning_effort)
         if err or resp is None or resp.status_code != 200:
             print(f"[call] LLM error: {err}", flush=True)
             return ""
@@ -16729,7 +16751,12 @@ def main():
                         def _term_llm(text: str) -> str:
                             msgs = [{"role": "system", "content": _call_sys}]
                             msgs.append({"role": "user", "content": text})
-                            resp, err, _ = _llm_post(msgs, MODELS["1"][0], stream=False, max_tokens=150)
+                            # gpt-oss-20b's hidden reasoning draws from this same
+                            # max_tokens budget and can empty out a short reply
+                            # without "low" (see _groq_post's docstring / the
+                            # World-news reasoning_effort fix in CLAUDE.md).
+                            resp, err, _ = _llm_post(msgs, MODELS["1"][0], stream=False,
+                                                      max_tokens=150, reasoning_effort="low")
                             if err or resp is None or resp.status_code != 200:
                                 print(f"[call] LLM error: {err or (resp.text[:120] if resp is not None else 'no resp')}", flush=True)
                                 return ""

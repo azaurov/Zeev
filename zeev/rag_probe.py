@@ -214,6 +214,8 @@ _LOCATION_BLOCK_RE = re.compile(
     r"## Approximate location: (.*?)(?=\n\n|\Z)", re.DOTALL)
 _FACTS_BLOCK_RE = re.compile(
     r"## What I know about Alex:\n(.*?)(?=\n\n|\Z)", re.DOTALL)
+_TIME_BLOCK_RE = re.compile(
+    r"## Right now: (.*?)(?=\n\n|\Z)", re.DOTALL)
 
 
 def _torah_retrieval(zeev_mod, question, sys_prompt):
@@ -238,6 +240,21 @@ def _location_retrieval(sys_prompt):
     if not m:
         return ""
     return "Ambient location (real-time, not retrieved history): " + m.group(1).strip()
+
+
+def _time_retrieval(sys_prompt):
+    """`## Right now: <local time>` -- injected on every turn unconditionally
+    (see zeev.py's _build_system_prompt, same call as the location block
+    right below it). Same probe-grading gap as location/facts/persona: a
+    "what time is it?" answer correctly citing this real-time block has no
+    way to be graded as grounded, since only the narrow history-RAG slice
+    was ever shown to the grader. Found live 2026-08-26/2026-08-30 (two
+    separate `rag_probes` UNGROUNDED rows, both "what time is it?", both
+    citing a specific clock time absent from the shown history context)."""
+    m = _TIME_BLOCK_RE.search(sys_prompt)
+    if not m:
+        return ""
+    return "Ambient time (real-time, not retrieved history): " + m.group(1).strip()
 
 
 def _facts_retrieval(sys_prompt):
@@ -310,6 +327,12 @@ def _history_retrieval(zeev_mod, question, sys_prompt):
     facts_text = _facts_retrieval(sys_prompt)
     if facts_text:
         text = "\n\n".join(p for p in (text, facts_text) if p)
+
+    # Same reasoning again, for the ambient time block -- unconditionally
+    # injected right alongside location, so same non-conditional merge shape.
+    time_text = _time_retrieval(sys_prompt)
+    if time_text:
+        text = "\n\n".join(p for p in (text, time_text) if p)
 
     # SYSTEM_PROMPT is unconditional -- always merge it, no presence check
     # needed (unlike torah/location/facts, which are conditionally injected).

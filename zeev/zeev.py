@@ -375,6 +375,7 @@ def _init_audio():
 USER_FACTS          = []   # persistent facts about the user
 USER_NOTES          = []   # persistent notes saved by the user
 _WEEKLY_REFLECTION  = ""   # latest weekly reflection, loaded at startup
+_DAILY_SUGGESTIONS  = ""   # today's suggestions (daily_suggestions.py), empty if none for today
 _HISTORY_ENTRIES = []   # raw parsed entries from history.jsonl for RAG
 _HISTORY_INDEX   = {}   # word → [entry indices] inverted index
 _notes_lock      = threading.Lock()
@@ -4527,6 +4528,19 @@ def _db() -> sqlite3.Connection:
                 content      TEXT    NOT NULL,
                 ts           TEXT    NOT NULL
             );
+            -- Daily suggestions (zeev/daily_suggestions.py, 9am timer): a
+            -- short personalized morning message synthesized from that day's
+            -- Google Calendar events and USER_FACTS. `date` (local YYYY-MM-DD)
+            -- is stored so load_latest_daily_suggestions() can refuse to
+            -- inject a stale one -- unlike the weekly reflection, a leftover
+            -- "today's suggestions" from a day the job didn't run would be
+            -- actively misleading, not just mildly stale.
+            CREATE TABLE IF NOT EXISTS daily_suggestions (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                date    TEXT    NOT NULL,
+                content TEXT    NOT NULL,
+                ts      REAL    NOT NULL
+            );
             -- Reminders and timers. due_ts is epoch seconds (UTC); fired is 0
             -- until the reminder has been announced, so a restart mid-window
             -- still delivers it rather than dropping it.
@@ -6335,6 +6349,31 @@ def load_latest_reflection():
         _WEEKLY_REFLECTION = ""
 
 
+def load_latest_daily_suggestions():
+    """Load today's daily suggestion into _DAILY_SUGGESTIONS, if one exists.
+
+    Called at startup *and* periodically (same reasoning as
+    load_latest_reflection): daily_suggestions.py writes a new row at 9am via
+    its own timer, and a device already up at boot needs to pick it up.
+    Unlike the weekly reflection, a stale row from a day the job didn't run
+    must NOT be injected -- "today's suggestions" naming yesterday's plans
+    would be actively wrong, not just outdated -- so this checks `date`
+    against today's local date and returns empty if they don't match.
+    """
+    global _DAILY_SUGGESTIONS
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        with _db_lock:
+            row = _db().execute(
+                "SELECT content FROM daily_suggestions WHERE date = ? ORDER BY id DESC LIMIT 1",
+                (today,),
+            ).fetchone()
+        _DAILY_SUGGESTIONS = row["content"] if row else ""
+    except Exception as e:
+        print(f"[db] load_latest_daily_suggestions failed: {e}", flush=True)
+        _DAILY_SUGGESTIONS = ""
+
+
 def init_learning():
     """Load memory facts, notes, settings, reflection, and build RAG index. Call once at startup."""
     global USER_FACTS, USER_NOTES
@@ -6342,6 +6381,7 @@ def init_learning():
     USER_NOTES = load_notes()
     load_settings()
     load_latest_reflection()
+    load_latest_daily_suggestions()
     build_rag_index()
     load_jokes()
     threading.Thread(target=_batt_poll_loop, daemon=True).start()
@@ -6377,6 +6417,10 @@ def _memory_maintenance_loop():
             load_latest_reflection()
         except Exception as e:
             print(f"[db] reflection refresh error: {e}", flush=True)
+        try:
+            load_latest_daily_suggestions()
+        except Exception as e:
+            print(f"[db] daily suggestions refresh error: {e}", flush=True)
         time.sleep(_MEMORY_MAINT_INTERVAL)
 
 
@@ -8640,6 +8684,9 @@ def _build_system_prompt(user_text, on_search=None, session=None):
 
     if _WEEKLY_REFLECTION:
         parts.append(f"\n\n## Weekly reflection:\n{_WEEKLY_REFLECTION[:1500]}")
+
+    if _DAILY_SUGGESTIONS:
+        parts.append(f"\n\n## Today's suggestions:\n{_DAILY_SUGGESTIONS[:1500]}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)

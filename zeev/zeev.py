@@ -1419,6 +1419,32 @@ def _quantum_llm(msgs, max_tokens=300, json_mode=False):
                               json_mode=False, reasoning_effort="low")
     return _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens, json_mode=False,
                           reasoning_effort="none")
+
+
+def _dream_quantum_llm(msgs, max_tokens=300, json_mode=False):
+    """llm_fn for _resolve_dream_choice's circuit-spec step only -- the one
+    quantum_reason() caller that's genuinely background (the overnight dream
+    loop, never a live turn), so routing it through feiergente01 first is
+    safe in a way the web/terminal/device /quantum commands and dream
+    narration text (_llm_interpret, _compose_dream_structured) are not: those
+    stay on _quantum_llm/Groq to avoid iGPU/Kokoro-TTS contention in a live
+    turn (see _feiergente_complete's docstring) and the cold-load/latency
+    risk a real conversational pause can't absorb.
+
+    qwen2.5:7b-instruct-q4_K_M (FEIERGENTE_MODEL's default) handles this
+    prompt's JSON schema correctly and fast (~3.6s warm, ~20-23s cold --
+    verified live 2026-09-02 with response_format=json_object), unlike this
+    project's Groq reasoning models (qwen3.6-27b, gpt-oss-20b), which need
+    the reasoning_effort/max_tokens workarounds _quantum_llm's docstring
+    documents just to reach `content` at all. Saves a Groq call for every
+    dream that forks. Falls back to _quantum_llm (Groq) on any feiergente
+    failure/busy/empty result, so a down or TTS-busy feiergente01 never
+    blocks a dream."""
+    if json_mode:
+        text, err = _feiergente_complete(msgs, max_tokens=max(max_tokens, 400), json_mode=True)
+        if text:
+            return text, None
+    return _quantum_llm(msgs, max_tokens=max_tokens, json_mode=json_mode)
 # Groq deprecated llama-3.1-8b-instant and llama-3.3-70b-versatile
 # (announced 2026-06-17, cutoff 2026-08-16); replaced per Groq's own
 # migration recommendations (console.groq.com/docs/deprecations).
@@ -5121,7 +5147,7 @@ def _resolve_dream_choice(idea, qllm=None):
     except Exception as e:
         print(f"[dream] quantum import failed: {e}", flush=True)
         return None, None, None
-    qllm = qllm or _quantum_llm
+    qllm = qllm or _dream_quantum_llm
     try:
         spec, err = _q._llm_circuit_spec(idea, qllm)
         if err or not spec:

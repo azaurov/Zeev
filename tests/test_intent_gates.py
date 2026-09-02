@@ -243,6 +243,30 @@ def test_weather_narrower_than_search(zeev):
     assert zeev.needs_weather("any news today") is False
 
 
+@pytest.mark.parametrize("text", [
+    "What's the scoop on Lindsey Clancy's case?",
+    "What's the scoop on Lindsay Clancy's case?",
+    "tell me about John Smith's case",
+])
+def test_named_case_triggers_search(zeev, text):
+    """Bare 'case' isn't in _SEARCH_RE (too ambiguous as ordinary English --
+    'in that case', 'just in case') but a capitalized name's possessive
+    'case' is specific enough for its own gate. Found live 2026-09-02: this
+    exact question never triggered Tavily grounding and four different
+    models all gave the same "I don't have information" non-answer from
+    unaided memory instead."""
+    assert zeev.needs_search(text) is True, text
+
+
+@pytest.mark.parametrize("text", [
+    "just in case it rains",
+    "in that case, let's go",
+    "tell me about the OJ Simpson case",
+])
+def test_named_case_gate_has_no_false_positives(zeev, text):
+    assert zeev.needs_search(text) is False, text
+
+
 # ---------------------------------------------------------------------------
 # Calendar  (_CALENDAR_RE)
 # ---------------------------------------------------------------------------

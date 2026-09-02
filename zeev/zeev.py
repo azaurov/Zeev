@@ -398,13 +398,27 @@ _SEARCH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "<Name>'s case" (a person's name, possessive, "case") — bare "case" isn't
+# in _SEARCH_RE above because it's too ambiguous as ordinary English ("in
+# that case", "just in case"), same reasoning "angelic" needed a proximity
+# regex instead of joining the flat _TORAH_RE list. Case-sensitive on
+# purpose (no re.IGNORECASE) -- the capitalization is exactly what tells a
+# named-person's-case apart from generic phrasing, and STT transcripts
+# reaching here still carry real casing. Found live 2026-09-02: "What's the
+# scoop on Lindsey Clancy's case?" matched nothing in _SEARCH_RE, so no
+# Tavily grounding ever ran and four different models (qwen3.6-27b,
+# gpt-oss-20b, qwen2.5:7b/14b on feiergente01 -- checked directly, ruling
+# out a model-specific gap) all gave the same "I don't have information on
+# this" non-answer instead of being grounded in a real search.
+_NAMED_CASE_RE = re.compile(r"\b[A-Z][a-zA-Z']+(?:\s[A-Z][a-zA-Z']+){0,2}'s\s+case\b")
+
 def needs_search(text):
     # Weather is a strict subset of search by construction, not by coincidence:
     # _build_system_prompt checks needs_weather *nested inside* needs_search, so
     # any weather phrase the search regex misses gets no Tavily lookup at all
     # and Zeev answers from the model's imagination. "how hot is it" used to hit
     # exactly that hole -- caught by tests/test_intent_gates.py.
-    return bool(_SEARCH_RE.search(text)) or needs_weather(text)
+    return bool(_SEARCH_RE.search(text)) or needs_weather(text) or bool(_NAMED_CASE_RE.search(text))
 
 _WEATHER_RE = re.compile(r"\b(weather|forecast|temperature outside|how (hot|cold) is it)\b", re.IGNORECASE)
 

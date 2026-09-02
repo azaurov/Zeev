@@ -45,6 +45,12 @@ and titles using their common plain-English rendering (e.g. "Traore" not \
 a style preference: any accented character can misroute the whole reply to \
 the wrong TTS voice/language.
 
+Stick to what the snippets actually say. Do not add specific outcomes, \
+numbers, or details (a vote margin, a casualty count, an exact date) that \
+aren't stated in the snippets below, even if they sound plausible -- if a \
+snippet says a vote was held but doesn't give the result, say a vote was \
+held, not who won or by how much.
+
 RAW SNIPPETS:
 {snippets}"""
 

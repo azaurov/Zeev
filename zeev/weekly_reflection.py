@@ -42,9 +42,18 @@ BOSGAME_MODEL = os.environ.get("BOSGAME_MODEL", "llama3.2:1b")
 # Empty by default: opt-in via .env. See zeev.py's _feiergente_complete for
 # why this shares a busy-lock with zeev-audio's speakPiper.
 FEIERGENTE_URL   = os.environ.get("FEIERGENTE_URL", "")
-FEIERGENTE_MODEL = os.environ.get("FEIERGENTE_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 _FEIERGENTE_LOCK = "/tmp/zeev-feiergente-busy.lock"
 _FEIERGENTE_LOCK_STALE_S = 30
+
+# Reflection-specific override, deliberately separate from FEIERGENTE_MODEL
+# (which zeev.py's live-turn _refusal_fallback_reply() also reads): a size
+# sweep against feiergente01's Iris Xe iGPU (2026-09-01/02) found
+# qwen2.5:14b-instruct-q4_K_M noticeably more accurate than the 7b default on
+# this exact reflection-synthesis task (correctly tracked a decision made in
+# the last transcript line; 7b/dolphin3:8b both missed or misdated it), at
+# the cost of ~1.5-2x latency (47-74s vs 20-32s in testing) -- acceptable
+# here since this only runs from the weekly cron, never a live turn.
+REFLECTION_MODEL = "qwen2.5:14b-instruct-q4_K_M"
 
 if not GROQ_API_KEY:
     print("ERROR: GROQ_API_KEY not set", file=sys.stderr)
@@ -206,12 +215,12 @@ def _call_feiergente(prompt):
         r = requests.post(
             f"{FEIERGENTE_URL}/v1/chat/completions",
             json={
-                "model": FEIERGENTE_MODEL,
+                "model": REFLECTION_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 400,
                 "temperature": 0.7,
             },
-            timeout=120,
+            timeout=180,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip(), None

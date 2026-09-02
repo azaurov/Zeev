@@ -77,8 +77,11 @@ SUMMARY:
 Does the summary state anything -- a fact, name, number, or claim -- not \
 supported by the context above? Minor paraphrasing and reasonable inference \
 from what's in the context is fine; a claim with no basis in the context at \
-all is not. Reply GROUNDED, UNGROUNDED, or UNSURE on the first line, then \
-one line explaining why."""
+all is not. Before flagging any claim as unsupported, check the context \
+carefully for an exact or near-exact match -- the context can be long and \
+cover several unrelated stories, and a supporting detail is easy to miss. \
+Reply GROUNDED, UNGROUNDED, or UNSURE on the first line, then one line \
+explaining why."""
 
 _UNGROUNDED_RE = re.compile(r"\bUNGROUNDED\b", re.I)
 _GROUNDED_RE   = re.compile(r"\bGROUNDED\b", re.I)

@@ -51,6 +51,22 @@ aren't stated in the snippets below, even if they sound plausible -- if a \
 snippet says a vote was held but doesn't give the result, say a vote was \
 held, not who won or by how much.
 
+Keep each story's facts attached to the right place, event, and person -- \
+snippets below cover many unrelated stories back to back, and a detail from \
+one (a place name, a person, a photo caption) must never get pulled into a \
+different story just because it appeared nearby. If two snippets describe \
+what could be the same kind of event (two storms, two protests, two \
+elections) in different places, treat them as separate and do not merge \
+their details into one.
+
+Preserve the certainty of what a snippet actually says -- if it frames \
+something as a risk, a warning, or something that could happen, say that, \
+not that it has happened. Do not upgrade a hedge into a fact.
+
+A photo caption or image credit is not itself a news event -- don't build a \
+story out of one unless the snippet text around it actually reports \
+something happening.
+
 RAW SNIPPETS:
 {snippets}"""
 

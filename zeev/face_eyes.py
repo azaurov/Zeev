@@ -61,6 +61,18 @@ _MOUTH_Y  = _FACE_CY + _EYE_R + 18
 _MOUTH_MAX_OPEN = 14
 _MOUTH_HALF_W   = 30
 
+# Openness curve, measured off a real utterance on the device (sampled the
+# daemon's own eq_levels via AudioClient.eq_levels() during speak_sync, then
+# replayed the trace through this function). The band mean separates cleanly:
+# pauses sit at 0.002-0.02, active speech at 0.11-0.36, so a floor just above
+# the pause band shuts the mouth outright between words instead of leaving it
+# ajar. _MOUTH_FULL is the measured p95 (max was 0.358) -- the previous flat
+# x1.6 gain topped out at 0.57 openness, so the mouth never actually opened
+# all the way.
+_MOUTH_FLOOR   = 0.03
+_MOUTH_FULL    = 0.30
+_MOUTH_RELEASE = 0.35
+
 _N_PARTICLES = 6
 _particle_rng = random.Random(1729)
 _PARTICLES = [
@@ -142,9 +154,12 @@ def _mouth_openness(t, eq_levels):
     if eq_levels:
         vals = [max(0.0, min(1.0, v)) for v in eq_levels[:_EQ_BANDS]]
         # Mean, not max: one loud band shouldn't hold the mouth wide open
-        # through a pause. Speech energy sits low in these 8 log-spaced
-        # bands, so the mean runs low -- lift it before clamping.
-        raw = min(1.0, (sum(vals) / len(vals)) * 1.6) if vals else 0.0
+        # through a pause. Floor-and-rescale rather than a plain gain --
+        # both constants are measured off a real utterance on the device,
+        # see _MOUTH_FLOOR/_MOUTH_FULL.
+        mean = (sum(vals) / len(vals)) if vals else 0.0
+        raw = (mean - _MOUTH_FLOOR) / (_MOUTH_FULL - _MOUTH_FLOOR)
+        raw = max(0.0, min(1.0, raw))
     else:
         # No live PCM this turn (the Go-daemon route hands none back) --
         # synthesize a syllable rhythm. A plain sine never reaches zero, so
@@ -154,9 +169,13 @@ def _mouth_openness(t, eq_levels):
         if (t % 2.6) > 2.1:
             raw = 0.0
     prev = _mouth_open[0]
-    # Fast attack, slower release -- snaps open on a syllable, eases shut at
-    # the end of a word instead of flickering between frames.
-    _mouth_open[0] = raw if raw > prev else prev * 0.55 + raw * 0.45
+    # Fast attack, quick-but-not-instant release. The release constant is
+    # load-bearing: at 0.55 the mouth was still 4px open a frame after the
+    # level had already dropped into the pause band, which is exactly the
+    # "stays open through pauses" symptom. At _MOUTH_RELEASE it reaches the
+    # flat line within ~2 frames (~0.25s at the 8fps speaking render rate),
+    # short enough to shut between words but not so abrupt that it strobes.
+    _mouth_open[0] = raw if raw > prev else prev * _MOUTH_RELEASE + raw * (1 - _MOUTH_RELEASE)
     return _mouth_open[0]
 
 

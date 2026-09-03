@@ -73,3 +73,39 @@ def test_malformed_env_float_falls_back_instead_of_raising(zeev, monkeypatch):
     assert zeev._env_float("ZEEV_HOME_RADIUS", 100.0) == 100.0
     monkeypatch.setenv("ZEEV_HOME_LAT", "42.14")
     assert zeev._env_float("ZEEV_HOME_LAT", None) == 42.14
+
+
+def test_ip_fallback_fix_expires_fast_so_wifi_is_retried_soon(zeev, monkeypatch):
+    """An IP fallback (found live 2026-09-03): a too-early post-boot WiFi scan
+    returns < 2 cached APs, gps_locate() falls to ~25km-accuracy IP, and used
+    to cache that bad fix for the full 30-minute _GPS_CACHE_TTL -- Zeev stated
+    a wrong city (Cambridge instead of Canton) for ~40 minutes before the next
+    refresh-loop tick happened to land after the TTL. A real WiFi/Google fix
+    right after should NOT be blocked by a lingering IP-fix cache entry."""
+    saved = dict(zeev._gps_cache)
+    zeev._gps_cache.clear()
+    try:
+        zeev._gps_cache["result"] = {"lat": 42.37, "lon": -71.10, "accuracy": 25000,
+                                      "method": "ip", "city": "Cambridge"}
+        zeev._gps_cache["ts"] = 1_000_000.0
+
+        monkeypatch.setattr(zeev, "_wifi_scan_aps",
+                             lambda: [{"macAddress": "aa:bb", "signalStrength": -60},
+                                      {"macAddress": "cc:dd", "signalStrength": -70}])
+        monkeypatch.setattr(zeev, "_wifi_geolocate",
+                             lambda aps: {"lat": 42.16, "lon": -71.14, "accuracy": 12,
+                                          "method": "wifi+google"})
+
+        # Still within the IP TTL -> serves the stale cached IP fix.
+        monkeypatch.setattr(zeev.time, "time", lambda: 1_000_000.0 + 60)
+        assert zeev.gps_locate()["method"] == "ip"
+
+        # Past the IP TTL (2 min) but well under the normal 30-min TTL ->
+        # must retry and pick up the real fix instead of trusting the cache.
+        monkeypatch.setattr(zeev.time, "time", lambda: 1_000_000.0 + 150)
+        result = zeev.gps_locate()
+        assert result["method"] == "wifi+google"
+        assert result["accuracy"] == 12
+    finally:
+        zeev._gps_cache.clear()
+        zeev._gps_cache.update(saved)

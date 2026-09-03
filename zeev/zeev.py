@@ -6550,6 +6550,11 @@ _GPS_RE = re.compile(
 
 _gps_cache: dict = {}     # {"result": dict, "ts": float}
 _GPS_CACHE_TTL = 1800     # 30 minutes
+_GPS_IP_CACHE_TTL = 120   # 2 minutes — an IP fallback fix is cached far more
+                          # briefly than a real WiFi/Google fix, so a bad
+                          # early-boot fix (WiFi not settled yet) self-corrects
+                          # on the next refresh-loop tick instead of sitting at
+                          # ±25km for up to the full 30-minute TTL.
 
 
 def _nm_percent_to_dbm(pct: int) -> int:
@@ -6687,12 +6692,16 @@ def gps_locate() -> dict:
     """Return best available location dict.
 
     Pipeline: WiFi scan → Google Geolocation / beacondb → IP fallback.
-    Cached 30 min. Keys always include lat, lon, accuracy, method.
+    Cached 30 min for a real WiFi/Google fix, only 2 min for an IP fallback
+    (`_GPS_IP_CACHE_TTL`) so a bad early-boot fix retries soon instead of
+    sticking around at ±25km. Keys always include lat, lon, accuracy, method.
     """
     now = time.time()
     cached = _gps_cache.get("result")
-    if cached and now - _gps_cache.get("ts", 0) < _GPS_CACHE_TTL:
-        return cached
+    if cached:
+        ttl = _GPS_IP_CACHE_TTL if cached.get("method") == "ip" else _GPS_CACHE_TTL
+        if now - _gps_cache.get("ts", 0) < ttl:
+            return cached
 
     # Try WiFi triangulation first
     aps = _wifi_scan_aps()

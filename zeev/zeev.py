@@ -14244,7 +14244,7 @@ def run_device_mode():
                     _eq_levels[0] = _d_levels
             if _have_pil:
                 try:
-                    from face_aura import draw_frame
+                    from face_eyes import draw_frame
                     img = draw_frame(state, caption, now, batt=get_battery(),
                                       mouth_shape=_mouth_shape[0],
                                       eq_levels=_eq_levels[0])

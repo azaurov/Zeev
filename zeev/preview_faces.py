@@ -174,6 +174,7 @@ sys.path.insert(0, str(HERE))
 import face_wave
 import face_scroll
 import face_aura
+import face_eyes
 
 # Synthetic eq_levels for the "speaking" aura/scroll preview frame -- same
 # 8-value shape _draw_equalizer/_draw_aura expect from a live daemon poll,
@@ -189,6 +190,8 @@ renderers = {
     "scroll": lambda s: face_scroll.draw_frame(s, CAPTION, T,
                   eq_levels=_PREVIEW_EQ if s == "speaking" else None),
     "aura":   lambda s: face_aura.draw_frame(s, CAPTION, T,
+                  eq_levels=_PREVIEW_EQ if s == "speaking" else None),
+    "eyes":   lambda s: face_eyes.draw_frame(s, CAPTION, T,
                   eq_levels=_PREVIEW_EQ if s == "speaking" else None),
 }
 

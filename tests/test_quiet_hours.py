@@ -1,7 +1,15 @@
 """The nightly quiet window for the startup greeting.
 
-A reboot at 3am announcing itself at 90% into a dark house is the problem, and
-restarts are not rare -- every deploy is one.
+A reboot at 3am announcing itself into a dark house is the problem, and
+restarts are not rare -- every deploy is one, and Restart=on-failure means an
+unattended crash-restart is too. The first fix (2026-08-xx) made the greeting
+quieter (40%) rather than silent; that still spoke audibly every time the
+service restarted overnight, so it was tightened (2026-09-03) to skip the
+greeting outright inside quiet hours -- see run_device_mode's
+`_greeting_silent = _in_quiet_hours()`. Ongoing conversation once the device
+is actually woken is untouched: _scheduled_volume still returns a real,
+audible level overnight (_STARTUP_VOLUME, not silence) -- only the
+unprompted startup announcement is suppressed.
 """
 import pytest
 
@@ -43,8 +51,11 @@ def test_equal_bounds_disable_rather_than_mute_all_day(zeev, monkeypatch):
         assert not zeev._in_quiet_hours(h), h
 
 
-def test_quiet_volume_is_below_normal(zeev):
-    assert zeev._QUIET_VOLUME < zeev._STARTUP_VOLUME
+def test_quiet_volume_constant_was_removed_not_orphaned(zeev):
+    """_QUIET_VOLUME (the old "speak the greeting quieter" level) no longer
+    has any reader now that quiet hours skip the greeting outright -- this
+    guards against it quietly coming back as dead config nobody reads."""
+    assert not hasattr(zeev, "_QUIET_VOLUME")
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +77,9 @@ def test_scheduled_volume_is_loud_during_the_day(zeev, hour):
 
 @pytest.mark.parametrize("hour", [22, 23, 0, 1, 3, 5, 7])
 def test_scheduled_volume_falls_back_overnight(zeev, hour):
-    """Overnight non-greeting turns (e.g. a 2am question) keep the pre-existing
-    _STARTUP_VOLUME baseline -- only the greeting dips further, to _QUIET_VOLUME."""
+    """Overnight non-greeting turns (e.g. a 2am question someone actually
+    asked) keep the pre-existing _STARTUP_VOLUME baseline -- quiet hours only
+    suppress the unprompted startup greeting, not real conversation."""
     assert zeev._scheduled_volume(hour) == zeev._STARTUP_VOLUME
 
 

@@ -1538,7 +1538,6 @@ def _pct_to_raw(pct):
 # question that was just asked out loud, so it keeps the normal volume.
 _QUIET_START  = max(0, min(23, int(os.environ.get("ZEEV_QUIET_START", "22"))))
 _QUIET_END    = max(0, min(23, int(os.environ.get("ZEEV_QUIET_END", "8"))))
-_QUIET_VOLUME = max(0, min(100, int(os.environ.get("ZEEV_QUIET_VOLUME", "40"))))
 
 # Daytime is louder than the flat _STARTUP_VOLUME baseline. Before this, noon
 # and 9pm played at the identical 70% -- there was no "day" tier at all, only
@@ -14005,11 +14004,13 @@ def run_device_mode():
     init_tts()
     bt_detect_connected()
 
-    # Startup speaker volume (raw 0–127). Lowered for the greeting only when
-    # booting inside quiet hours; _speak_greeting restores the normal level as
-    # soon as it has finished, so the first real reply is at full volume.
-    _quiet_greeting = ("--no-greeting" not in sys.argv) and _in_quiet_hours()
-    _startup_pct = _QUIET_VOLUME if _quiet_greeting else _scheduled_volume()
+    # Startup speaker volume (raw 0–127). The greeting itself is skipped
+    # entirely inside quiet hours (see _speak_greeting below) rather than
+    # just played quietly -- a Restart=on-failure crash-restart at 3am must
+    # not speak into a dark house at all, not merely speak softly into it.
+    # With nothing to ramp down for, startup goes straight to the scheduled
+    # level (_scheduled_volume already returns the quiet-hours tier here).
+    _startup_pct = _scheduled_volume()
     _startup_raw = _pct_to_raw(_startup_pct)
     try:
         subprocess.run(
@@ -14017,10 +14018,7 @@ def run_device_mode():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         _VOLUME = _startup_pct
-        print(f"[audio] speaker volume {_startup_pct}% (raw {_startup_raw}/127)"
-              + (f" — quiet hours {_QUIET_START:02d}:00–{_QUIET_END:02d}:00,"
-                 f" greeting only (restores to {_STARTUP_VOLUME}%)"
-                 if _quiet_greeting else ""), flush=True)
+        print(f"[audio] speaker volume {_startup_pct}% (raw {_startup_raw}/127)", flush=True)
     except Exception as e:
         print(f"[audio] startup speaker volume set failed: {e}", flush=True)
 
@@ -15652,16 +15650,21 @@ def run_device_mode():
 
     _greeting_done = threading.Event()
 
-    if "--no-greeting" not in sys.argv:
+    # Skipped entirely inside quiet hours, not merely spoken softly: this
+    # fires on every restart, including an unattended Restart=on-failure
+    # crash-restart with nobody there to have asked for it -- see CLAUDE.md's
+    # "Startup / Shutdown" note. --no-greeting stays a separate explicit flag
+    # (device_states_test.py etc. want a deterministic no-audio startup
+    # regardless of the wall clock).
+    _greeting_silent = _in_quiet_hours()
+    if "--no-greeting" not in sys.argv and not _greeting_silent:
         def _speak_greeting():
-            global _VOLUME
             _set_face("speaking", _greeting)
             board.set_rgb(*_LED_SPEAKING)
-            # Both the volume restore and _greeting_done live in the finally.
-            # Either one skipped by an exception is a silent, delayed failure:
-            # the speaker stays at the quiet level for the whole session, or the
-            # wake listener waits on _greeting_done forever and the device is
-            # simply deaf -- neither pointing back at the greeting.
+            # _greeting_done lives in the finally: skipped by an exception it's
+            # a silent, delayed failure -- the wake listener waits on it
+            # forever and the device is simply deaf, with nothing pointing
+            # back at the greeting as the cause.
             try:
                 mp3 = elevenlabs_tts(_greeting)
                 if mp3 and shutil.which("mpg123"):
@@ -15680,23 +15683,14 @@ def run_device_mode():
             except Exception as e:
                 print(f"[startup] greeting failed: {e}", flush=True)
             finally:
-                if _quiet_greeting:
-                    try:
-                        subprocess.run(
-                            ["amixer", "-c", "wm8960soundcard", "sset", "Speaker",
-                             str(_pct_to_raw(_STARTUP_VOLUME))],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                        _VOLUME = _STARTUP_VOLUME
-                        print(f"[audio] quiet-hours greeting done — volume back to "
-                              f"{_STARTUP_VOLUME}%", flush=True)
-                    except Exception as e:
-                        print(f"[audio] volume restore failed: {e}", flush=True)
                 _go_idle()
                 _greeting_done.set()
 
         threading.Thread(target=_speak_greeting, daemon=True).start()
     else:
+        if _greeting_silent:
+            print(f"[startup] greeting suppressed — quiet hours "
+                  f"{_QUIET_START:02d}:00–{_QUIET_END:02d}:00", flush=True)
         _greeting_done.set()
 
     def _keyboard_listener():

@@ -8843,12 +8843,14 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                 )
 
     if needs_calendar(user_text):
+        note_capability("calendar")
         _gcal_days = gcal_days_from_query(user_text)
         cal = gcal_fetch(_gcal_days)
         _gcal_label = "Today's calendar" if _gcal_days == 1 else f"Calendar (next {_gcal_days} days)"
         parts.append(f"\n\n## {_gcal_label}:\n{cal}")
 
     if needs_gps(user_text):
+        note_capability("gps")
         loc = _geocoded_location()
         parts.append(f"\n\n## Current location:\n{gps_summary(loc)}")
 
@@ -8986,6 +8988,7 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         # string already computed above, when one is available.
         if needs_weather(user_text) and ambient_place_str:
             search_query = f"{user_text} in {ambient_place_str}"
+        note_capability("weather" if needs_weather(user_text) else "search")
         results = tavily_search(search_query)
         parts.append(f"\n\n[Web search results for '{search_query}']\n{results}")
         if needs_weather(user_text):
@@ -12765,6 +12768,25 @@ def _followup_turn(ctx, spoken, depth):
     return True
 
 
+def note_capability(name):
+    """Tell the LCD face which capability is actually running right now.
+
+    The face badges it above the eyes for a few seconds (face_eyes.py), so
+    the device shows what it's doing during the long ones -- a Wyze snap or a
+    yt-dlp resolve is tens of seconds of otherwise unexplained silence.
+
+    Best-effort and never raises. face_eyes is only importable when PIL is
+    present, and the live renderer is swappable (face_aura/face_scroll have no
+    such concept), so every call site has to survive it being absent -- these
+    sit in live turn paths where a decoration must never be able to raise.
+    """
+    try:
+        import face_eyes
+        face_eyes.note_capability(name)
+    except Exception:
+        pass
+
+
 def handle_transcript(ctx, transcript, _depth=0):
     """Run LLM on transcript and speak the reply. Caller must set THINKING state first.
 
@@ -12903,6 +12925,7 @@ def handle_transcript(ctx, transcript, _depth=0):
 
     # ── Adult jokes ──────────────────────────────────────────────────────
     if _JOKE_RE.match(transcript):
+        note_capability("joke")
         jlang = joke_lang(transcript)
         joke = random_joke(jlang, sexual=bool(_SUPER_DIRTY_RE.search(transcript)))
         if joke:
@@ -12928,6 +12951,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # briefing tonight" matches news (roundup|briefing|update) -- same
     # precedent as the goodnight gate and resolve_subject()'s exclusion.
     if _SHPEEL_RE.search(transcript) and not _TOOL_INTENT_RE.search(transcript):
+        note_capability("news")
         shpeel = get_shpeel()
         print(f"Zeev [shpeel]: {shpeel}")
         ctx.session.append({"role": "user", "content": transcript})
@@ -13085,6 +13109,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         return
 
     if not _IN_CALL and _bt_call_match(transcript):
+        note_capability("call")
         # Extract number and optional intent ("call 555-1234 to check my balance")
         number_m = re.search(r'(\+?[\d\s\-\(\)]{7,20})', transcript)
         if number_m:
@@ -13196,6 +13221,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # reminder guard inside resolve_subject().
     _subj = resolve_subject(transcript) if WYZE_SUBJECTS else None
     if _subj:
+        note_capability("camera")
         name = _subj["name"]
         # "check on Smokey in the basement" is a question about the basement.
         # A named room narrows the sweep to that room rather than reordering
@@ -13240,6 +13266,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         ctx._speak_device(
             f"Checking the {_phone_cam_label} cam through the phone{_pan_msg}{_spot_msg}, this takes a bit.",
             _LAST_VOICE)
+        note_capability("camera")
         _ok, _msg, _image = phone_camera_snapshot_remote(
             _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
         if _image:
@@ -13298,6 +13325,7 @@ def handle_transcript(ctx, transcript, _depth=0):
                      or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE)))
             or (_CAM_NOUN_RE.search(transcript) and not CAMERA_AVAILABLE
                 and not _TOOL_INTENT_RE.search(transcript))):
+        note_capability("camera")
         stream, alts = resolve_wyze_cam(transcript)
         # "check all cameras" is a sweep, not a room, and resolve_wyze_cam has
         # no way to say so -- it returns a single stream, so the phrase used to
@@ -13432,6 +13460,7 @@ def handle_transcript(ctx, transcript, _depth=0):
 
     # ── Camera natural language handling ──────────────────────────────────
     if CAMERA_AVAILABLE and _CAMERA_RE.search(transcript):
+        note_capability("camera")
         print(f"[camera] capturing…", flush=True)
         ctx._set_face("thinking", "Capturing…")
         img = capture_image()
@@ -13560,6 +13589,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # Placed after the visual gates so "play the fire effect" stays a visual
     # request rather than becoming a search for a song called "fire effect".
     if _MUSIC_STOP_RE.search(transcript):
+        note_capability("music")
         reply = "Stopped the music." if music_stop() else "Nothing is playing."
         print(f"Zeev [music]: {reply}")
         finish_turn(ctx, reply, face=False, led=False)
@@ -13567,6 +13597,7 @@ def handle_transcript(ctx, transcript, _depth=0):
 
     music_query = extract_music_query(transcript)
     if music_query:
+        note_capability("music")
         # Confirm *before* starting playback: youtube_play blocks for a few
         # seconds resolving the track, and speaking afterwards would talk
         # over the music it just started.
@@ -13593,6 +13624,8 @@ def handle_transcript(ctx, transcript, _depth=0):
     if needs_torah(transcript) or needs_parsha_reading(transcript) or (needs_search(transcript) and TAVILY_API_KEY):
         # Torah/parsha/search payloads inject large text blocks; 8B's 6k TPM limit is too small
         model_id = MODELS["2"][0]
+        note_capability("torah" if (needs_torah(transcript) or needs_parsha_reading(transcript))
+                        else "search")
     short    = _MODEL_SHORT.get(model_id, "?")
 
     print(f"[+{time.perf_counter()-t0:.1f}s] LLM [{short}]…", flush=True)
@@ -13626,6 +13659,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # at emitting well-formed tool calls. The model needs the wall clock to
     # resolve "at 4" -- nothing else in the prompt provides it.
     if _TOOL_INTENT_RE.search(transcript):
+        note_capability("reminder")
         tool_model = MODELS["2"][0]
         tool_sys = sys_prompt + (
             f"\n\nCurrent local time: {datetime.now().strftime('%A %Y-%m-%d %H:%M')}. "

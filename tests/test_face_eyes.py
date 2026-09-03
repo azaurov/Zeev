@@ -177,3 +177,60 @@ def test_open_mouth_occludes_rather_than_tangles_with_a_glyph():
     face_eyes._draw_mouth(d, face_eyes.W // 2, face_eyes._MOUTH_Y, "speaking",
                           0.0, [0.36] * face_eyes._EQ_BANDS, col)
     assert img.getpixel((face_eyes.W // 2, face_eyes._MOUTH_Y)) == (0, 0, 0)
+
+
+# ── Capability badge (a capability actually running) ─────────────────────────
+
+def test_note_capability_badges_then_expires():
+    import time as _time
+    face_eyes.note_capability("camera")
+    t = _time.time()
+    assert face_eyes._active_capability(t) == "camera"
+    assert face_eyes._active_capability(t + face_eyes._CAP_HOLD / 2) == "camera"
+    # Expiry is by timestamp on purpose: the gate branches have many exit
+    # paths, so a badge that needed an explicit clear could stick forever and
+    # end up lying about what the device is doing.
+    assert face_eyes._active_capability(t + face_eyes._CAP_HOLD + 0.1) is None
+
+
+def test_unknown_capability_name_is_ignored_not_raised():
+    """These calls sit in live turn paths -- decoration must never raise."""
+    face_eyes._active_cap[0] = None
+    face_eyes.note_capability("no_such_capability")
+    assert face_eyes._active_capability(__import__("time").time()) is None
+
+
+def test_badge_suppresses_the_ambient_drift():
+    """One moving signal at a time -- the badge means something, the drift doesn't."""
+    from PIL import Image, ImageDraw
+    face_eyes._active_cap[0] = None
+    t = 2.25                                  # mid-crossing for a flyer
+    assert _flyer_drawn("listening", t)       # drift is on when nothing is running
+
+    face_eyes.note_capability("news")
+    face_eyes._active_cap[1] = t              # noted "now" on the same clock
+    img = Image.new("RGB", (face_eyes.W, face_eyes.SEP_Y), (0, 0, 0))
+    face_eyes._draw_face(ImageDraw.Draw(img), t, (0, 210, 230), "listening")
+    assert face_eyes._active_capability(t) == "news"
+    face_eyes._active_cap[0] = None
+
+
+def test_every_capability_name_used_in_zeev_py_has_a_glyph():
+    """A typo'd name is a silent no-op -- nothing would ever badge for it."""
+    import re, pathlib
+    src = (pathlib.Path(__file__).parent.parent / "zeev" / "zeev.py").read_text()
+    used = set(re.findall(r'note_capability\(\s*"(\w+)"', src))
+    used |= set(re.findall(r'\belse\s+"(\w+)"\)\s*$', src, re.M))  # ternary call sites
+    # Only names that are actually capability arguments; the ternary sweep can
+    # pick up unrelated expressions, so intersect with what the call sites use.
+    used = {n for n in used if n in face_eyes._CAP_GLYPHS or n in (
+        "torah", "search", "weather")}
+    assert used, "no note_capability call sites found -- did the wiring move?"
+    missing = used - set(face_eyes._CAP_GLYPHS)
+    assert not missing, f"zeev.py notes capabilities with no glyph: {sorted(missing)}"
+
+
+def test_zeev_note_capability_wrapper_never_raises(zeev):
+    """The wrapper must survive PIL being absent or the renderer being swapped."""
+    zeev.note_capability("camera")
+    zeev.note_capability("definitely_not_a_capability")

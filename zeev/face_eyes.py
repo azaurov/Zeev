@@ -44,6 +44,7 @@ to become opaque for them to read as depth.
 
 import math
 import random
+import time
 
 from PIL import Image, ImageDraw
 
@@ -215,6 +216,69 @@ _FLY_DIM    = 0.42   # background weight -- must not compete with the face
 _FLY_LANES  = (_HAT_TOP + 14, SEP_Y - 14, _HAT_TOP + 26, SEP_Y - 26)
 
 
+_CAP_GLYPHS = {
+    "news":     _ic_newspaper,
+    "calendar": _ic_calendar,
+    "music":    _ic_music,
+    "reminder": _ic_bell,
+    "camera":   _ic_camera,
+    "torah":    _ic_book,
+    "search":   _ic_search,
+    "call":     _ic_phone,
+    "gps":      _ic_pin,
+    "weather":  _ic_cloud,
+    "joke":     _ic_smile,
+}
+
+# How long a noted capability stays on screen. Expiry is by timestamp rather
+# than an explicit clear: the gate branches in zeev.py have many exit paths
+# (early return, exception, backgrounded thread), and a badge that could stick
+# forever would eventually be lying about what the device is doing. Failing
+# toward silence is the same default gps_summary's accuracy gate uses.
+_CAP_HOLD    = 10.0
+_CAP_BADGE_Y = _FACE_CY - _EYE_R - 14   # the clear gap between the two brows
+_active_cap  = [None, 0.0]              # (name, time.time() when noted)
+
+
+def note_capability(name):
+    """Record that `name` is actually running right now.
+
+    Called from zeev.py's gate branches (see its note_capability wrapper).
+    Unknown names are ignored rather than raising -- this is decoration on a
+    live turn and must never be able to take one down.
+    """
+    if name in _CAP_GLYPHS:
+        _active_cap[0] = name
+        _active_cap[1] = time.time()
+
+
+def _active_capability(t):
+    """Name of the capability to badge right now, or None."""
+    name, at = _active_cap
+    if not name:
+        return None
+    age = t - at
+    if age < 0 or age > _CAP_HOLD:
+        return None
+    return name
+
+
+def _draw_capability_badge(draw, t, col, name):
+    """The running capability, pinned above the eyes and pulsing.
+
+    Full-strength rather than dimmed like the ambient flyers: this one means
+    something specific is happening, and it has to be told apart from the
+    decorative drift at a glance. Drawn last so nothing occludes it, in the
+    one band of the header that no face element uses.
+    """
+    pulse = 0.72 + 0.28 * math.sin(t * 3.4)
+    fade  = min(1.0, max(0.0, (_CAP_HOLD - (t - _active_cap[1])) / 1.2))
+    shade = tuple(max(0, min(255, int(c * pulse * fade))) for c in col)
+    if max(shade) < 12:
+        return
+    _CAP_GLYPHS[name](draw, W // 2, _CAP_BADGE_Y, _FLY_SIZE, shade)
+
+
 def _draw_flyers(draw, t, col, state):
     """One capability glyph drifting across, behind the face.
 
@@ -372,7 +436,12 @@ def _draw_face(draw, t, col, state, eq_levels=None):
     blink = (t % 4.0) < 0.15
 
     _draw_particles(draw, t, col)
-    _draw_flyers(draw, t, col, state)
+    # The ambient drift stands down while a real capability is running -- two
+    # moving signals at once reads as noise, and only one of them means
+    # anything.
+    cap = _active_capability(t)
+    if cap is None:
+        _draw_flyers(draw, t, col, state)
 
     look_x, look_y, brow_dy_l, brow_dy_r = _expr_for_state(state, t)
 
@@ -389,6 +458,9 @@ def _draw_face(draw, t, col, state, eq_levels=None):
         _draw_brow(draw, ex, cy - _EYE_R - 14 + brow_dy, col, state)
 
     _draw_mouth(draw, cx, _MOUTH_Y, state, t, eq_levels, col)
+
+    if cap is not None:
+        _draw_capability_badge(draw, t, col, cap)
 
 
 # ── Header (state dot + label, clock, battery, face, separator) ──────────────

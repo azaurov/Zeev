@@ -141,17 +141,24 @@ def _mouth_levels(t, eq_levels):
 
 def _draw_mouth(draw, cx, y, state, t, eq_levels, col):
     if state == "speaking":
+        # Two mirrored lip lines riding the same traveling wave, pinched
+        # together when quiet and pushed apart when loud -- the gap between
+        # them is the actual "mouth opening", not just line wobble.
         levels = _mouth_levels(t, eq_levels)
         n = len(levels)
         half_w = 32
         seg = (half_w * 2) / (n - 1)
-        pts = []
+        top_pts, bot_pts = [], []
         for i, lvl in enumerate(levels):
             x = cx - half_w + i * seg
-            amp = 4 + lvl * 15
-            yy = y + amp * math.sin(t * 6 + i * 0.9)
-            pts.append((x, yy))
-        draw.line(pts, fill=col, width=3, joint="curve")
+            wobble = (3 + lvl * 5) * math.sin(t * 6 + i * 0.9)
+            gap = 2 + lvl * 8
+            top_pts.append((x, y + wobble - gap))
+            bot_pts.append((x, y + wobble + gap))
+        draw.line(top_pts, fill=col, width=3, joint="curve")
+        draw.line(bot_pts, fill=col, width=3, joint="curve")
+        draw.line([top_pts[0], bot_pts[0]], fill=col, width=3)
+        draw.line([top_pts[-1], bot_pts[-1]], fill=col, width=3)
         return
     if state == "thinking":
         for i in range(3):

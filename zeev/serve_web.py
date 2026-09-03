@@ -20,4 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import zeev  # noqa: E402  (import after sys.path patch)
 
 if __name__ == "__main__":
-    zeev.run_web_server(port=5057)
+    # host pinned to loopback so nginx (TLS + AOP + Basic auth) is the only
+    # path in -- the old 0.0.0.0 default left the plaintext, unauthenticated
+    # backend reachable on every interface, protected only by UFW having no
+    # explicit allow rule for this port.
+    zeev.run_web_server(host="127.0.0.1", port=5057)

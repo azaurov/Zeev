@@ -1603,6 +1603,72 @@ def model_label(model_id):
 
 
 # ---------------------------------------------------------------------------
+# Face-state time totals
+# ---------------------------------------------------------------------------
+# Cumulative wall-time spent in each device-mode face state (idle/ready/
+# listening/thinking/speaking/error), persisted so a process outside this
+# one -- ragnarok's battery_log.py, on its own 5-min systemd timer -- can
+# tell real idle time from real active time when correlating it against
+# battery drain. Module-level (not a run_device_mode closure) for the same
+# testability reason handle_transcript/finish_turn were pulled out: see
+# CLAUDE.md's "Device-mode turn handling" note.
+#
+# Shape on disk: {"totals": {state: cumulative_seconds, ...},
+# "current_state": str|None, "current_since": epoch|None}. "totals" only
+# holds *completed* state durations -- the still-ongoing state's elapsed
+# time is derived at read time from current_since, the same
+# counter-plus-live-partial pattern systemd itself uses for CPUUsageNSec.
+STATE_TOTALS_PATH = BASE_DIR / "data" / "face_state_totals.json"
+
+
+def _load_state_totals(path=None):
+    """Read persisted per-state cumulative totals. Never raises -- a missing
+    or corrupt file just means no history yet, not a live-turn failure."""
+    path = path or STATE_TOTALS_PATH
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("totals", {}), data.get("current_state"), data.get("current_since")
+    except Exception:
+        return {}, None, None
+
+
+def _write_state_totals(totals, current_state, current_since, path=None):
+    """Atomically persist per-state cumulative totals (write-tmp + rename,
+    so a reader never sees a half-written file)."""
+    path = path or STATE_TOTALS_PATH
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump({"totals": totals, "current_state": current_state,
+                       "current_since": current_since}, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"[face_state] totals write failed: {e}", flush=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _record_state_transition(new_state, now=None, path=None):
+    """Roll the just-ended state's elapsed time into the cumulative totals
+    and persist under the new state. Called from _set_face on every real
+    transition. Best-effort and exception-swallowing by design -- a totals
+    write must never be able to break a live device turn over a disk hiccup."""
+    now = now if now is not None else time.time()
+    try:
+        totals, cur_state, cur_since = _load_state_totals(path)
+        if cur_state is not None and cur_since is not None:
+            totals[cur_state] = totals.get(cur_state, 0.0) + max(0.0, now - cur_since)
+        _write_state_totals(totals, new_state, now, path)
+    except Exception as e:
+        print(f"[face_state] transition record failed: {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # PiSugar battery
 # ---------------------------------------------------------------------------
 
@@ -14238,6 +14304,11 @@ def run_device_mode():
                 # levels would otherwise linger on screen until the daemon
                 # actually starts streaming this turn's audio).
                 _eq_levels[0] = None
+            if state != _face_state:
+                # Best-effort battery/power-insight bookkeeping (see the
+                # "Face-state time totals" section) -- must never be able to
+                # affect a live turn, so any failure inside is swallowed there.
+                _record_state_transition(state)
             _face_state   = state
             _face_caption = caption
 

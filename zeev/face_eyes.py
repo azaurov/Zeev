@@ -54,7 +54,7 @@ _mouth_smoothed = [0.0] * _EQ_BANDS  # decay-smoothed waveform points, "speaking
 _FACE_CY  = _HAT_TOP + 54   # vertical center of the eye row
 _EYE_DX   = 32              # horizontal offset of each eye from center
 _EYE_R    = 20               # eye outer radius
-_MOUTH_Y  = _FACE_CY + _EYE_R + 20
+_MOUTH_Y  = _FACE_CY + _EYE_R + 18
 
 _N_PARTICLES = 6
 _particle_rng = random.Random(1729)
@@ -98,31 +98,31 @@ def _draw_eye(draw, ex, ey, r, col, blink, look_x=0.0, look_y=0.0):
 
 
 def _draw_brow(draw, ex, y, col, state):
-    half = 15
+    half = 17
     if state == "error":
         # Inner (nose-side) end pulled down, outer end raised -- an angled
         # V that reads as concerned/frowning without needing a mouth change.
         if ex < W // 2:
-            draw.line([ex - half, y - 4, ex + half, y + 4], fill=col, width=4)
+            draw.line([ex - half, y - 5, ex + half, y + 5], fill=col, width=4)
         else:
-            draw.line([ex - half, y + 4, ex + half, y - 4], fill=col, width=4)
+            draw.line([ex - half, y + 5, ex + half, y - 5], fill=col, width=4)
         return
-    draw.arc([ex - half, y - 6, ex + half, y + 10], start=200, end=340, fill=col, width=4)
+    draw.arc([ex - half, y - 9, ex + half, y + 13], start=200, end=340, fill=col, width=4)
 
 
 def _expr_for_state(state, t):
     """Return (look_x, look_y, brow_dy_left, brow_dy_right)."""
     if state == "thinking":
         sweep = math.sin(t * 1.3) * 5
-        return (sweep, -1, -6, 2)
+        return (sweep, -1, -10, 5)
     if state == "listening":
-        return (0, 0, -3, -3)
+        return (0, 0, -6, -6)
     if state == "error":
         return (0, 1, 0, 0)
     if state == "speaking":
         return (0, 0, 0, 0)
     # idle/ready: slow synchronized bob
-    bob = math.sin(t * 0.9) * 1.5
+    bob = math.sin(t * 0.9) * 2.5
     return (0, 0, bob, bob)
 
 
@@ -148,7 +148,7 @@ def _draw_mouth(draw, cx, y, state, t, eq_levels, col):
         pts = []
         for i, lvl in enumerate(levels):
             x = cx - half_w + i * seg
-            amp = 3 + lvl * 13
+            amp = 4 + lvl * 15
             yy = y + amp * math.sin(t * 6 + i * 0.9)
             pts.append((x, yy))
         draw.line(pts, fill=col, width=3, joint="curve")

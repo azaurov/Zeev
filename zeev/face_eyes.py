@@ -35,6 +35,11 @@ echo the reference's particle backdrop -- purely decorative, cheap (a few
 small ellipse fills), no per-frame allocation or resizing, same rendering-
 cost discipline as face_aura (this runs on a Pi Zero 2W pushing RGB565 over
 SPI at up to 12fps).
+
+Behind the face, one capability glyph at a time drifts across (newspaper,
+calendar, camera, ...) -- see the "Capability flyers" section for why the
+set is restricted to features with a real code path, and why the mouth had
+to become opaque for them to read as depth.
 """
 
 import math
@@ -58,6 +63,7 @@ _EYE_R    = 20               # eye outer radius
 _MOUTH_Y  = _FACE_CY + _EYE_R + 18
 # Half-height at full openness. Bounded so a wide-open mouth still clears the
 # eyes' outer glow above (~_FACE_CY + _EYE_R + 8) and the separator below.
+_BG = (0, 0, 0)          # page background; the mouth fills with this so it occludes
 _MOUTH_MAX_OPEN = 14
 _MOUTH_HALF_W   = 30
 
@@ -85,6 +91,154 @@ _PARTICLES = [
     )
     for _ in range(_N_PARTICLES)
 ]
+
+
+# ── Capability flyers ────────────────────────────────────────────────────────
+# Small glyphs for things Zeev can actually do, drifting across behind the
+# face -- the device's features are otherwise undiscoverable (nothing on
+# screen ever hints that it can read the parsha, place a call, or check a
+# camera).
+#
+# Every glyph here maps to a real code path (`get_shpeel`, `youtube_play`,
+# `gcal_fetch`, `due_reminders`, `vision_complete`, `torah_search`,
+# `needs_search`, `_BT_CALL_RE`, `gps_locate`, `needs_weather`,
+# `random_joke`). Deliberately NO envelope: zeev.py has no SMTP/IMAP/Gmail
+# path of any kind, and a device advertising a capability it doesn't have is
+# the same failure as claiming in words to have done something it didn't.
+#
+# Each takes (draw, cx, cy, s, col) and draws inside a 2s box, axis-aligned
+# (no rotation -- PIL would need a per-icon image + paste, and this path
+# already needed a perf fix once).
+
+def _ic_newspaper(draw, cx, cy, s, col):
+    draw.rectangle([cx - s, cy - s * 0.75, cx + s, cy + s * 0.75], outline=col, width=1)
+    draw.line([cx - s + 2, cy - s * 0.75 + 3, cx + s - 2, cy - s * 0.75 + 3], fill=col, width=1)
+    for i in range(2):
+        yy = cy - s * 0.75 + 7 + i * 4
+        draw.line([cx - s + 2, yy, cx + s - 2, yy], fill=col, width=1)
+
+
+def _ic_music(draw, cx, cy, s, col):
+    draw.ellipse([cx - s * 0.9, cy + s * 0.15, cx - s * 0.1, cy + s * 0.85], fill=col)
+    draw.line([cx - s * 0.15, cy + s * 0.5, cx - s * 0.15, cy - s * 0.85], fill=col, width=2)
+    draw.line([cx - s * 0.15, cy - s * 0.85, cx + s * 0.75, cy - s * 0.5], fill=col, width=2)
+
+
+def _ic_calendar(draw, cx, cy, s, col):
+    draw.rectangle([cx - s * 0.85, cy - s * 0.6, cx + s * 0.85, cy + s * 0.8], outline=col, width=1)
+    draw.line([cx - s * 0.85, cy - s * 0.2, cx + s * 0.85, cy - s * 0.2], fill=col, width=1)
+    draw.line([cx - s * 0.45, cy - s * 0.9, cx - s * 0.45, cy - s * 0.45], fill=col, width=1)
+    draw.line([cx + s * 0.45, cy - s * 0.9, cx + s * 0.45, cy - s * 0.45], fill=col, width=1)
+    draw.rectangle([cx - s * 0.5, cy + s * 0.15, cx - s * 0.1, cy + s * 0.5], fill=col)
+
+
+def _ic_bell(draw, cx, cy, s, col):
+    draw.arc([cx - s * 0.7, cy - s * 0.9, cx + s * 0.7, cy + s * 0.5], start=180, end=360,
+             fill=col, width=2)
+    draw.line([cx - s * 0.7, cy - s * 0.2, cx - s * 0.7, cy + s * 0.3], fill=col, width=1)
+    draw.line([cx + s * 0.7, cy - s * 0.2, cx + s * 0.7, cy + s * 0.3], fill=col, width=1)
+    draw.line([cx - s * 0.9, cy + s * 0.35, cx + s * 0.9, cy + s * 0.35], fill=col, width=1)
+    draw.ellipse([cx - 1.5, cy + s * 0.5, cx + 1.5, cy + s * 0.85], fill=col)
+
+
+def _ic_camera(draw, cx, cy, s, col):
+    draw.rectangle([cx - s * 0.55, cy - s * 0.85, cx - s * 0.1, cy - s * 0.5], outline=col, width=1)
+    draw.rounded_rectangle([cx - s * 0.95, cy - s * 0.55, cx + s * 0.95, cy + s * 0.7],
+                           radius=2, outline=col, width=1)
+    draw.ellipse([cx - s * 0.35, cy - s * 0.25, cx + s * 0.35, cy + s * 0.45],
+                 outline=col, width=1)
+
+
+def _ic_book(draw, cx, cy, s, col):
+    draw.rectangle([cx - s * 0.9, cy - s * 0.7, cx + s * 0.9, cy + s * 0.7], outline=col, width=1)
+    draw.line([cx, cy - s * 0.7, cx, cy + s * 0.7], fill=col, width=1)
+    for i in range(2):
+        yy = cy - s * 0.3 + i * 5
+        draw.line([cx - s * 0.7, yy, cx - s * 0.2, yy], fill=col, width=1)
+        draw.line([cx + s * 0.2, yy, cx + s * 0.7, yy], fill=col, width=1)
+
+
+def _ic_search(draw, cx, cy, s, col):
+    draw.ellipse([cx - s * 0.9, cy - s * 0.9, cx + s * 0.3, cy + s * 0.3], outline=col, width=2)
+    draw.line([cx + s * 0.2, cy + s * 0.2, cx + s * 0.9, cy + s * 0.9], fill=col, width=2)
+
+
+def _ic_phone(draw, cx, cy, s, col):
+    draw.rounded_rectangle([cx - s * 0.5, cy - s * 0.9, cx + s * 0.5, cy + s * 0.9],
+                           radius=2, outline=col, width=1)
+    draw.line([cx - s * 0.2, cy - s * 0.6, cx + s * 0.2, cy - s * 0.6], fill=col, width=1)
+    draw.ellipse([cx - 1.2, cy + s * 0.5, cx + 1.2, cy + s * 0.75], fill=col)
+
+
+def _ic_pin(draw, cx, cy, s, col):
+    draw.ellipse([cx - s * 0.6, cy - s * 0.9, cx + s * 0.6, cy + s * 0.3], outline=col, width=2)
+    draw.line([cx - s * 0.4, cy + s * 0.1, cx, cy + s * 0.9], fill=col, width=2)
+    draw.line([cx + s * 0.4, cy + s * 0.1, cx, cy + s * 0.9], fill=col, width=2)
+
+
+def _ic_cloud(draw, cx, cy, s, col):
+    draw.ellipse([cx - s * 0.95, cy - s * 0.1, cx - s * 0.05, cy + s * 0.6], fill=col)
+    draw.ellipse([cx - s * 0.5, cy - s * 0.6, cx + s * 0.5, cy + s * 0.5], fill=col)
+    draw.ellipse([cx + s * 0.05, cy - s * 0.15, cx + s * 0.95, cy + s * 0.6], fill=col)
+
+
+def _ic_smile(draw, cx, cy, s, col):
+    draw.ellipse([cx - s * 0.85, cy - s * 0.85, cx + s * 0.85, cy + s * 0.85],
+                 outline=col, width=1)
+    draw.ellipse([cx - s * 0.45, cy - s * 0.4, cx - s * 0.2, cy - s * 0.1], fill=col)
+    draw.ellipse([cx + s * 0.2, cy - s * 0.4, cx + s * 0.45, cy - s * 0.1], fill=col)
+    draw.arc([cx - s * 0.5, cy - s * 0.3, cx + s * 0.5, cy + s * 0.6], start=20, end=160,
+             fill=col, width=1)
+
+
+_FLYERS = (
+    _ic_newspaper,   # get_shpeel / world news
+    _ic_calendar,    # gcal_fetch
+    _ic_music,       # youtube_play
+    _ic_bell,        # reminders / timers
+    _ic_camera,      # vision_complete / Wyze
+    _ic_book,        # torah_search
+    _ic_search,      # needs_search / Tavily
+    _ic_phone,       # BT HFP calls
+    _ic_pin,         # gps_locate
+    _ic_cloud,       # needs_weather
+    _ic_smile,       # random_joke
+)
+
+_FLY_SIZE   = 9      # half-size, so each glyph is ~18px
+_FLY_PERIOD = 6.5    # seconds from one glyph's entry to the next
+_FLY_TRAVEL = 4.5    # seconds to cross, leaving a gap of empty screen between
+_FLY_DIM    = 0.42   # background weight -- must not compete with the face
+# Lanes deliberately avoid the vertical middle of the eye row: a glyph is
+# occluded by the eyes anyway (it's drawn first), but one crossing exactly
+# through both pupils reads as damage rather than depth.
+_FLY_LANES  = (_HAT_TOP + 14, SEP_Y - 14, _HAT_TOP + 26, SEP_Y - 26)
+
+
+def _draw_flyers(draw, t, col, state):
+    """One capability glyph drifting across, behind the face.
+
+    Position is a pure function of `t` rather than an accumulated per-frame
+    step: _FACE_INTERVAL renders each state at a different rate, so anything
+    incremental would drift at a different speed per state.
+
+    Skipped in "ready"/"error", which render at 1fps -- a glyph would jump
+    ~50px per frame there and read as a glitch rather than motion.
+    """
+    if state in ("ready", "error"):
+        return
+    slot  = int(t / _FLY_PERIOD)
+    phase = (t % _FLY_PERIOD) / _FLY_TRAVEL
+    if phase > 1.0:
+        return
+    # Fade in and out at the edges so glyphs don't pop into existence.
+    edge = min(1.0, phase * 6.0, (1.0 - phase) * 6.0)
+    shade = tuple(max(0, min(255, int(c * _FLY_DIM * edge))) for c in col)
+    if max(shade) < 12:
+        return
+    x = -_FLY_SIZE * 2 + phase * (W + _FLY_SIZE * 4)
+    y = _FLY_LANES[slot % len(_FLY_LANES)]
+    _FLYERS[slot % len(_FLYERS)](draw, x, y, _FLY_SIZE, shade)
 
 
 def _draw_particles(draw, t, col):
@@ -190,7 +344,11 @@ def _draw_mouth(draw, cx, y, state, t, eq_levels, col):
         if h < 2.0:
             draw.line([cx - w, y, cx + w, y], fill=col, width=3)
         else:
-            draw.ellipse([cx - w, y - h, cx + w, y + h], outline=col, width=3)
+            # Filled with the page background, not left hollow: the capability
+            # glyphs drift behind the face, and the eyes occlude them cleanly
+            # only because they're filled. An outline-only mouth let a glyph
+            # show through its middle, which read as damage rather than depth.
+            draw.ellipse([cx - w, y - h, cx + w, y + h], fill=_BG, outline=col, width=3)
         return
     if state == "thinking":
         for i in range(3):
@@ -214,6 +372,7 @@ def _draw_face(draw, t, col, state, eq_levels=None):
     blink = (t % 4.0) < 0.15
 
     _draw_particles(draw, t, col)
+    _draw_flyers(draw, t, col, state)
 
     look_x, look_y, brow_dy_l, brow_dy_r = _expr_for_state(state, t)
 

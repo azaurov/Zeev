@@ -111,3 +111,69 @@ def test_synthetic_fallback_still_cycles_open_and_shut():
         seen_open |= h >= 2.0
         seen_shut |= h < 2.0
     assert seen_open and seen_shut
+
+
+# ── Capability flyers ────────────────────────────────────────────────────────
+
+def _flyer_drawn(state, t):
+    """True if a flyer put anything on an otherwise empty frame.
+
+    getbbox() rather than getdata(): it's the non-zero bounding box, so it
+    answers "did anything get drawn" directly and without the pixel-sequence
+    deprecation.
+    """
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (face_eyes.W, face_eyes.SEP_Y), (0, 0, 0))
+    face_eyes._draw_flyers(ImageDraw.Draw(img), t, (0, 210, 230), state)
+    return img.getbbox() is not None
+
+
+def test_every_flyer_glyph_renders():
+    from PIL import Image, ImageDraw
+    for fn in face_eyes._FLYERS:
+        img = Image.new("RGB", (40, 40), (0, 0, 0))
+        fn(ImageDraw.Draw(img), 20, 20, face_eyes._FLY_SIZE, (0, 210, 230))
+        assert img.getbbox() is not None, f"{fn.__name__} drew nothing"
+
+
+def test_flyers_are_suppressed_in_one_fps_states():
+    """ready/error render at 1fps (_FACE_INTERVAL) -- a glyph would jump ~50px
+    per frame and read as a glitch rather than as motion."""
+    t = 2.25   # mid-crossing, so a glyph would definitely be drawn otherwise
+    assert _flyer_drawn("listening", t)
+    for state in ("ready", "error"):
+        assert not _flyer_drawn(state, t)
+
+
+def test_flyers_leave_gaps_between_glyphs():
+    """_FLY_TRAVEL < _FLY_PERIOD, so the screen is clear between crossings."""
+    assert face_eyes._FLY_TRAVEL < face_eyes._FLY_PERIOD
+    quiet = face_eyes._FLY_PERIOD - 0.1     # after this crossing has finished
+    assert not _flyer_drawn("listening", quiet)
+
+
+def test_flyer_set_advertises_no_capability_zeev_lacks():
+    """The device must not advertise what it cannot do -- notably email, which
+    has no SMTP/IMAP/Gmail path anywhere in zeev.py."""
+    names = {fn.__name__ for fn in face_eyes._FLYERS}
+    assert "_ic_envelope" not in names and "_ic_mail" not in names
+
+
+def test_open_mouth_occludes_rather_than_tangles_with_a_glyph():
+    """The mouth is filled with the background so glyphs pass behind it.
+
+    Left hollow, a glyph showed through the mouth's middle and read as
+    damage. Pinned by drawing a glyph dead centre under a wide-open mouth and
+    checking the mouth's interior is background, not glyph.
+    """
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (face_eyes.W, face_eyes.SEP_Y), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    col = (0, 210, 230)
+    # Glyph straight through where the mouth will be drawn.
+    face_eyes._ic_newspaper(d, face_eyes.W // 2, face_eyes._MOUTH_Y,
+                            face_eyes._FLY_SIZE, col)
+    face_eyes._mouth_open[0] = 1.0
+    face_eyes._draw_mouth(d, face_eyes.W // 2, face_eyes._MOUTH_Y, "speaking",
+                          0.0, [0.36] * face_eyes._EQ_BANDS, col)
+    assert img.getpixel((face_eyes.W // 2, face_eyes._MOUTH_Y)) == (0, 0, 0)

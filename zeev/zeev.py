@@ -8693,7 +8693,15 @@ def _build_system_prompt(user_text, on_search=None, session=None):
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
-        parts.append(f"\n\n## What I know about Alex:\n{facts_str}")
+        parts.append(
+            f"\n\n## What I know about Alex:\n{facts_str}\n"
+            "A fact naming where Alex \"lives\"/\"is from\" is his home address, not "
+            "necessarily where he is right now -- for his *current* physical location, "
+            "use the Approximate location / Current location blocks below instead, "
+            "never this list. If asked where he is right now and no location block is "
+            "present, say you don't know his current location rather than answering "
+            "from his home address."
+        )
 
     if _WEEKLY_REFLECTION:
         parts.append(f"\n\n## Weekly reflection:\n{_WEEKLY_REFLECTION[:1500]}")
@@ -8851,7 +8859,21 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     if needs_gps(user_text):
         note_capability("gps")
         loc = _geocoded_location()
-        parts.append(f"\n\n## Current location:\n{gps_summary(loc)}")
+        block = f"\n\n## Current location:\n{gps_summary(loc)}"
+        # A coarse IP fix (~25km) still carries city name + 5-decimal coordinates
+        # in gps_summary()'s formatted string -- nothing stopped the model from
+        # reading that back as a precise fact. Found live 2026-09-03: a cold
+        # post-reboot cache fell back to IP geolocation and the model stated
+        # "Ashcroft, Massachusetts" with specific-looking coordinates and no
+        # hedge, for a device actually in a neighboring town, well inside a
+        # 25km IP-fix margin.
+        if loc.get("method") == "ip" or (loc.get("accuracy") and loc.get("accuracy") >= 10000):
+            block += (
+                "\nThis fix is IP-based, accurate only to roughly 25km. Do not state "
+                "the city or coordinates as precise fact -- say you only have a rough "
+                "idea of the region and name the accuracy."
+            )
+        parts.append(block)
 
     # The reasoning model reaches for LaTeX and markdown unprompted -- a live
     # "split 175 between 4" came back as "\[ \frac{175}{4} \]", which TTS reads

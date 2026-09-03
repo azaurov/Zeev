@@ -155,6 +155,46 @@ def test_non_weather_search_query_is_unchanged(zeev, _gps, _tavily):
     assert _tavily["query"] == "what's the latest news on the election?"
 
 
+# --- home-address fact vs. live location -------------------------------
+#
+# Found live 2026-09-03: asked "do you know where you are?" with no live GPS
+# block present, Zeev answered from a stored "Alex lives in Fairview,
+# Massachusetts" fact as if it were his current physical location -- wrong
+# when he's actually elsewhere (e.g. traveling).
+
+def test_facts_block_warns_against_treating_home_as_current_location(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "USER_FACTS", ["Alex lives in Fairview, Massachusetts (near Boston)"])
+    p = zeev._build_system_prompt("hello")
+    assert "Fairview, Massachusetts" in p
+    assert "not necessarily where he is right now" in p
+
+
+# --- coarse GPS fix must not be spoken as precise fact ------------------
+#
+# Found live 2026-09-03: post-reboot cold cache fell back to IP geolocation
+# (~25km accuracy) and Zeev stated a specific-looking city and coordinates
+# with full confidence, for a device actually in a neighboring town -- well
+# within a 25km margin. gps_summary() itself still needs to expose the
+# coordinates (existing behavior, needed for legitimate precise fixes), but
+# the prompt must tell the model not to trust them when the fix is this coarse.
+
+def test_ip_fix_carries_a_hedge_instruction(zeev, _gps):
+    _fix(zeev, _gps, accuracy=25000, method="ip", city="Ashcroft", lat=42.51, lon=-71.55)
+    p = zeev._build_system_prompt("check the gps location")
+    assert "## Current location:" in p
+    assert "roughly 25km" in p
+    assert "Do not state the city or coordinates as precise fact" in p
+
+
+def test_precise_fix_carries_no_hedge_instruction(zeev, _gps):
+    # _geocoded=True skips _geocoded_location()'s live Nominatim call -- this
+    # test only cares about the hedge instruction, not reverse-geocoding.
+    _fix(zeev, _gps, _geocoded=True)  # accuracy=11, method="wifi+google"
+    p = zeev._build_system_prompt("check the gps location")
+    assert "## Current location:" in p
+    assert "roughly 25km" not in p
+
+
 def test_percent_to_dbm_conversion(zeev):
     """Measured: percent gave 869m accuracy, dBm gave 11m, same 7 APs."""
     assert zeev._nm_percent_to_dbm(74) == -63

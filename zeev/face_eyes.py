@@ -17,12 +17,14 @@ Per-state expression:
   listening  : both brows raised (attentive), flat mouth
   thinking   : one brow raised, pupils drift side to side, three bouncing
                dots for a mouth (a "..." typing indicator)
-  speaking   : neutral brows, mouth is a live waveform driven by eq_levels --
-               same real-data-or-synthetic-fallback contract face_aura's
-               spokes and face_scroll's equalizer already use: real per-band
-               levels when Python has live PCM this turn, a bounded
-               synthetic sine when it doesn't (the common Go-daemon-route
-               case)
+  speaking   : neutral brows, mouth is one oval that swells with loudness
+               and collapses back to a flat line between words. Same
+               real-data-or-synthetic-fallback contract face_aura's spokes
+               and face_scroll's equalizer use (real levels when Python has
+               live PCM this turn, synthetic when it doesn't -- the common
+               Go-daemon-route case), but collapsed to a single scalar:
+               see _mouth_openness for why per-band driving doesn't work
+               for a mouth.
   error      : eyes become X marks, brows angle into a frown/concerned V,
                flat mouth -- same unambiguous-error idiom face_scroll's
                eyes already used
@@ -48,13 +50,16 @@ from face_scroll import (
 )
 
 _EQ_BANDS = 8
-_MOUTH_SYNTH_PHASE = [0.31, 0.67, 0.12, 0.88, 0.45, 0.72, 0.20, 0.58]
-_mouth_smoothed = [0.0] * _EQ_BANDS  # decay-smoothed waveform points, "speaking" only
+_mouth_open = [0.0]   # smoothed 0-1 openness, "speaking" only (see _mouth_openness)
 
 _FACE_CY  = _HAT_TOP + 54   # vertical center of the eye row
 _EYE_DX   = 32              # horizontal offset of each eye from center
 _EYE_R    = 20               # eye outer radius
 _MOUTH_Y  = _FACE_CY + _EYE_R + 18
+# Half-height at full openness. Bounded so a wide-open mouth still clears the
+# eyes' outer glow above (~_FACE_CY + _EYE_R + 8) and the separator below.
+_MOUTH_MAX_OPEN = 14
+_MOUTH_HALF_W   = 30
 
 _N_PARTICLES = 6
 _particle_rng = random.Random(1729)
@@ -126,39 +131,47 @@ def _expr_for_state(state, t):
     return (0, 0, bob, bob)
 
 
-def _mouth_levels(t, eq_levels):
-    n = _EQ_BANDS
+def _mouth_openness(t, eq_levels):
+    """One scalar 0-1 for how far the mouth is open this frame.
+
+    Deliberately a single value rather than the 8 independent per-band
+    levels the spokes/equalizer use: a mouth has to move as one cohesive
+    shape, and driving each x-position separately reads as a scattered
+    squiggle rather than a mouth (that was the first version of this).
+    """
     if eq_levels:
-        raw = [max(0.0, min(1.0, eq_levels[i] if i < len(eq_levels) else 0.0))
-               for i in range(n)]
+        vals = [max(0.0, min(1.0, v)) for v in eq_levels[:_EQ_BANDS]]
+        # Mean, not max: one loud band shouldn't hold the mouth wide open
+        # through a pause. Speech energy sits low in these 8 log-spaced
+        # bands, so the mean runs low -- lift it before clamping.
+        raw = min(1.0, (sum(vals) / len(vals)) * 1.6) if vals else 0.0
     else:
-        raw = [0.18 + 0.30 * math.sin(t * 3.1 + _MOUTH_SYNTH_PHASE[i] * 2 * math.pi) ** 2
-               for i in range(n)]
-    for i in range(n):
-        _mouth_smoothed[i] = max(raw[i], _mouth_smoothed[i] * 0.55)
-    return _mouth_smoothed
+        # No live PCM this turn (the Go-daemon route hands none back) --
+        # synthesize a syllable rhythm. A plain sine never reaches zero, so
+        # it would never form the closing line; this shapes it to actually
+        # shut between "words".
+        raw = max(0.0, math.sin(t * 5.0)) ** 1.5
+        if (t % 2.6) > 2.1:
+            raw = 0.0
+    prev = _mouth_open[0]
+    # Fast attack, slower release -- snaps open on a syllable, eases shut at
+    # the end of a word instead of flickering between frames.
+    _mouth_open[0] = raw if raw > prev else prev * 0.55 + raw * 0.45
+    return _mouth_open[0]
 
 
 def _draw_mouth(draw, cx, y, state, t, eq_levels, col):
     if state == "speaking":
-        # Two mirrored lip lines riding the same traveling wave, pinched
-        # together when quiet and pushed apart when loud -- the gap between
-        # them is the actual "mouth opening", not just line wobble.
-        levels = _mouth_levels(t, eq_levels)
-        n = len(levels)
-        half_w = 32
-        seg = (half_w * 2) / (n - 1)
-        top_pts, bot_pts = [], []
-        for i, lvl in enumerate(levels):
-            x = cx - half_w + i * seg
-            wobble = (3 + lvl * 5) * math.sin(t * 6 + i * 0.9)
-            gap = 2 + lvl * 8
-            top_pts.append((x, y + wobble - gap))
-            bot_pts.append((x, y + wobble + gap))
-        draw.line(top_pts, fill=col, width=3, joint="curve")
-        draw.line(bot_pts, fill=col, width=3, joint="curve")
-        draw.line([top_pts[0], bot_pts[0]], fill=col, width=3)
-        draw.line([top_pts[-1], bot_pts[-1]], fill=col, width=3)
+        # One oval that swells with loudness and collapses back to a flat
+        # line between words -- narrower as it opens, so a wide-open mouth
+        # reads as round rather than as a stretched slot.
+        o = _mouth_openness(t, eq_levels)
+        h = o * _MOUTH_MAX_OPEN
+        w = _MOUTH_HALF_W * (1.0 - 0.25 * o)
+        if h < 2.0:
+            draw.line([cx - w, y, cx + w, y], fill=col, width=3)
+        else:
+            draw.ellipse([cx - w, y - h, cx + w, y + h], outline=col, width=3)
         return
     if state == "thinking":
         for i in range(3):

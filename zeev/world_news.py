@@ -59,6 +59,25 @@ what could be the same kind of event (two storms, two protests, two \
 elections) in different places, treat them as separate and do not merge \
 their details into one.
 
+The snippets below are grouped under "### <region/topic>" headers, one per \
+search query. A search result sometimes turns out to be about a completely \
+different region than the one it was found under (an unrelated wire story \
+that happened to rank for that query) -- when you use a detail, attribute \
+it to the story's OWN subject, never to the header it happened to appear \
+under. If a snippet under "### Balkans" is actually about the Middle East, \
+that is a Middle East story (or skip it), not a Balkans one -- and it must \
+never get folded into a story you are telling about some other region \
+(e.g. Latin America) just because you needed one more item for that \
+region.
+
+Two headlines or bullet points sitting next to each other in the same \
+snippet block are two separate, unrelated stories unless the text itself \
+connects them. Do not combine them into one story or imply one caused or \
+relates to the other -- e.g. a headline about a military-occupation \
+question and a separate headline about a gas-power surge are not one \
+story about an occupation "amid" gas demand unless the source actually \
+says so.
+
 Preserve the certainty of what a snippet actually says -- if it frames \
 something as a risk, a warning, or something that could happen, say that, \
 not that it has happened. Do not upgrade a hedge into a fact.

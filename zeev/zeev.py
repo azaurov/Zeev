@@ -9043,21 +9043,21 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         for m in session[-2:]
     )
 
-    _phone_cam_named = bool(resolve_phone_camera(user_text))
+    _relay_cam_named = bool(resolve_relay_camera(user_text))
 
     if (_CAM_NOUN_RE.search(user_text) or _WYZE_CAM_RE.search(user_text)
             or _CAMERA_RE.search(user_text) or _subj_named or _prior_asked_which_cam
-            or _phone_cam_named):
+            or _relay_cam_named):
         if WYZE_CAMERAS:
             cam_names = ", ".join(wyze_cam_label(c) for c in sorted(WYZE_CAMERAS)[:8])
             have = f"The only cameras that exist are: {cam_names}"
         else:
             have = "The only cameras that exist are"
-        _phone_labels = sorted(set(
-            k.replace("_", " ").title() for k in _PHONE_CAMERA_ALIASES.values()
+        _relay_labels = sorted(set(
+            k.replace("_", " ").title() for k in _RELAY_CAMERA_ALIASES.values()
         ))
-        have += (", " + ", ".join(_phone_labels) +
-                 " (these take about 30s to check, through the phone, not "
+        have += (", " + ", ".join(_relay_labels) +
+                 " (these take about 30s to check, through a relay, not "
                  "instant like the others).")
         parts.append(
             "\n\n## Cameras: you have NOT been given any camera image on this "
@@ -9842,7 +9842,7 @@ def _find_recent_camera_mention(history, max_back=20):
     with no cached frame (e.g. right after a service restart, which clears
     the in-memory _last_cam cache -- see run_web_server) can still figure
     out which camera to re-fetch instead of just declining. Returns
-    ``(camera_key, kind)`` where kind is "wyze" or "phone", or ``(None,
+    ``(camera_key, kind)`` where kind is "wyze" or "relay", or ``(None,
     None)`` if nothing in the recent window names one.
     """
     for msg in reversed(history[-max_back:]):
@@ -9854,9 +9854,9 @@ def _find_recent_camera_mention(history, max_back=20):
             if cam:
                 return cam, "wyze"
         if DOG_CALLER_KEY:
-            pc = resolve_phone_camera(text)
-            if pc:
-                return pc, "phone"
+            rc = resolve_relay_camera(text)
+            if rc:
+                return rc, "relay"
     return None, None
 
 
@@ -9872,15 +9872,13 @@ def _find_recent_camera_mention(history, max_back=20):
 # ~/troubleshooting/wyze-dog-caller's screenshot relay (DOG_CALLER_URL) --
 # the headless Android VM on bosgame (dogcaller-vm.service) that also plays
 # call_dog()'s "come inside" clip can also just look at the app's own live
-# view and take a real photo. (Retained variable/function names below say
-# "phone" for the physical C11 phone this rig used before 2026-09-09; the
-# host is a VM now, but the naming wasn't renamed along with it.)
+# view and take a real photo.
 #
 # "secret" alone is deliberately NOT a matched alias -- it's an ordinary
 # English word ("keep this a secret") unlike the room names above, so the
 # match requires "secret" alongside "cam"/"camera" to avoid a false
 # positive on unrelated speech.
-_PHONE_CAMERA_ALIASES = {
+_RELAY_CAMERA_ALIASES = {
     "living room": "living_room",
     "livingroom": "living_room",
     "backyard": "backyard",
@@ -9890,7 +9888,7 @@ _PHONE_CAMERA_ALIASES = {
     "secret cam": "secret",
     "secret camera": "secret",
     # HL_DB2 (Video Doorbell v2) -- no RTSP path either (see
-    # docs/wyze-cameras.md), same phone-relay route as the others.
+    # docs/wyze-cameras.md), same relay route as the others.
     # "doorbell" alone is unambiguous enough to leave bare (unlike
     # "secret", an ordinary word). "front door" is NOT bare-matched --
     # too common in unrelated speech ("lock the front door") -- so it
@@ -9902,16 +9900,16 @@ _PHONE_CAMERA_ALIASES = {
     "front door camera": "doorbell",
 }
 
-# PTZ-capable phone-relay cameras -- only these support pan/tilt commands.
+# PTZ-capable relay cameras -- only these support pan/tilt commands.
 # backyard/front_yard are static WVOD1 cameras, no D-pad in the Wyze app.
 # PAN_COORDS in the Kotlin companion app are currently calibrated for the
 # Living Room Cam (Pan v1) -- the secret cam (Solar Cam Pan) is a different
 # model whose D-pad may be at different screen coordinates. If pan commands
 # produce no movement on the secret cam, the Kotlin PAN_COORDS need
 # recalibrating from a screenshot of its live view.
-_PTZ_PHONE_CAMERAS = {"living_room", "secret"}
+_PTZ_RELAY_CAMERAS = {"living_room", "secret"}
 
-# Extracts a pan direction from natural speech alongside a phone-camera name.
+# Extracts a pan direction from natural speech alongside a relay-camera name.
 # Matches: "pan left", "look right", "turn it up", "move down", "point left",
 # "to the left", "leftward". Order matters: direction-bearing phrases are
 # checked first, then bare direction words adjacent to camera phrasing.
@@ -9955,28 +9953,28 @@ def extract_spotlight_intent(text: str) -> bool:
     return bool(_SPOTLIGHT_RE.search(text or ""))
 
 
-def resolve_phone_camera(text: str):
-    """The phone-relay camera key named in `text`, or None. Longest alias
+def resolve_relay_camera(text: str):
+    """The relay camera key named in `text`, or None. Longest alias
     first so 'front yard' doesn't get shadowed by a hypothetical shorter
     match -- mirrors resolve_wyze_cam()'s own longest-label-wins reasoning."""
     t = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
     t = re.sub(r"\s+", " ", t)
-    for alias in sorted(_PHONE_CAMERA_ALIASES, key=len, reverse=True):
+    for alias in sorted(_RELAY_CAMERA_ALIASES, key=len, reverse=True):
         if f" {alias} " in t:
-            return _PHONE_CAMERA_ALIASES[alias]
+            return _RELAY_CAMERA_ALIASES[alias]
     return None
 
 
-def _all_named_phone_cams(text: str):
-    """All phone-relay camera keys (see _PHONE_CAMERA_ALIASES) explicitly
-    named in `text` -- the multi-match counterpart to resolve_phone_camera(),
+def _all_named_relay_cams(text: str):
+    """All relay camera keys (see _RELAY_CAMERA_ALIASES) explicitly
+    named in `text` -- the multi-match counterpart to resolve_relay_camera(),
     same reasoning as _all_named_wyze_cams()."""
     t = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
     t = re.sub(r"\s+", " ", t)
     hits = []
-    for alias in sorted(_PHONE_CAMERA_ALIASES, key=len, reverse=True):
+    for alias in sorted(_RELAY_CAMERA_ALIASES, key=len, reverse=True):
         if f" {alias} " in t:
-            key = _PHONE_CAMERA_ALIASES[alias]
+            key = _RELAY_CAMERA_ALIASES[alias]
             if key not in hits:
                 hits.append(key)
     return hits
@@ -9985,7 +9983,7 @@ def _all_named_phone_cams(text: str):
 # Leo (unlike Smokey the cat, mostly confined indoors) roams the whole
 # house AND the yard -- ZEEV_SUBJECTS' "leo:dog" entry has no explicit cam
 # list, so it falls back to parse_subjects()'s RTSP-only default (the same
-# 2-camera default Smokey gets), which never includes the phone-relay yard
+# 2-camera default Smokey gets), which never includes the relay yard
 # cameras (Living Room/Backyard/Front Yard) unless the user also says "all
 # cameras" or names one directly. A plain "find Leo" should check
 # everywhere he could plausibly be without requiring that extra phrasing
@@ -9996,11 +9994,11 @@ _SUBJECT_ALWAYS_ALL_CAMS_RE = re.compile(r"^leo$", re.IGNORECASE)
 
 
 def resolve_subject_cams(text: str, subj: dict):
-    """(cams, phone_cams) to actually sweep for a subject-search request.
+    """(cams, relay_cams) to actually sweep for a subject-search request.
 
     Priority order:
-    1. Explicitly-named cameras win outright, RTSP or phone-relay
-       (_all_named_wyze_cams/_all_named_phone_cams).
+    1. Explicitly-named cameras win outright, RTSP or relay
+       (_all_named_wyze_cams/_all_named_relay_cams).
     2. "all/every/each/both cameras" phrasing (_ALL_CAMS_RE, the same regex
        this project's general multi-camera sweep already uses) means check
        every reachable camera in the house, not just this subject's usual
@@ -10014,12 +10012,12 @@ def resolve_subject_cams(text: str, subj: dict):
     3. Neither: the subject's own configured defaults (unchanged behavior).
     """
     named_cams = _all_named_wyze_cams(text)
-    named_phone_cams = _all_named_phone_cams(text)
-    if named_cams or named_phone_cams:
-        return named_cams[:_SUBJECT_MAX_CAMS], named_phone_cams
+    named_relay_cams = _all_named_relay_cams(text)
+    if named_cams or named_relay_cams:
+        return named_cams[:_SUBJECT_MAX_CAMS], named_relay_cams
     if _ALL_CAMS_RE.search(text or "") or _SUBJECT_ALWAYS_ALL_CAMS_RE.search(subj.get("name", "")):
         return (sweepable_cams()[:_SUBJECT_MAX_CAMS],
-                sorted(set(_PHONE_CAMERA_ALIASES.values())))
+                sorted(set(_RELAY_CAMERA_ALIASES.values())))
     return list(subj["cams"])[:_SUBJECT_MAX_CAMS], []
 
 
@@ -10057,10 +10055,10 @@ def call_dog_remote(camera="backyard"):
     return False, data.get("error") or "Calling Leo inside didn't work — check the yard speaker."
 
 
-def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
+def relay_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
                                   pan_taps: int = 1, spotlight: bool = None):
-    """Relay a photo request for a phone-relay-only camera (Living Room,
-    Backyard, Front Yard, Secret -- see _PHONE_CAMERA_ALIASES) to
+    """Relay a photo request for a relay-only camera (Living Room,
+    Backyard, Front Yard, Secret -- see _RELAY_CAMERA_ALIASES) to
     dog_caller_server.py's /snapshot route. Slower than the RTSP path
     (navigates the real Wyze app on the headless Android VM on bosgame,
     ~10-30s) and can fail fast with a "busy" message if a call_dog() or
@@ -10071,7 +10069,7 @@ def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
     If `pan_direction` is set ('left'/'right'/'up'/'down'), a pan step is
     sent alongside the snapshot request -- the dog_caller_server applies it
     before capturing, so the returned image reflects the new view angle.
-    Only meaningful for PTZ cameras (see _PTZ_PHONE_CAMERAS).
+    Only meaningful for PTZ cameras (see _PTZ_RELAY_CAMERAS).
 
     If `spotlight` is True, forces the spotlight on for capture. If None,
     the server auto-detects dark frames and shines the spotlight if too dark.
@@ -10079,7 +10077,7 @@ def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
     if not DOG_CALLER_KEY:
         return False, "That camera isn't set up yet.", None
     body = {"camera": camera_key}
-    if pan_direction and camera_key in _PTZ_PHONE_CAMERAS:
+    if pan_direction and camera_key in _PTZ_RELAY_CAMERAS:
         body["pan"] = [{"direction": pan_direction, "taps": pan_taps}]
     if spotlight is not None:
         body["spotlight"] = spotlight
@@ -10191,7 +10189,7 @@ def parse_subject_sighting(reply: str, kind: str = ""):
     return found, desc
 
 
-def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | None = None,
+def sweep_for_subject(subj: dict, cams: list | None = None, relay_cams: list | None = None,
                        on_progress=None, collect_frames: list | None = None):
     """Sweep `cams` (default: `subj["cams"]`, capped to `_SUBJECT_MAX_CAMS`) for
     the named subject in `subj` (a `resolve_subject()` result). Returns
@@ -10203,13 +10201,13 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     found live 2026-08-28: a plain-text "found" answer gave Alex no way to
     independently check whether it was a real sighting or a vision-model
     slip, and re-fetching a fresh frame after the fact is both slower (up to
-    another ~10-30s for a phone-relay camera) and no longer the actual frame
+    another ~10-30s for a relay camera) and no longer the actual frame
     that was judged.
 
-    `phone_cams` (optional): phone-relay-only camera keys (see
-    _PHONE_CAMERA_ALIASES) -- Living Room/Backyard/Front Yard have no RTSP
+    `relay_cams` (optional): relay-only camera keys (see
+    _RELAY_CAMERA_ALIASES) -- Living Room/Backyard/Front Yard have no RTSP
     path at all, so they can't go through the wyze_snapshot() grab loop
-    below; checked sequentially afterward via phone_camera_snapshot_remote()
+    below; checked sequentially afterward via relay_camera_snapshot_remote()
     instead. No next-frame-under-current-vision-call overlap for these the
     way the RTSP loop does: each grab there is already ~10-30s (navigating
     the Android VM's Wyze-app UI), so there's little to overlap against and the
@@ -10217,7 +10215,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     2026-08-28: a request naming these cameras explicitly ("find Leo in the
     living room, backyard, and front yard") was answered by silently
     ignoring them and sweeping the subject's *default* RTSP cams instead --
-    both this sequential phone-cam pass and the callers now parsing which
+    both this sequential relay-cam pass and the callers now parsing which
     cameras were actually named exist to fix that.
 
     Extracted from the inline device-mode handler so a second caller (the
@@ -10236,11 +10234,11 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     """
     name, kind = subj["name"], subj["kind"]
     cams = (cams if cams is not None else list(subj["cams"]))[:_SUBJECT_MAX_CAMS]
-    phone_cams = list(phone_cams or [])
-    if not cams and not phone_cams:
+    relay_cams = list(relay_cams or [])
+    if not cams and not relay_cams:
         return f"I don't have a camera set up to look for {name}.", 0
     print(f"[subject] looking for {name} on "
-          f"{', '.join(cams + phone_cams) or '(none)'}", flush=True)
+          f"{', '.join(cams + relay_cams) or '(none)'}", flush=True)
 
     def _grab(stream):
         box = []
@@ -10302,24 +10300,24 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
                     f"Not on the {label}. Checking the {nxt}." if seen is False
                     else f"Checking the {nxt}.")
     if not found:
-        for j, pcam in enumerate(phone_cams):
-            label = pcam.replace("_", " ")
+        for j, rcam in enumerate(relay_cams):
+            label = rcam.replace("_", " ")
             if on_progress:
                 on_progress(f"Checking the {label}.")
-            _ok, msg, img = phone_camera_snapshot_remote(pcam)
+            _ok, msg, img = relay_camera_snapshot_remote(rcam)
             if not img:
-                print(f"[subject] no frame from {pcam}: {msg}", flush=True)
+                print(f"[subject] no frame from {rcam}: {msg}", flush=True)
                 continue
             frames += 1
             if collect_frames is not None:
                 collect_frames.append((label, img))
             vreply, verr = vision_complete(img, subject_vision_prompt(kind, label))
             if not vreply:
-                print(f"[subject] vision failed on {pcam}: {verr}", flush=True)
+                print(f"[subject] vision failed on {rcam}: {verr}", flush=True)
                 vision_failures += 1
                 continue
             seen, desc = parse_subject_sighting(vreply, kind)
-            print(f"[subject] {pcam}: found={seen} {desc[:200]!r}", flush=True)
+            print(f"[subject] {rcam}: found={seen} {desc[:200]!r}", flush=True)
             if seen is True:
                 found = (label, desc)
                 found_img = img
@@ -10339,7 +10337,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
                  f"I can see: {desc}")
     elif not frames:
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in phone_cams])
+                                 + [p.replace("_", " ") for p in relay_cams])
         reply = (f"I couldn't get a picture from the {where} just "
                  "now — it may be asleep or offline.")
     elif vision_failures >= frames:
@@ -10354,13 +10352,13 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
         # Maria a plain "I didn't see smokey/leo" as if the cameras had been
         # checked.
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in phone_cams])
+                                 + [p.replace("_", " ") for p in relay_cams])
         reply = (f"I got a picture from the {where}, but couldn't analyze "
                  f"it just now — the vision service is unavailable, so I "
                  f"can't say whether {name} is there.")
     else:
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in phone_cams])
+                                 + [p.replace("_", " ") for p in relay_cams])
         # "I didn't see him", not "he isn't there": a small model missing a
         # dark cat on a dark couch is the wrong-city failure class again.
         reply = f"I didn't see {name} on the {where}."
@@ -12045,8 +12043,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                               "text": user_msg},
                         headers={"X-Zeev-Watch-Key": ZEEV_WATCH_KEY},
                         # "all/every cameras" phrasing (resolve_subject_cams())
-                        # can sweep up to 2 RTSP + 3 phone-relay cameras
-                        # sequentially on a miss -- phone-relay alone is
+                        # can sweep up to 2 RTSP + 3 relay cameras
+                        # sequentially on a miss -- relay alone is
                         # ~10-30s navigation + ~21-25s vision per camera, so a
                         # full 5-camera miss can run past 200s. 90s cut this
                         # off mid-sweep live 2026-08-28 ("I couldn't reach the
@@ -12181,27 +12179,28 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         session[:] = session[-60:]
                 return
 
-            # ── Phone-relay camera ("show me the backyard cam") ────────────
+            # ── Relay camera ("show me the backyard cam") ───────────────────
             # Living Room / Backyard / Front Yard have no RTSP path at all
-            # (see _PHONE_CAMERA_ALIASES) -- relayed through the physical
-            # phone at ~/troubleshooting/wyze-dog-caller instead of the Pi.
+            # (see _RELAY_CAMERA_ALIASES) -- relayed through the headless
+            # Android VM on bosgame at ~/troubleshooting/wyze-dog-caller
+            # instead of the Pi.
             # No photo-wording gate like the RTSP branch above: a photo is
             # the only thing this relay can ever produce for these three,
             # so naming one is enough on its own.
-            _phone_cam = resolve_phone_camera(user_msg)
-            if _phone_cam and DOG_CALLER_KEY:
-                _phone_cam_label = _phone_cam.replace("_", " ").title()
-                _pan_dir = extract_pan_direction(user_msg) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+            _relay_cam = resolve_relay_camera(user_msg)
+            if _relay_cam and DOG_CALLER_KEY:
+                _relay_cam_label = _relay_cam.replace("_", " ").title()
+                _pan_dir = extract_pan_direction(user_msg) if _relay_cam in _PTZ_RELAY_CAMERAS else None
                 _spotlight = extract_spotlight_intent(user_msg) or None
                 _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
                 _spot_msg = " with spotlight" if _spotlight else ""
-                sse({"info": f"[navigating to the {_phone_cam_label} cam{_pan_msg}{_spot_msg}, "
+                sse({"info": f"[navigating to the {_relay_cam_label} cam{_pan_msg}{_spot_msg}, "
                               "this can take up to 30s...]"})
-                _ok, reply, image = phone_camera_snapshot_remote(
-                    _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
+                _ok, reply, image = relay_camera_snapshot_remote(
+                    _relay_cam, pan_direction=_pan_dir, spotlight=_spotlight)
                 if image:
                     sse({"image": f"data:image/jpeg;base64,{image}"})
-                # Same gap as the RTSP branch above: naming a phone-relay
+                # Same gap as the RTSP branch above: naming a relay
                 # camera used to always short-circuit to a bare "Here's X."
                 # with zero vision -- even for "describe the scene of the
                 # Living Room cam" -- since this branch has no photo-wording
@@ -12211,7 +12210,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 # call), same tradeoff the RTSP branch makes.
                 vreply = None
                 if image and _SCENE_FOLLOWUP_RE.search(user_msg):
-                    sse({"info": f"[looking at {_phone_cam_label}...]"})
+                    sse({"info": f"[looking at {_relay_cam_label}...]"})
                     try:
                         vreply, verr = vision_complete(image, user_msg)
                     except requests.RequestException as e:
@@ -12224,7 +12223,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 with lock:
                     if image:
                         _last_cam["image"] = image
-                        _last_cam["label"] = _phone_cam_label
+                        _last_cam["label"] = _relay_cam_label
                         _last_cam["camera_turn"] = True
                     session.append({"role": "user", "content": user_msg})
                     append_message("user", user_msg)
@@ -12260,7 +12259,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # luck of the model's sampling. Auto-fetch a fresh frame instead
             # of requiring the user to notice the cache is cold and manually
             # re-request a photo first: prefer a camera named in THIS
-            # message (_cam_name/_phone_cam, already resolved above), else
+            # message (_cam_name/_relay_cam, already resolved above), else
             # fall back to the most recent camera named anywhere in the
             # last 20 messages of session history (which survives a restart,
             # unlike _last_cam -- it's reloaded from the DB via load_prior()).
@@ -12268,8 +12267,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 _fetch_cam, _fetch_kind = None, None
                 if _cam_name:
                     _fetch_cam, _fetch_kind = _cam_name, "wyze"
-                elif _phone_cam:
-                    _fetch_cam, _fetch_kind = _phone_cam, "phone"
+                elif _relay_cam:
+                    _fetch_cam, _fetch_kind = _relay_cam, "relay"
                 else:
                     with lock:
                         _hist = list(session)
@@ -12291,10 +12290,10 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         _cam_image = resp_data["image"]
                         _cam_label = wyze_cam_label(_fetch_cam)
                         sse({"image": f"data:image/jpeg;base64,{_cam_image}"})
-                elif _fetch_cam and _fetch_kind == "phone" and DOG_CALLER_KEY:
+                elif _fetch_cam and _fetch_kind == "relay" and DOG_CALLER_KEY:
                     _fetch_label = _fetch_cam.replace("_", " ").title()
                     sse({"info": f"[getting a fresh frame from {_fetch_label}...]"})
-                    _ok, _msg, _img = phone_camera_snapshot_remote(_fetch_cam)
+                    _ok, _msg, _img = relay_camera_snapshot_remote(_fetch_cam)
                     if _img:
                         _cam_image = _img
                         _cam_label = _fetch_label
@@ -13335,18 +13334,18 @@ def handle_transcript(ctx, transcript, _depth=0):
         # A named room narrows the sweep to that room rather than reordering
         # it -- and unlike resolve_wyze_cam()'s single-best-match,
         # resolve_subject_cams() honors all named cameras (RTSP and
-        # phone-relay) plus "all/every cameras" phrasing. Found live
+        # relay) plus "all/every cameras" phrasing. Found live
         # 2026-08-28: naming cameras explicitly and separately "find Leo on
         # all the cameras" were BOTH answered by silently sweeping the
         # subject's default RTSP cams instead -- two related gaps fixed by
         # the same shared resolver, used identically by web /chat's relay.
-        cams, phone_cams = resolve_subject_cams(transcript, _subj)
-        if not cams and not phone_cams:
+        cams, relay_cams = resolve_subject_cams(transcript, _subj)
+        if not cams and not relay_cams:
             finish_turn(ctx, f"I don't have a camera set up to look for {name}.")
             return
         ctx._set_face("thinking", f"{name}…")
         reply, frames, _found_img = sweep_for_subject(
-            _subj, cams=cams, phone_cams=phone_cams,
+            _subj, cams=cams, relay_cams=relay_cams,
             on_progress=lambda msg: ctx._speak_device(msg, _LAST_VOICE))
         # vision=True whenever at least one camera actually returned a frame
         # that got inspected -- a clean "not there" is still a point-in-time
@@ -13356,7 +13355,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         return
     # ─────────────────────────────────────────────────────────────────────
 
-    # ── Phone-relay camera ("show me the backyard cam") ────────────────────
+    # ── Relay camera ("show me the backyard cam") ────────────────────
     # Living Room / Backyard / Front Yard have no RTSP path at all -- relayed
     # through the headless Android VM on bosgame (~/troubleshooting/
     # wyze-dog-caller, dogcaller-vm.service) instead of a real camera
@@ -13364,23 +13363,23 @@ def handle_transcript(ctx, transcript, _depth=0):
     # on, so the image is described aloud via vision_complete() the same way
     # every other camera branch here speaks a real description rather than
     # just announcing "here's a photo."
-    _phone_cam = resolve_phone_camera(transcript)
-    if _phone_cam and DOG_CALLER_KEY:
-        _phone_cam_label = _phone_cam.replace("_", " ").title()
-        _pan_dir = extract_pan_direction(transcript) if _phone_cam in _PTZ_PHONE_CAMERAS else None
+    _relay_cam = resolve_relay_camera(transcript)
+    if _relay_cam and DOG_CALLER_KEY:
+        _relay_cam_label = _relay_cam.replace("_", " ").title()
+        _pan_dir = extract_pan_direction(transcript) if _relay_cam in _PTZ_RELAY_CAMERAS else None
         _spotlight = extract_spotlight_intent(transcript) or None
         _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
         _spot_msg = " with spotlight" if _spotlight else ""
-        ctx._set_face("thinking", f"{_phone_cam_label}…")
+        ctx._set_face("thinking", f"{_relay_cam_label}…")
         ctx._speak_device(
-            f"Checking the {_phone_cam_label} cam{_pan_msg}{_spot_msg}, this takes a bit.",
+            f"Checking the {_relay_cam_label} cam{_pan_msg}{_spot_msg}, this takes a bit.",
             _LAST_VOICE)
         note_capability("camera")
-        _ok, _msg, _image = phone_camera_snapshot_remote(
-            _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
+        _ok, _msg, _image = relay_camera_snapshot_remote(
+            _relay_cam, pan_direction=_pan_dir, spotlight=_spotlight)
         if _image:
-            desc, verr = vision_complete(_image, f"Describe what's visible on the {_phone_cam_label} camera.")
-            reply = desc if desc else f"I got a look at {_phone_cam_label} but couldn't describe it: {verr}"
+            desc, verr = vision_complete(_image, f"Describe what's visible on the {_relay_cam_label} camera.")
+            reply = desc if desc else f"I got a look at {_relay_cam_label} but couldn't describe it: {verr}"
             finish_turn(ctx, reply, vision=True)
         else:
             finish_turn(ctx, _msg)

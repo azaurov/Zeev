@@ -304,7 +304,7 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
 
     `text` (optional): the caller's original request text, passed straight
     to zeev.resolve_subject_cams() -- explicitly-named cameras (RTSP or
-    phone-relay) win outright, "all/every cameras" phrasing means sweep
+    relay) win outright, "all/every cameras" phrasing means sweep
     every reachable camera, and otherwise the subject's configured defaults
     are used, mirroring device mode's own handle_transcript logic. Found
     live 2026-08-28: without this, "find Leo in the living room and
@@ -324,9 +324,9 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     whether the user happened to also say "picture" -- `include_image` still
     controls the miss/inconclusive case, where a second fresh grab (prefers
     the first RTSP camera actually swept, falling back to the first
-    phone-relay camera swept if that's all that was named -- a fixed
+    relay camera swept if that's all that was named -- a fixed
     subj["cams"][0] would grab the wrong camera's image whenever a request
-    named phone-relay cameras only) is the best available evidence, a few
+    named relay cameras only) is the best available evidence, a few
     seconds of camera staleness being a fine trade for not re-plumbing
     sweep_for_subject's signature for every other caller (device mode, the
     old fixed find_smokey command) just for this one caller's needs.
@@ -335,16 +335,16 @@ def _cmd_find_subject(name, speak=True, include_image=False, text=""):
     subj = zeev.WYZE_SUBJECTS.get(key)
     if not subj:
         return False, f"{name!r} isn't configured as a subject (check ZEEV_SUBJECTS).", None
-    cams, named_phone_cams = zeev.resolve_subject_cams(text, subj)
-    reply, _frames, found_img = zeev.sweep_for_subject(subj, cams=cams, phone_cams=named_phone_cams)
+    cams, named_relay_cams = zeev.resolve_subject_cams(text, subj)
+    reply, _frames, found_img = zeev.sweep_for_subject(subj, cams=cams, relay_cams=named_relay_cams)
     if speak:
         _speak(reply)
     image = found_img
     if not image and include_image:
         if cams:
             image = zeev.wyze_snapshot(cams[0])
-        elif named_phone_cams:
-            _ok, _msg, image = zeev.phone_camera_snapshot_remote(named_phone_cams[0])
+        elif named_relay_cams:
+            _ok, _msg, image = zeev.relay_camera_snapshot_remote(named_relay_cams[0])
     return True, reply, image
 
 

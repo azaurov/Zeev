@@ -302,7 +302,7 @@ def test_capability_guard_absent_from_ordinary_turns(zeev, monkeypatch):
 def test_capability_guard_survives_no_cameras_configured(zeev, monkeypatch):
     """WYZE_CAMERAS empty is exactly when the model has least to go on.
 
-    The phone-relay cameras (Living Room/Backyard/Front Yard) always exist
+    The relay cameras (Living Room/Backyard/Front Yard) always exist
     regardless of WYZE_CAMERAS -- they're a separate, always-on relay, not
     conditioned on any RTSP config -- so the guard text always lists them
     even with zero real (RTSP) cameras configured.
@@ -466,11 +466,11 @@ def test_sweep_prompt_demands_brevity(zeev):
     assert "stage direction" in p
 
 
-# --- phone-relay cameras ---------------------------------------------------
+# --- relay cameras --------------------------------------------------------
 #
 # Living Room, Backyard, Front Yard, and Secret have no RTSP path at all --
-# they route through the phone's Wyze app live view via DOG_CALLER_URL.
-# resolve_phone_camera() matches aliases; "secret" alone must NOT match
+# they route through the headless Android VM on bosgame's Wyze app live view via DOG_CALLER_URL.
+# resolve_relay_camera() matches aliases; "secret" alone must NOT match
 # because it's an ordinary English word ("keep this a secret").
 
 @pytest.mark.parametrize("text,expected", [
@@ -484,8 +484,8 @@ def test_sweep_prompt_demands_brevity(zeev):
     ("show me the backyard",          "backyard"),
     ("look at the back yard cam",     "backyard"),
 ])
-def test_resolve_phone_camera(zeev, text, expected):
-    assert zeev.resolve_phone_camera(text) == expected
+def test_resolve_relay_camera(zeev, text, expected):
+    assert zeev.resolve_relay_camera(text) == expected
 
 
 @pytest.mark.parametrize("text", [
@@ -495,73 +495,73 @@ def test_resolve_phone_camera(zeev, text, expected):
     "tell me a secret",
     "it's no longer a secret",
 ])
-def test_bare_secret_does_not_match_phone_camera(zeev, text):
+def test_bare_secret_does_not_match_relay_camera(zeev, text):
     """'secret' is an ordinary English word -- matching it without 'cam'/'camera'
     would false-positive on unrelated speech."""
-    assert zeev.resolve_phone_camera(text) is None
+    assert zeev.resolve_relay_camera(text) is None
 
 
-def test_resolve_phone_camera_returns_none_for_no_match(zeev):
-    assert zeev.resolve_phone_camera("what is the weather") is None
-    assert zeev.resolve_phone_camera("check the basement cam") is None
-    assert zeev.resolve_phone_camera("") is None
-    assert zeev.resolve_phone_camera(None) is None
+def test_resolve_relay_camera_returns_none_for_no_match(zeev):
+    assert zeev.resolve_relay_camera("what is the weather") is None
+    assert zeev.resolve_relay_camera("check the basement cam") is None
+    assert zeev.resolve_relay_camera("") is None
+    assert zeev.resolve_relay_camera(None) is None
 
 
-def test_all_named_phone_cams_multi_match(zeev):
-    """Multiple phone cameras named in one utterance are all returned."""
-    hits = zeev._all_named_phone_cams("check the secret cam and front yard")
+def test_all_named_relay_cams_multi_match(zeev):
+    """Multiple relay cameras named in one utterance are all returned."""
+    hits = zeev._all_named_relay_cams("check the secret cam and front yard")
     assert "secret" in hits
     assert "front_yard" in hits
 
 
-def test_all_named_phone_cams_deduplicates(zeev):
+def test_all_named_relay_cams_deduplicates(zeev):
     """'living room' and 'livingroom' both map to the same key."""
-    hits = zeev._all_named_phone_cams("the living room livingroom camera")
+    hits = zeev._all_named_relay_cams("the living room livingroom camera")
     assert hits.count("living_room") == 1
 
 
-def test_all_named_phone_cams_empty(zeev):
-    assert zeev._all_named_phone_cams("what is the weather") == []
-    assert zeev._all_named_phone_cams("") == []
+def test_all_named_relay_cams_empty(zeev):
+    assert zeev._all_named_relay_cams("what is the weather") == []
+    assert zeev._all_named_relay_cams("") == []
 
 
-# --- subject search with phone cameras ------------------------------------
+# --- subject search with relay cameras ------------------------------------
 
-def test_subject_search_explicit_phone_cam(zeev):
-    """'find smokey on the secret cam' must route to the phone relay."""
+def test_subject_search_explicit_relay_cam(zeev):
+    """'find smokey on the secret cam' must route to the VM relay."""
     subj = {"name": "Smokey", "kind": "cat", "cams": ["smokeys-cam"]}
-    cams, phone_cams = zeev.resolve_subject_cams(
+    cams, relay_cams = zeev.resolve_subject_cams(
         "find smokey on the secret cam", subj)
-    assert phone_cams == ["secret"]
+    assert relay_cams == ["secret"]
     assert cams == []  # no RTSP cams were named
 
 
-def test_subject_search_all_cameras_includes_phone(zeev, monkeypatch):
-    """'find smokey on all the cameras' must include phone-relay cameras."""
+def test_subject_search_all_cameras_includes_relay(zeev, monkeypatch):
+    """'find smokey on all the cameras' must include relay cameras."""
     monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
     monkeypatch.setattr(zeev, "WYZE_CAMERA_URLS",
                         {"smokeys-cam": "rtsp://x", "bedroom-cam": "rtsp://y"})
     subj = {"name": "Smokey", "kind": "cat", "cams": ["smokeys-cam"]}
-    cams, phone_cams = zeev.resolve_subject_cams(
+    cams, relay_cams = zeev.resolve_subject_cams(
         "find smokey on all the cameras", subj)
-    assert "secret" in phone_cams
-    assert "backyard" in phone_cams
+    assert "secret" in relay_cams
+    assert "backyard" in relay_cams
     assert len(cams) > 0  # RTSP cams too
 
 
-def test_subject_search_defaults_no_phone_cams(zeev):
-    """Without explicit naming or 'all cameras', phone cams are NOT swept."""
+def test_subject_search_defaults_no_relay_cams(zeev):
+    """Without explicit naming or 'all cameras', relay cams are NOT swept."""
     subj = {"name": "Smokey", "kind": "cat", "cams": ["smokeys-cam"]}
-    cams, phone_cams = zeev.resolve_subject_cams("check on smokey", subj)
-    assert phone_cams == []
+    cams, relay_cams = zeev.resolve_subject_cams("check on smokey", subj)
+    assert relay_cams == []
     assert cams == ["smokeys-cam"]
 
 
-# --- capability guard includes phone-relay cameras -------------------------
+# --- capability guard includes relay cameras -------------------------
 
 def test_capability_guard_lists_secret_cam(zeev, monkeypatch):
-    """The confabulation guard must name Secret alongside the other phone-relay
+    """The confabulation guard must name Secret alongside the other relay
     cameras so the LLM won't claim the secret camera doesn't exist."""
     monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
     p = zeev._build_system_prompt("check the secret cam")
@@ -574,8 +574,8 @@ def test_capability_guard_lists_secret_cam(zeev, monkeypatch):
 
 # --- pan direction extraction ----------------------------------------------
 #
-# PTZ phone-relay cameras (secret, living_room) accept pan commands via the
-# dog-caller phone app's D-pad. extract_pan_direction() must pick up
+# PTZ relay cameras (secret, living_room) accept pan commands via the
+# dog-caller VM's Wyze-app D-pad. extract_pan_direction() must pick up
 # verb-anchored phrases first and fall back to bare direction words only
 # when no verb is present.
 
@@ -612,10 +612,10 @@ def test_extract_pan_direction_empty_and_none(zeev):
 
 def test_pan_only_for_ptz_cameras(zeev):
     """backyard/front_yard are static WVOD1 cameras -- no D-pad."""
-    assert "backyard" not in zeev._PTZ_PHONE_CAMERAS
-    assert "front_yard" not in zeev._PTZ_PHONE_CAMERAS
-    assert "secret" in zeev._PTZ_PHONE_CAMERAS
-    assert "living_room" in zeev._PTZ_PHONE_CAMERAS
+    assert "backyard" not in zeev._PTZ_RELAY_CAMERAS
+    assert "front_yard" not in zeev._PTZ_RELAY_CAMERAS
+    assert "secret" in zeev._PTZ_RELAY_CAMERAS
+    assert "living_room" in zeev._PTZ_RELAY_CAMERAS
 
 
 # --- spotlight / light control ---------------------------------------------
@@ -647,8 +647,8 @@ def test_extract_spotlight_intent_no_match(zeev, text):
     assert zeev.extract_spotlight_intent(text) is False
 
 
-def test_phone_camera_snapshot_remote_payload(zeev, monkeypatch):
-    """Verify phone_camera_snapshot_remote includes pan and spotlight in the POST payload."""
+def test_relay_camera_snapshot_remote_payload(zeev, monkeypatch):
+    """Verify relay_camera_snapshot_remote includes pan and spotlight in the POST payload."""
     monkeypatch.setattr(zeev, "DOG_CALLER_KEY", "test_key")
     monkeypatch.setattr(zeev, "DOG_CALLER_URL", "http://localhost:5051")
 
@@ -665,7 +665,7 @@ def test_phone_camera_snapshot_remote_payload(zeev, monkeypatch):
 
     monkeypatch.setattr(zeev.requests, "post", mock_post)
 
-    ok, msg, img = zeev.phone_camera_snapshot_remote("secret", pan_direction="left", pan_taps=2, spotlight=True)
+    ok, msg, img = zeev.relay_camera_snapshot_remote("secret", pan_direction="left", pan_taps=2, spotlight=True)
     assert ok is True
     assert img == "b64data"
     assert len(posted_json) == 1

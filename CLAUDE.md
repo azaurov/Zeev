@@ -204,7 +204,7 @@ A pet or person Zeev can be asked about **by name**, sweeping cameras until it f
 - **Camera list must not default to all of `WYZE_CAMERAS`** — six of eight never answer, so an unlisted default spends `WYZE_SNAP_TIMEOUT` on each before speaking.
 - **Next grab starts under the current vision call** (grab 4–8s vs vision ~21–25s), so a two-camera sweep is ~38s rather than ~58s. Wasted work on a hit is one background ffmpeg.
 - A miss is worded **"I didn't see Smokey on …"**, never "he isn't there" — a small model missing a dark cat on a dark couch is the wrong-city failure class. Zero frames reports the cameras as asleep/offline instead, which is a different answer.
-- Speaking *through* a camera is **not possible**: the RTSP firmware is outbound-only (no ONVIF backchannel; v3 isn't ONVIF), and docker-wyze-bridge closed audio-out as `wontfix`. A BT speaker in the room is the route if this is ever wanted.
+- Speaking *through* a camera is **not possible**: the RTSP firmware is outbound-only (no ONVIF backchannel; v3 isn't ONVIF), and docker-wyze-bridge closed audio-out as `wontfix`. **This is exactly why `call_dog_remote()` (see `zeev.py`) doesn't try** — as of 2026-09-08 it plays through a standalone Bluetooth speaker in the yard instead (`~/troubleshooting/wyze-dog-caller`'s `yard_speaker.py`, reached via `DOG_CALLER_URL/call`), not through any camera. Unrelated to the RTSP/subject-sweep cameras this section is about.
 - Pinned by `tests/test_wyze_subjects.py` (config, gate, verdict parsing) and the subject-sweep block in `tests/test_handle_transcript.py`.
 
 ### Reminders / timers (LLM tool calling)

@@ -87,11 +87,16 @@ ZEEV_WATCH_KEY     = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret 
 ZEEV_WATCH_URL     = os.environ.get("ZEEV_WATCH_URL",     "http://ragnarok.tail9c2c7c.ts.net:5050/watch")
 DOG_CALLER_KEY     = os.environ.get("DOG_CALLER_KEY",     "")   # shared secret for the ~/troubleshooting/wyze-dog-caller API
 # ~/troubleshooting/wyze-dog-caller/dog_caller_server.py, a separate project
-# on the web-chat box that drives the Wyze app on a physical phone (adb +
-# an accessibility service) to play a "come inside" clip through a camera
-# speaker. Not part of this repo -- reached over Tailscale the same way
-# ZEEV_WATCH_URL reaches ragnarok, just in the other direction (device mode
-# on the Pi calling out to this box instead of the reverse).
+# on the web-chat box. As of 2026-09-08, /call plays a "come inside" clip
+# through a standalone Bluetooth speaker in the yard (yard_speaker.py) --
+# NOT through a Wyze camera's own speaker anymore (the phone/adb/Wyze-app
+# route it used to use is still there but demoted to unused; see that
+# project's NOTES.md). /snapshot, /pan, /spotlight still drive the Wyze
+# app on a physical phone (adb + an accessibility service) for camera
+# viewing -- that part is unchanged. Not part of this repo -- reached over
+# Tailscale the same way ZEEV_WATCH_URL reaches ragnarok, just in the
+# other direction (device mode on the Pi calling out to this box instead
+# of the reverse).
 DOG_CALLER_URL     = os.environ.get("DOG_CALLER_URL",     "http://sogdiana-gematria-net.tail9c2c7c.ts.net:5051")
 OPENAI_TTS_VOICE   = os.environ.get("OPENAI_TTS_VOICE",   "alloy")
 OPENAI_STT_MODEL   = os.environ.get("OPENAI_STT_MODEL",   "whisper-1")
@@ -10021,10 +10026,13 @@ def _dog_call_camera(text: str) -> str:
 def call_dog_remote(camera="backyard"):
     """Relay a "call the dog inside" request to dog_caller_server.py on the
     web-chat box (~/troubleshooting/wyze-dog-caller, a separate project --
-    see DOG_CALLER_URL's comment). That project drives the real Wyze app on
-    a physical phone to play a clip through the named camera's speaker;
-    dog_caller.call_dog() itself takes ~15-40s, so a caller should speak/
-    stream a status line before calling this. Always returns a printable
+    see DOG_CALLER_URL's comment). As of 2026-09-08 that project plays the
+    clip through a standalone Bluetooth speaker in the yard, not through a
+    Wyze camera's speaker -- takes a couple seconds now, not 15-40s, but
+    the `camera` argument is still accepted (and still sent here) for
+    compatibility even though it's currently unused server-side; keeping
+    it costs nothing and means nothing has to change here again if a
+    camera-specific route is ever reintroduced. Always returns a printable
     (ok, message) pair, never raises.
     """
     if not DOG_CALLER_KEY:
@@ -10042,7 +10050,7 @@ def call_dog_remote(camera="backyard"):
         return False, "I couldn't reach the dog caller right now."
     if resp.status_code == 200 and data.get("ok"):
         return True, data.get("message", "Called Leo inside.")
-    return False, data.get("error") or "Calling Leo inside didn't work — check the phone."
+    return False, data.get("error") or "Calling Leo inside didn't work — check the yard speaker."
 
 
 def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,

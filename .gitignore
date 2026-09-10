@@ -30,6 +30,9 @@ __pycache__/
 # Personal call scripts
 zeev/quantum_convo.py
 
+# Raw joke-pool source corpus (same class as zeev/data/adult_jokes*.json)
+zeev/Erotic Jokes - Kinky Jokes.txt
+
 # Generated LCD preview images
 zeev/previews/
 

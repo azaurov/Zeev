@@ -99,7 +99,7 @@ def _call_bosgame(prompt):
                 "max_tokens": 500,
                 "temperature": 0.7,
             },
-            timeout=120,
+            timeout=300,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip(), None

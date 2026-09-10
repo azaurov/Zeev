@@ -89,12 +89,13 @@ DOG_CALLER_KEY     = os.environ.get("DOG_CALLER_KEY",     "")   # shared secret 
 # ~/troubleshooting/wyze-dog-caller/dog_caller_server.py, a separate project
 # on the web-chat box. As of 2026-09-08, /call plays a "come inside" clip
 # through a standalone Bluetooth speaker in the yard (yard_speaker.py) --
-# NOT through a Wyze camera's own speaker anymore (the phone/adb/Wyze-app
-# route it used to use is still there but demoted to unused; see that
-# project's NOTES.md). /snapshot, /pan, /spotlight still drive the Wyze
-# app on a physical phone (adb + an accessibility service) for camera
-# viewing -- that part is unchanged. Not part of this repo -- reached over
-# Tailscale the same way ZEEV_WATCH_URL reaches ragnarok, just in the
+# NOT through a Wyze camera's own speaker anymore (the old phone/adb/
+# Wyze-app route it used to use is retired). /snapshot, /pan, /spotlight
+# now drive the Wyze app on a headless Android VM on bosgame instead of
+# the physical C11 phone -- see dogcaller-vm.service on bosgame -- that
+# part changed too, just not the same date; the physical phone is fully
+# retired for this rig, not just demoted. Not part of this repo -- reached
+# over Tailscale the same way ZEEV_WATCH_URL reaches ragnarok, just in the
 # other direction (device mode on the Pi calling out to this box instead
 # of the reverse).
 DOG_CALLER_URL     = os.environ.get("DOG_CALLER_URL",     "http://sogdiana-gematria-net.tail9c2c7c.ts.net:5051")
@@ -9868,9 +9869,12 @@ def _find_recent_camera_mention(history, max_back=20):
 # expected to. Deliberately kept out of WYZE_CAMERAS/WYZE_SUBJECTS --
 # adding them there would make wyze_snapshot() try a real RTSP connection
 # that can only ever time out. Instead these route to
-# ~/troubleshooting/wyze-dog-caller's phone-screenshot relay (DOG_CALLER_URL)
-# -- the same physical phone that plays call_dog()'s "come inside" clip
-# can also just look at the app's own live view and take a real photo.
+# ~/troubleshooting/wyze-dog-caller's screenshot relay (DOG_CALLER_URL) --
+# the headless Android VM on bosgame (dogcaller-vm.service) that also plays
+# call_dog()'s "come inside" clip can also just look at the app's own live
+# view and take a real photo. (Retained variable/function names below say
+# "phone" for the physical C11 phone this rig used before 2026-09-09; the
+# host is a VM now, but the naming wasn't renamed along with it.)
 #
 # "secret" alone is deliberately NOT a matched alias -- it's an ordinary
 # English word ("keep this a secret") unlike the room names above, so the
@@ -10058,11 +10062,11 @@ def phone_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
     """Relay a photo request for a phone-relay-only camera (Living Room,
     Backyard, Front Yard, Secret -- see _PHONE_CAMERA_ALIASES) to
     dog_caller_server.py's /snapshot route. Slower than the RTSP path
-    (navigates the real Wyze app on a physical phone, ~10-30s) and can
-    fail fast with a "busy" message if a call_dog() or another snapshot is
-    already using the phone -- both are expected outcomes, not errors to
-    raise. Always returns a printable (ok, message, image_b64_or_None)
-    triple, never raises.
+    (navigates the real Wyze app on the headless Android VM on bosgame,
+    ~10-30s) and can fail fast with a "busy" message if a call_dog() or
+    another snapshot is already using it -- both are expected outcomes,
+    not errors to raise. Always returns a printable (ok, message,
+    image_b64_or_None) triple, never raises.
 
     If `pan_direction` is set ('left'/'right'/'up'/'down'), a pan step is
     sent alongside the snapshot request -- the dog_caller_server applies it
@@ -10207,8 +10211,8 @@ def sweep_for_subject(subj: dict, cams: list | None = None, phone_cams: list | N
     path at all, so they can't go through the wyze_snapshot() grab loop
     below; checked sequentially afterward via phone_camera_snapshot_remote()
     instead. No next-frame-under-current-vision-call overlap for these the
-    way the RTSP loop does: each grab there is already ~10-30s (navigating a
-    physical phone's UI), so there's little to overlap against and the
+    way the RTSP loop does: each grab there is already ~10-30s (navigating
+    the Android VM's Wyze-app UI), so there's little to overlap against and the
     caller has no `ctx` to keep speaking through regardless. Found live
     2026-08-28: a request naming these cameras explicitly ("find Leo in the
     living room, backyard, and front yard") was answered by silently
@@ -12191,7 +12195,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 _spotlight = extract_spotlight_intent(user_msg) or None
                 _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
                 _spot_msg = " with spotlight" if _spotlight else ""
-                sse({"info": f"[navigating to the {_phone_cam_label} cam on the phone{_pan_msg}{_spot_msg}, "
+                sse({"info": f"[navigating to the {_phone_cam_label} cam{_pan_msg}{_spot_msg}, "
                               "this can take up to 30s...]"})
                 _ok, reply, image = phone_camera_snapshot_remote(
                     _phone_cam, pan_direction=_pan_dir, spotlight=_spotlight)
@@ -13354,8 +13358,9 @@ def handle_transcript(ctx, transcript, _depth=0):
 
     # ── Phone-relay camera ("show me the backyard cam") ────────────────────
     # Living Room / Backyard / Front Yard have no RTSP path at all -- relayed
-    # through the physical phone (~/troubleshooting/wyze-dog-caller) instead
-    # of a real camera connection. Device mode has no screen to show a photo
+    # through the headless Android VM on bosgame (~/troubleshooting/
+    # wyze-dog-caller, dogcaller-vm.service) instead of a real camera
+    # connection. Device mode has no screen to show a photo
     # on, so the image is described aloud via vision_complete() the same way
     # every other camera branch here speaks a real description rather than
     # just announcing "here's a photo."
@@ -13368,7 +13373,7 @@ def handle_transcript(ctx, transcript, _depth=0):
         _spot_msg = " with spotlight" if _spotlight else ""
         ctx._set_face("thinking", f"{_phone_cam_label}…")
         ctx._speak_device(
-            f"Checking the {_phone_cam_label} cam through the phone{_pan_msg}{_spot_msg}, this takes a bit.",
+            f"Checking the {_phone_cam_label} cam{_pan_msg}{_spot_msg}, this takes a bit.",
             _LAST_VOICE)
         note_capability("camera")
         _ok, _msg, _image = phone_camera_snapshot_remote(

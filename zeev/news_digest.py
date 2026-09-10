@@ -39,6 +39,15 @@ TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 BOSGAME_URL    = os.environ.get("BOSGAME_URL", "")
 BOSGAME_KEY    = os.environ.get("BOSGAME_KEY", "")
+# feiergente01's Ollama, direct LAN, Iris Xe iGPU -- same box/config
+# weekly_reflection.py's _call_feiergente already uses, tried first here for
+# the same reason: it's faster than bosgame's CPU, which per this script's
+# own logs never actually won the race (bosgame timed out on 80/92 runs
+# before the 120s->300s timeout fix). Empty by default: opt-in via .env.
+FEIERGENTE_URL   = os.environ.get("FEIERGENTE_URL", "")
+FEIERGENTE_MODEL = os.environ.get("FEIERGENTE_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+_FEIERGENTE_LOCK = "/tmp/zeev-feiergente-busy.lock"
+_FEIERGENTE_LOCK_STALE_S = 30
 
 if not TAVILY_API_KEY:
     print("ERROR: TAVILY_API_KEY not set", file=sys.stderr)
@@ -84,6 +93,39 @@ def _tavily(query):
     return "\n\n".join(
         f"{r['title']}\n{r['url']}\n{r.get('content', '')}" for r in results
     )
+
+
+def _feiergente_busy():
+    """True if zeev-audio's speakPiper has a live TTS request in flight to
+    feiergente01 right now -- see zeev.py's _feiergente_busy docstring for
+    why this shares that box's iGPU-contention lock rather than racing it."""
+    try:
+        age = time.time() - os.path.getmtime(_FEIERGENTE_LOCK)
+        return 0 <= age < _FEIERGENTE_LOCK_STALE_S
+    except OSError:
+        return False
+
+
+def _call_feiergente(prompt):
+    if not FEIERGENTE_URL:
+        return None, "feiergente not configured"
+    if _feiergente_busy():
+        return None, "feiergente TTS busy"
+    try:
+        r = requests.post(
+            f"{FEIERGENTE_URL}/v1/chat/completions",
+            json={
+                "model": FEIERGENTE_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1500,
+                "temperature": 0.7,
+            },
+            timeout=180,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip(), None
+    except Exception as e:
+        return None, str(e)
 
 
 def _call_bosgame(prompt):
@@ -138,6 +180,11 @@ def _call_groq(prompt):
 
 
 def _llm(prompt):
+    content, err = _call_feiergente(prompt)
+    if content:
+        print("  [LLM: feiergente qwen2.5]")
+        return content, None
+    print(f"  [feiergente failed: {err}] — trying bosgame…")
     content, err = _call_bosgame(prompt)
     if content:
         print("  [LLM: bosgame]")

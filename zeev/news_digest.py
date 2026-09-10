@@ -14,8 +14,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -197,6 +199,41 @@ def show_latest():
 
 
 # ---------------------------------------------------------------------------
+# Push to the admin panel (bosgame)
+# ---------------------------------------------------------------------------
+
+# LAN first (this Pi and bosgame share a home subnet, per deploy.sh's own
+# ordering for the reverse direction), Tailscale second so a fresh digest
+# still reaches the admin panel's World News Digest page when this Pi is
+# off the home network. A dedicated key, forced-command-restricted on
+# bosgame's side to scripts/receive-news-digest.sh (see that script and its
+# authorized_keys entry, tagged ragnarok-news-digest-push) -- it can only
+# ever run that one script, never an arbitrary command.
+_ADMIN_PUSH_KEY = os.path.expanduser("~/.ssh/bosgame_push")
+_ADMIN_PUSH_HOSTS = ["azaurov@10.0.0.141", "azaurov@100.88.18.8"]
+
+
+def _push_to_admin(content, ts):
+    """Best-effort: a failed push must never break digest generation itself
+    (the local DB write is what zeev.py's "give me the shpeel" actually
+    reads), so every failure here is swallowed after a printed warning."""
+    payload = json.dumps({"content": content, "ts": ts})
+    for host in _ADMIN_PUSH_HOSTS:
+        try:
+            result = subprocess.run(
+                ["ssh", "-i", _ADMIN_PUSH_KEY, "-o", "BatchMode=yes",
+                 "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
+                 host],
+                input=payload, capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return
+        except Exception:
+            continue
+    print("WARNING: could not push digest to admin panel (bosgame unreachable via LAN or Tailscale)", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -207,9 +244,11 @@ def run():
     if err:
         print(f"ERROR: {err}")
         return False
+    ts = time.time()
     con = _open_db()
     _save(con, content, snippets)
     con.close()
+    _push_to_admin(content, ts)
     print(f"\n{'='*50}\nShpeel stored\n\n{content}\n")
     return True
 

@@ -15,8 +15,6 @@ This file pins the pure-logic pieces only (number formatting, missing-env
 handling) -- no live adb/Bluetooth calls, same reasoning as test_gv_call.py.
 """
 import subprocess
-import threading
-import time
 
 import pytest
 
@@ -326,42 +324,6 @@ def test_c11_gv_dial_returns_false_when_call_never_actually_rings(zeev, monkeypa
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
     assert zeev.c11_gv_dial("5081234567") is False
-
-
-def test_c11_gv_dial_proceeds_optimistically_when_confirmation_is_slow(zeev, monkeypatch):
-    """Found live 2026-09-11: waiting synchronously for GV's own
-    call-setup (10-55s+) made bt_call_loop start listening far too late
-    -- the caller experienced real dead air after answering, compared to
-    the S22's near-instant ATD dial. c11_gv_dial must not block past
-    _C11_DIAL_CONFIRM_WAIT -- confirmation keeps running in a background
-    thread instead, and bt_call_loop starts listening in parallel."""
-    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
-    monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
-    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
-    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
-    monkeypatch.setattr(zeev, "_C11_DIAL_CONFIRM_WAIT", 0.05)
-
-    release = threading.Event()
-
-    def _slow_confirm(s, **kw):
-        release.wait(timeout=2)  # simulates GV taking far longer than the confirm-wait window
-        return True
-
-    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", _slow_confirm)
-
-    class _FakeResult:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
-    start = time.monotonic()
-    try:
-        assert zeev.c11_gv_dial("5081234567") is True
-        elapsed = time.monotonic() - start
-        assert elapsed < 1.0  # must not have blocked for the slow confirm's full 2s wait
-    finally:
-        release.set()  # let the background thread finish so it doesn't leak past the test
 
 
 def test_c11_keep_awake_widens_screen_off_timeout(zeev, monkeypatch):

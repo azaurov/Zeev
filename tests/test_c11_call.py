@@ -138,6 +138,7 @@ def test_c11_gv_dial_wakes_and_unlocks_before_dialing(zeev, monkeypatch):
 
 
 def test_c11_wake_unlock_sends_wakeup_and_dismiss_keyguard(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_lock_pin", lambda: "")
     captured = []
 
     class _FakeResult:
@@ -153,6 +154,37 @@ def test_c11_wake_unlock_sends_wakeup_and_dismiss_keyguard(zeev, monkeypatch):
     zeev.c11_wake_unlock("1.2.3.4:5555")
     assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "keyevent", "KEYCODE_WAKEUP"] in captured
     assert ["adb", "-s", "1.2.3.4:5555", "shell", "wm", "dismiss-keyguard"] in captured
+
+
+def test_c11_wake_unlock_enters_pin_when_set(zeev, monkeypatch):
+    """Found live 2026-09-11: C11 has a real secured PIN lock, so
+    wm dismiss-keyguard alone cannot get past it -- the PIN must be
+    swiped-to + typed + confirmed."""
+    monkeypatch.setattr(zeev, "c11_lock_pin", lambda: "1441")
+    captured = []
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    zeev.c11_wake_unlock("1.2.3.4:5555")
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "swipe",
+            "540", "1800", "540", "1000"] in captured
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "text", "1441"] in captured
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "keyevent", "KEYCODE_ENTER"] in captured
+
+
+def test_c11_lock_pin_reads_from_env_only(zeev, monkeypatch):
+    monkeypatch.delenv("C11_LOCK_PIN", raising=False)
+    assert zeev.c11_lock_pin() == ""
+    monkeypatch.setenv("C11_LOCK_PIN", "1441")
+    assert zeev.c11_lock_pin() == "1441"
 
 
 def test_c11_wake_unlock_is_best_effort_on_exception(zeev, monkeypatch):

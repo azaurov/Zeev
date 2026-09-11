@@ -3929,24 +3929,49 @@ def c11_ensure_bt_connected(timeout: int = 15) -> bool:
     return False
 
 
+def c11_lock_pin() -> str:
+    """C11's lock-screen PIN, from .env only -- never hardcoded, never
+    logged. Correction found live 2026-09-11: C11 DOES have a real
+    secured PIN lock (1441) despite `locksettings get-disabled` reading
+    `false` at the time `c11_wake_unlock` was first written -- that
+    field does not mean what it was assumed to mean. `wm dismiss-keyguard`
+    alone cannot bypass a real PIN lock; the PIN must actually be entered.
+    """
+    return os.environ.get("C11_LOCK_PIN", "")
+
+
 def c11_wake_unlock(serial: str) -> None:
-    """Wake C11's screen and dismiss its keyguard before dialing.
+    """Wake C11's screen and enter its PIN to dismiss the keyguard, before
+    dialing.
 
     Found live 2026-09-11: C11 goes to sleep (`mWakefulness=Dozing`)
     between calls, same as any idle Android device. KEYCODE_ENDCALL
     (`c11_gv_hangup`) is a global key and works regardless of screen
     state, but the `am start` CALL intent in `c11_gv_dial` is not -- a
-    sleeping/locked screen is a real race for it, not yet a confirmed
-    live failure but worth closing before it becomes one. `wm
-    dismiss-keyguard` only works against C11's actual lock config (no
-    PIN/pattern set, confirmed via `locksettings get-disabled`) -- it
-    does not bypass a real secured lock screen, and isn't expected to if
-    C11 is ever given one. Best-effort: failures here are logged, not
-    fatal -- the dial attempt still proceeds either way.
+    sleeping/locked screen is a real race for it. First version of this
+    function tried `wm dismiss-keyguard` alone, on the assumption C11 had
+    no PIN/pattern set (`locksettings get-disabled` read `false`) -- wrong;
+    C11 has a real PIN lock and that command cannot bypass it. Real
+    sequence: wake, swipe up to reveal the PIN pad, type the PIN
+    (`C11_LOCK_PIN` in .env, never hardcoded), confirm with ENTER, then
+    `wm dismiss-keyguard` as a no-op/cleanup pass for any residual
+    non-secure keyguard state. Best-effort throughout: failures here are
+    logged, not fatal -- the dial attempt still proceeds either way,
+    since a locked screen was never a confirmed hard failure for the
+    CALL intent, only a suspected race.
     """
     try:
         subprocess.run(["adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
                         capture_output=True, text=True, timeout=10)
+        pin = c11_lock_pin()
+        if pin:
+            subprocess.run(["adb", "-s", serial, "shell", "input", "swipe",
+                             "540", "1800", "540", "1000"],
+                            capture_output=True, text=True, timeout=10)
+            subprocess.run(["adb", "-s", serial, "shell", "input", "text", pin],
+                            capture_output=True, text=True, timeout=10)
+            subprocess.run(["adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_ENTER"],
+                            capture_output=True, text=True, timeout=10)
         subprocess.run(["adb", "-s", serial, "shell", "wm", "dismiss-keyguard"],
                         capture_output=True, text=True, timeout=10)
     except Exception as e:

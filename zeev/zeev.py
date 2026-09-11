@@ -4023,6 +4023,35 @@ def _c11_ensure_gv_warm(serial: str, timeout: float = 8.0) -> bool:
     return False
 
 
+def _c11_keep_awake(serial: str, minutes: int = 10) -> None:
+    """Widen C11's screen-off timeout so it stays awake through an entire
+    call setup, not just the moment of dialing.
+
+    Found live 2026-09-11: Google Voice's own internal call-setup flow can
+    take 45-60+ seconds between receiving the CALL intent and actually
+    opening VoipCallActivity. If C11's screen times out and its process
+    loses "visible window" status during that wait, Android's own
+    Background Activity Launch protection blocks GV from opening the call
+    screen at all (confirmed in logcat: "Background activity launch
+    blocked ... callingUidHasAnyVisibleWindow: false ... VoipCallActivity
+    ... result code=102") -- the call silently never rings. C11's default
+    screen timeout is short enough to hit this reliably. Idempotent and
+    safe to call every time (Android settings `put` is a plain
+    overwrite); intentionally not restored afterward -- C11 is a
+    dedicated calling appliance, not a general-purpose phone, so a long
+    standing screen timeout has no real downside here. Best-effort:
+    failures are logged, not fatal.
+    """
+    try:
+        subprocess.run(
+            ["adb", "-s", serial, "shell", "settings", "put", "system",
+             "screen_off_timeout", str(minutes * 60 * 1000)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"[call] _c11_keep_awake failed (non-fatal): {e}", flush=True)
+
+
 def c11_gv_dial(number: str) -> bool:
     """Dial `number` via Google Voice on C11. C11 has no telephony/SIM at
     all, so bt_call_dial()'s ATD AT-command path (which asks the paired
@@ -4030,7 +4059,7 @@ def c11_gv_dial(number: str) -> bool:
     told to place the call itself, through its own Google Voice app, via
     an adb-driven Android intent.
 
-    Four gotchas found live, all handled here:
+    Five gotchas found live, all handled here:
     - The number must include the +1 country code -- a plain 10-digit
       string gets "Selected number is invalid" from GV (this was found on
       the in-app dial-pad path specifically; the ACTION_CALL intent form
@@ -4054,6 +4083,18 @@ def c11_gv_dial(number: str) -> bool:
       `_c11_ensure_gv_warm()`, below -- launches GV plainly first and
       waits for it to actually become the resumed app before firing the
       real CALL intent.
+    - **GV's own call-setup flow can take 45-60+ seconds internally**
+      (account/network readiness) between the CALL intent and actually
+      opening VoipCallActivity -- confirmed in logcat: `"Background
+      activity launch blocked ... callingUidHasAnyVisibleWindow: false
+      ... intent: ...VoipCallActivity ... result code=102"`, ~55s after
+      the CALL intent was sent, once C11's screen had timed out again and
+      GV's process lost its "visible window" status. Android's own
+      Background Activity Launch protection then refuses to let GV open
+      the call screen at all -- no ring, no error, nothing. `c11_gv_dial`
+      now widens C11's screen-off timeout (`_c11_keep_awake()`) before
+      dialing so the screen stays up through this entire setup window,
+      not just the moment of the CALL intent itself.
     """
     serial = c11_adb_serial()
     if not serial:
@@ -4062,6 +4103,7 @@ def c11_gv_dial(number: str) -> bool:
               "every C11 reboot, not fixable without rooting the device)",
               flush=True)
         return False
+    _c11_keep_awake(serial)
     c11_wake_unlock(serial)
     _c11_ensure_gv_warm(serial)
     digits = re.sub(r"[^\d]", "", number)

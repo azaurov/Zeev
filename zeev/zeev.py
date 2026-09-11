@@ -4095,6 +4095,29 @@ def c11_gv_dial(number: str) -> bool:
       now widens C11's screen-off timeout (`_c11_keep_awake()`) before
       dialing so the screen stays up through this entire setup window,
       not just the moment of the CALL intent itself.
+    - **Even with the screen awake, GV's own process can be frozen by
+      Android before it ever opens VoipCallActivity** (found live
+      2026-09-11, immediately after the screen-timeout fix above):
+      confirmed in logcat -- `AndroidCallIntentActivity -> HomeActivity`
+      with nothing holding a visible GV window, `updateVisibleState:
+      uid:10180 ... visible:false` ~10s later, then `"freezing 3604
+      com.google.android.apps.googlevoice"` (Android's cached-app
+      process freezer) ~40s after the CALL intent, and VoipCallActivity
+      never appeared at all -- a strictly worse failure than the BAL
+      block above, since the whole process was suspended, not just
+      denied one activity launch. Screen-awake alone doesn't prevent
+      this; what matters is whether GV's own activity stack stays the
+      visible foreground app, and nothing was holding it there after its
+      own internal AndroidCallIntentActivity -> HomeActivity bounce.
+      Fixed by `_c11_hold_gv_foreground_until_calling()`, below --
+      actively re-foregrounds GV (a plain launcher relaunch) whenever it
+      drops out of `topResumedActivity`, polling until VoipCallActivity
+      actually appears or a bounded timeout elapses. `c11_gv_dial` now
+      returns the *real* outcome of this wait, not just whether the CALL
+      intent command itself was accepted -- a dial that never actually
+      rings must not be reported as success, since `bt_call_loop` will
+      otherwise sit blocked on `bt_fast_detect` forever listening to a
+      call that was never really placed.
     """
     serial = c11_adb_serial()
     if not serial:
@@ -4129,10 +4152,68 @@ def c11_gv_dial(number: str) -> bool:
         print(f"[call] C11 adb dial command failed: {result.stdout} {result.stderr}",
               flush=True)
         return False
+    if not _c11_hold_gv_foreground_until_calling(serial):
+        print("[call] C11 never actually opened the call screen -- GV's "
+              "internal call-setup likely never finished (process may "
+              "have been frozen mid-setup). Aborting rather than entering "
+              "bt_call_loop against a call that was never really placed.",
+              flush=True)
+        return False
     return True
 
 
 _C11_VOIP_CALL_ACTIVITY = "com.google.android.apps.voice.voip.ui.VoipCallActivity"
+
+
+def _c11_hold_gv_foreground_until_calling(serial: str, timeout: float = 75.0) -> bool:
+    """After the CALL intent is fired, actively keep Google Voice in the
+    foreground until it actually opens VoipCallActivity (the real call
+    screen), or give up after `timeout` seconds.
+
+    Found live 2026-09-11: GV's own internal call-setup flow bounces
+    through `AndroidCallIntentActivity -> HomeActivity` with nothing
+    keeping either screen resumed afterward. Left alone, GV drops out of
+    the foreground within ~10s and Android's cached-app process freezer
+    can suspend the whole process (confirmed in logcat: "freezing <pid>
+    com.google.android.apps.googlevoice") before it ever gets to open the
+    call screen -- no ring, no error, nothing. Polls
+    `dumpsys activity activities` and re-launches GV's plain launcher
+    intent (not the CALL intent again -- that would restart the whole
+    flow) whenever it isn't the resumed app, roughly once every 3s so as
+    not to fight the app's own transitions.
+    """
+    import time as _t
+    deadline = _t.time() + timeout
+    last_relaunch = 0.0
+    while _t.time() < deadline:
+        try:
+            result = subprocess.run(
+                ["adb", "-s", serial, "shell", "dumpsys", "activity", "activities"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as e:
+            print(f"[call] _c11_hold_gv_foreground_until_calling: check failed: {e}", flush=True)
+            break
+        out = result.stdout or ""
+        if _C11_VOIP_CALL_ACTIVITY in out:
+            return True
+        top = ""
+        if "topResumedActivity=" in out:
+            top = out.split("topResumedActivity=", 1)[1].splitlines()[0]
+        if C11_GV_PKG not in top and _t.time() - last_relaunch > 3.0:
+            try:
+                subprocess.run(
+                    ["adb", "-s", serial, "shell", "monkey", "-p", C11_GV_PKG,
+                     "-c", "android.intent.category.LAUNCHER", "1"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                pass
+            last_relaunch = _t.time()
+        _t.sleep(1.0)
+    print("[call] _c11_hold_gv_foreground_until_calling: timed out, "
+          "VoipCallActivity never appeared", flush=True)
+    return False
 
 
 def _c11_send_endcall(serial: str) -> bool:

@@ -30,6 +30,7 @@ def test_c11_gv_dial_rejects_no_digits(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     assert zeev.c11_gv_dial("not a number") is False
 
 
@@ -40,6 +41,7 @@ def test_c11_gv_dial_formats_ten_digit_number_with_country_code(zeev, monkeypatc
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -61,6 +63,7 @@ def test_c11_gv_dial_leaves_a_leading_plus_number_untouched(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -82,6 +85,7 @@ def test_c11_gv_dial_targets_the_right_activity_and_serial(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -104,6 +108,7 @@ def test_c11_gv_dial_returns_false_on_adb_error(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
 
     class _FakeResult:
         returncode = 1
@@ -119,6 +124,7 @@ def test_c11_gv_dial_returns_false_on_exception(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
 
     def _raise(cmd, **kwargs):
         raise FileNotFoundError("adb not found")
@@ -152,6 +158,7 @@ def test_c11_gv_dial_wakes_and_unlocks_before_dialing(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: calls.append(("keep_awake", s)))
     monkeypatch.setattr(zeev, "c11_wake_unlock", _fake_wake_unlock)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: calls.append(("warm", s)) or True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     monkeypatch.setattr(subprocess, "run", _fake_run)
     assert zeev.c11_gv_dial("5081234567") is True
     assert calls[0] == ("keep_awake", "1.2.3.4:5555")
@@ -167,6 +174,7 @@ def test_c11_gv_dial_ensures_gv_warm_before_dialing(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     calls = []
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: calls.append(s) or True)
 
@@ -223,6 +231,101 @@ def test_c11_ensure_gv_warm_is_best_effort_on_launch_exception(zeev, monkeypatch
     assert zeev._c11_ensure_gv_warm("1.2.3.4:5555") is False  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# _c11_hold_gv_foreground_until_calling() -- found live 2026-09-11: even with
+# the screen kept awake, GV's own process was frozen by Android's cached-app
+# freezer before it ever opened VoipCallActivity, because nothing held GV in
+# the foreground after its own AndroidCallIntentActivity -> HomeActivity
+# bounce (confirmed in logcat: "freezing <pid> com.google...googlevoice",
+# and VoipCallActivity never appeared). Must actively re-foreground GV until
+# the real call screen shows, or give up after a bounded timeout.
+# ---------------------------------------------------------------------------
+
+def test_c11_hold_gv_foreground_returns_true_once_voip_call_activity_appears(zeev, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "topResumedActivity=... " + zeev._C11_VOIP_CALL_ACTIVITY + " ..."
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_hold_gv_foreground_until_calling("1.2.3.4:5555") is True
+
+
+def test_c11_hold_gv_foreground_relaunches_gv_when_it_drops_out_of_foreground(zeev, monkeypatch):
+    """The exact live failure: GV bounces to HomeActivity, then something
+    else (not GV) becomes topResumedActivity, and GV must be relaunched
+    rather than left to be frozen in the background."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    calls = []
+    state = {"n": 0}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        r = _FakeResult()
+        if "dumpsys" in cmd:
+            state["n"] += 1
+            if state["n"] < 3:
+                r.stdout = "topResumedActivity=... com.google.android.deskclock/android.service.dreams.DreamActivity ..."
+            else:
+                r.stdout = "topResumedActivity=... " + zeev._C11_VOIP_CALL_ACTIVITY + " ..."
+        return r
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert zeev._c11_hold_gv_foreground_until_calling("1.2.3.4:5555") is True
+    relaunches = [c for c in calls if "monkey" in c]
+    assert len(relaunches) >= 1
+    assert relaunches[0] == ["adb", "-s", "1.2.3.4:5555", "shell", "monkey", "-p", zeev.C11_GV_PKG,
+                              "-c", "android.intent.category.LAUNCHER", "1"]
+
+
+def test_c11_hold_gv_foreground_times_out_and_returns_false(zeev, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "topResumedActivity=... com.google.android.deskclock/android.service.dreams.DreamActivity ..."
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_hold_gv_foreground_until_calling("1.2.3.4:5555", timeout=0.01) is False
+
+
+def test_c11_hold_gv_foreground_is_best_effort_on_exception(zeev, monkeypatch):
+    def _raise(cmd, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert zeev._c11_hold_gv_foreground_until_calling("1.2.3.4:5555") is False  # must not raise
+
+
+def test_c11_gv_dial_returns_false_when_call_never_actually_rings(zeev, monkeypatch):
+    """The real live outcome this fix targets: the CALL intent command
+    itself succeeds (adb returncode 0), but GV never actually opens the
+    call screen -- c11_gv_dial must report this as a failure, not a
+    false success, since bt_call_loop would otherwise sit blocked
+    listening to a call that was never really placed."""
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: None)
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: False)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev.c11_gv_dial("5081234567") is False
+
+
 def test_c11_keep_awake_widens_screen_off_timeout(zeev, monkeypatch):
     """Found live 2026-09-11: GV's own call-setup flow can take 45-60+
     seconds internally, and if C11's screen times out mid-setup, Android's
@@ -258,6 +361,7 @@ def test_c11_gv_dial_calls_keep_awake_before_dialing(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
     monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
     monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
+    monkeypatch.setattr(zeev, "_c11_hold_gv_foreground_until_calling", lambda s, **kw: True)
     calls = []
     monkeypatch.setattr(zeev, "_c11_keep_awake", lambda s, **kw: calls.append(s))
 

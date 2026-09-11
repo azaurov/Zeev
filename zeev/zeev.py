@@ -3883,6 +3883,12 @@ def bt_call_dial(number: str) -> bool:
 C11_BT_MAC = os.environ.get("C11_BT_MAC", "87:EB:1E:CC:FD:BE")
 C11_GV_PKG = "com.google.android.apps.googlevoice"
 C11_GV_CALL_ACTIVITY = f"{C11_GV_PKG}/com.google.android.apps.voice.home.androidintents.AndroidCallIntentActivity"
+# How long c11_gv_dial() waits synchronously for GV's own call-screen
+# confirmation before letting it continue in a background thread instead --
+# covers the common fast case (confirmed live to usually land well under
+# this) while capping how much dead air a caller who answers quickly sits
+# through on GV's slower setup cases. See c11_gv_dial()'s docstring.
+_C11_DIAL_CONFIRM_WAIT = 12.0
 
 
 def c11_adb_serial() -> str:
@@ -4118,6 +4124,27 @@ def c11_gv_dial(number: str) -> bool:
       rings must not be reported as success, since `bt_call_loop` will
       otherwise sit blocked on `bt_fast_detect` forever listening to a
       call that was never really placed.
+    - **The above fix, done as a synchronous wait, traded the no-ring bug
+      for real dead-air**: GV's setup routinely takes 10-55s+, and
+      `bt_call_loop` didn't start listening until this whole wait
+      finished -- confirmed live: a caller who answered quickly could be
+      talking for a stretch before Zeev's turn-0 detection ever began
+      (found live 2026-09-11, immediately after a real multi-turn call
+      worked end-to-end but the user reported "there was a delay in the
+      dialog" compared to the S22's near-instant ATD dial). Fixed with a
+      short bounded wait (`_C11_DIAL_CONFIRM_WAIT`, 12s -- covers the
+      common fast case exactly like before) followed by letting
+      `_c11_hold_gv_foreground_until_calling` keep running in a
+      background daemon thread if it hasn't confirmed by then, so
+      `bt_call_loop` can start listening in parallel rather than staying
+      blocked through GV's slower cases -- mirrors how the SCO/S22
+      backend already listens while the phone is still ringing, before
+      pickup, rather than waiting for an external "call connected"
+      signal that doesn't exist for that path either. The abort-on-total-
+      failure safety net is preserved for the fast case (still returns
+      False if GV fails within the 12s window); a call that takes longer
+      than that to set up now proceeds optimistically, same tradeoff the
+      SCO backend already accepts implicitly.
     """
     serial = c11_adb_serial()
     if not serial:
@@ -4152,13 +4179,29 @@ def c11_gv_dial(number: str) -> bool:
         print(f"[call] C11 adb dial command failed: {result.stdout} {result.stderr}",
               flush=True)
         return False
-    if not _c11_hold_gv_foreground_until_calling(serial):
-        print("[call] C11 never actually opened the call screen -- GV's "
-              "internal call-setup likely never finished (process may "
-              "have been frozen mid-setup). Aborting rather than entering "
-              "bt_call_loop against a call that was never really placed.",
-              flush=True)
-        return False
+    outcome = {"done": False, "ok": False}
+
+    def _confirm():
+        outcome["ok"] = _c11_hold_gv_foreground_until_calling(serial)
+        outcome["done"] = True
+
+    confirm_thread = threading.Thread(target=_confirm, daemon=True)
+    confirm_thread.start()
+    confirm_thread.join(timeout=_C11_DIAL_CONFIRM_WAIT)
+    if outcome["done"]:
+        if not outcome["ok"]:
+            print("[call] C11 never actually opened the call screen -- GV's "
+                  "internal call-setup likely never finished (process may "
+                  "have been frozen mid-setup). Aborting rather than entering "
+                  "bt_call_loop against a call that was never really placed.",
+                  flush=True)
+            return False
+        return True
+    print(f"[call] GV call-screen confirmation still pending after "
+          f"{_C11_DIAL_CONFIRM_WAIT:.0f}s -- proceeding into bt_call_loop "
+          "anyway (confirmation continues in the background) so Zeev can "
+          "start listening without making the caller wait through GV's "
+          "slower setup cases", flush=True)
     return True
 
 

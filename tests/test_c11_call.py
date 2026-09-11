@@ -196,10 +196,21 @@ def test_c11_wake_unlock_is_best_effort_on_exception(zeev, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# c11_gv_hangup() / C11CallIO -- AT+CHUP is accepted by C11's Bluetooth stack
-# but does NOT actually end a Google Voice SelfManaged call (confirmed live:
-# sent AT+CHUP, got "OK", the call was still visibly active moments later).
-# C11CallIO overrides hangup() to use KEYCODE_ENDCALL instead.
+# c11_gv_hangup() / C11CallIO -- two real bugs found live 2026-09-11:
+#
+# 1. AT+CHUP is accepted by C11's Bluetooth stack but does NOT actually end
+#    a Google Voice SelfManaged call (confirmed live: sent AT+CHUP, got
+#    "OK", the call was still visibly active moments later). Fixed by
+#    switching to KEYCODE_ENDCALL.
+#
+# 2. On a genuinely longer live call, KEYCODE_ENDCALL itself was sent TWICE
+#    (both accepted by adbd, confirmed in logcat) and the call stayed live
+#    for minutes afterward (confirmed via screenshot, timer still
+#    counting) -- a direct UI tap on the actual hang-up button was the only
+#    thing that reliably worked. c11_gv_hangup() now verifies via
+#    _c11_call_activity_resumed() (VoipCallActivity -> CallSurveyActivity,
+#    a confirmed-reliable transition), retries the keyevent once, and
+#    falls back to a uiautomator-located tap if the call is still live.
 # ---------------------------------------------------------------------------
 
 def test_c11_gv_hangup_requires_adb_serial(zeev, monkeypatch):
@@ -207,31 +218,166 @@ def test_c11_gv_hangup_requires_adb_serial(zeev, monkeypatch):
     assert zeev.c11_gv_hangup() is False
 
 
-def test_c11_gv_hangup_sends_endcall_keyevent(zeev, monkeypatch):
+def test_c11_gv_hangup_succeeds_on_first_endcall(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    calls = []
+    monkeypatch.setattr(zeev, "_c11_send_endcall", lambda s: calls.append("send") or True)
+    monkeypatch.setattr(zeev, "_c11_call_activity_resumed", lambda s: calls.append("check") or False)
+    tap_calls = []
+    monkeypatch.setattr(zeev, "_c11_tap_hangup_button", lambda s: tap_calls.append(True) or True)
+    assert zeev.c11_gv_hangup() is True
+    assert calls == ["send", "check"]
+    assert tap_calls == []
+
+
+def test_c11_gv_hangup_retries_endcall_once_before_tap(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    send_calls = []
+    monkeypatch.setattr(zeev, "_c11_send_endcall", lambda s: send_calls.append(1) or True)
+    resumed_results = iter([True, False])  # still active, then ended after retry
+    monkeypatch.setattr(zeev, "_c11_call_activity_resumed", lambda s: next(resumed_results))
+    tap_calls = []
+    monkeypatch.setattr(zeev, "_c11_tap_hangup_button", lambda s: tap_calls.append(True) or True)
+    assert zeev.c11_gv_hangup() is True
+    assert len(send_calls) == 2
+    assert tap_calls == []
+
+
+def test_c11_gv_hangup_falls_back_to_ui_tap(zeev, monkeypatch):
+    """The real live scenario: two KEYCODE_ENDCALL attempts both failed to
+    end the call, so the tap fallback must fire and, if it works, the
+    overall result must be True."""
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_send_endcall", lambda s: True)
+    resumed_results = iter([True, True, False])  # still active x2, ended after tap
+    monkeypatch.setattr(zeev, "_c11_call_activity_resumed", lambda s: next(resumed_results))
+    tap_calls = []
+    monkeypatch.setattr(zeev, "_c11_tap_hangup_button", lambda s: tap_calls.append(True) or True)
+    assert zeev.c11_gv_hangup() is True
+    assert tap_calls == [True]
+
+
+def test_c11_gv_hangup_gives_up_and_returns_false_if_nothing_works(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_send_endcall", lambda s: True)
+    monkeypatch.setattr(zeev, "_c11_call_activity_resumed", lambda s: True)  # never ends
+    monkeypatch.setattr(zeev, "_c11_tap_hangup_button", lambda s: True)
+    assert zeev.c11_gv_hangup() is False
+
+
+def test_c11_send_endcall_sends_the_right_keyevent(zeev, monkeypatch):
     captured = {}
 
     class _FakeResult:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def _fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         return _FakeResult()
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    assert zeev.c11_gv_hangup() is True
+    assert zeev._c11_send_endcall("1.2.3.4:5555") is True
     assert captured["cmd"] == ["adb", "-s", "1.2.3.4:5555", "shell",
                                 "input", "keyevent", "KEYCODE_ENDCALL"]
 
 
-def test_c11_gv_hangup_returns_false_on_exception(zeev, monkeypatch):
-    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
-
+def test_c11_send_endcall_returns_false_on_exception(zeev, monkeypatch):
     def _raise(cmd, **kwargs):
         raise FileNotFoundError("adb not found")
 
     monkeypatch.setattr(subprocess, "run", _raise)
-    assert zeev.c11_gv_hangup() is False
+    assert zeev._c11_send_endcall("1.2.3.4:5555") is False
+
+
+def test_c11_call_activity_resumed_true_when_voip_activity_is_resumed(zeev, monkeypatch):
+    class _FakeResult:
+        returncode = 0
+        stdout = "topResumedActivity=... com.google.android.apps.googlevoice/com.google.android.apps.voice.voip.ui.VoipCallActivity ..."
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_call_activity_resumed("1.2.3.4:5555") is True
+
+
+def test_c11_call_activity_resumed_false_once_call_survey_activity_shows(zeev, monkeypatch):
+    """Found live: the moment a call really ends, C11 transitions from
+    VoipCallActivity to CallSurveyActivity (the post-call rating screen)
+    -- confirmed to be a reliable end-of-call signal, unlike mCalls."""
+    class _FakeResult:
+        returncode = 0
+        stdout = "topResumedActivity=... com.google.android.apps.googlevoice/com.google.android.apps.voice.voip.ui.callsurvey.CallSurveyActivity ..."
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_call_activity_resumed("1.2.3.4:5555") is False
+
+
+def test_c11_call_activity_resumed_fails_toward_true_on_exception(zeev, monkeypatch):
+    """A spurious extra hangup attempt is harmless; a missed one leaves a
+    live mic open -- so an adb error must be treated as 'still active,
+    keep trying', not 'must be fine.'"""
+    def _raise(cmd, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert zeev._c11_call_activity_resumed("1.2.3.4:5555") is True
+
+
+_FAKE_UI_DUMP = (
+    '<hierarchy rotation="1">'
+    '<node index="0" text="" resource-id="" class="android.widget.FrameLayout" '
+    'content-desc="" clickable="false" bounds="[0,0][1280,800]">'
+    '<node index="1" text="" resource-id="" class="android.widget.ImageButton" '
+    'content-desc="Hang up call" clickable="true" bounds="[600,670][680,750]"/>'
+    '</node>'
+    '</hierarchy>'
+)
+
+
+def test_c11_find_tap_target_locates_hangup_button(zeev):
+    assert zeev._c11_find_tap_target(_FAKE_UI_DUMP) == (640, 710)
+
+
+def test_c11_find_tap_target_ignores_non_clickable_matches(zeev):
+    xml = _FAKE_UI_DUMP.replace('clickable="true"', 'clickable="false"')
+    assert zeev._c11_find_tap_target(xml) is None
+
+
+def test_c11_find_tap_target_returns_none_when_absent(zeev):
+    assert zeev._c11_find_tap_target("<hierarchy></hierarchy>") is None
+
+
+def test_c11_tap_hangup_button_taps_the_located_target(zeev, monkeypatch):
+    calls = []
+
+    class _FakeResult:
+        returncode = 0
+        stdout = _FAKE_UI_DUMP
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert zeev._c11_tap_hangup_button("1.2.3.4:5555") is True
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "tap", "640", "710"] in calls
+
+
+def test_c11_tap_hangup_button_returns_false_when_no_button_found(zeev, monkeypatch):
+    class _FakeResult:
+        returncode = 0
+        stdout = "<hierarchy></hierarchy>"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_tap_hangup_button("1.2.3.4:5555") is False
 
 
 def test_c11_call_io_overrides_hangup_only(zeev):

@@ -4032,35 +4032,152 @@ def c11_gv_dial(number: str) -> bool:
     return True
 
 
-def c11_gv_hangup() -> bool:
-    """Hang up C11's active call via the global KEYCODE_ENDCALL keyevent.
+_C11_VOIP_CALL_ACTIVITY = "com.google.android.apps.voice.voip.ui.VoipCallActivity"
 
-    Found live 2026-09-11, the hard way: `bt_call_hangup()` (AT+CHUP over
-    the HFP RFCOMM channel) is accepted by C11's Bluetooth stack and
-    reports "OK" -- but does NOT actually end a Google Voice SelfManaged
-    VoIP call. Confirmed directly: sent AT+CHUP, got "OK" back, then
-    screenshotted C11 and the call was still live, timer still counting
-    up. This is a real Android platform gap (AT-command call control
-    apparently doesn't reliably bridge to third-party SelfManaged calls),
-    not a bug in how the AT command was sent -- same reasoning `bt_call_at`
-    already uses correctly. KEYCODE_ENDCALL is the same global "end call"
-    signal Android's own Telecom framework listens for regardless of which
-    app owns the call, and was confirmed live to actually end it (screen
-    showed "Ending…" then "Call ended").
-    """
-    serial = c11_adb_serial()
-    if not serial:
-        print("[call] c11_gv_hangup: C11_ADB_SERIAL not set", flush=True)
-        return False
+
+def _c11_send_endcall(serial: str) -> bool:
     try:
         result = subprocess.run(
             ["adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_ENDCALL"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception as e:
-        print(f"[call] c11_gv_hangup failed: {e}", flush=True)
+        print(f"[call] c11_gv_hangup: KEYCODE_ENDCALL adb call failed: {e}", flush=True)
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        print(f"[call] c11_gv_hangup: KEYCODE_ENDCALL exited {result.returncode}: "
+              f"{result.stdout.strip()} {result.stderr.strip()}", flush=True)
+        return False
+    return True
+
+
+def _c11_call_activity_resumed(serial: str) -> bool:
+    """True if C11's Google Voice VoIP call screen (VoipCallActivity) is
+    still the resumed activity -- found live 2026-09-11 to be a reliable
+    liveness signal: confirmed transitioning to CallSurveyActivity (the
+    post-call rating screen) the moment a real call actually ends, unlike
+    `mCalls`/`bt_call_active()`, which read empty through two separate
+    genuinely-active C11 calls (see C11CallIO's docstring). Fails toward
+    True (assume still active) on any adb error -- a spurious extra
+    hangup attempt is harmless, a missed one leaves a live mic open.
+    """
+    try:
+        result = subprocess.run(
+            ["adb", "-s", serial, "shell", "dumpsys", "activity", "activities"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"[call] _c11_call_activity_resumed check failed: {e}", flush=True)
+        return True
+    return _C11_VOIP_CALL_ACTIVITY in (result.stdout or "")
+
+
+def _c11_find_tap_target(xml_text: str, needle: str = "hang up") -> tuple[int, int] | None:
+    """Find the center point of the first clickable node in a uiautomator
+    UI-dump XML whose content-desc or text contains `needle`
+    (case-insensitive). Pure string parsing, no adb -- unit-testable
+    against a fixture string.
+    """
+    for m in re.finditer(r"<node\b[^>]*/?>", xml_text):
+        node = m.group(0)
+        if needle.lower() not in node.lower():
+            continue
+        if 'clickable="true"' not in node:
+            continue
+        bm = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+        if not bm:
+            continue
+        x1, y1, x2, y2 = map(int, bm.groups())
+        return ((x1 + x2) // 2, (y1 + y2) // 2)
+    return None
+
+
+def _c11_tap_hangup_button(serial: str) -> bool:
+    """Last-resort hangup: dump the live UI tree via uiautomator, find the
+    actual on-screen hang-up button, and tap its center -- exactly what
+    was confirmed live to work (2026-09-11) when KEYCODE_ENDCALL twice
+    failed to end a real, genuinely-live call (screenshot showed the call
+    still counting up at 0:59 after two KEYCODE_ENDCALL keyevents, both
+    accepted by adbd; a direct tap on the visible red hang-up button
+    ended it immediately, confirmed via a follow-up screenshot).
+    """
+    try:
+        subprocess.run(["adb", "-s", serial, "shell", "uiautomator", "dump", "/sdcard/zeev_ui.xml"],
+                        capture_output=True, text=True, timeout=15)
+        dump = subprocess.run(["adb", "-s", serial, "shell", "cat", "/sdcard/zeev_ui.xml"],
+                               capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        print(f"[call] _c11_tap_hangup_button: uiautomator dump failed: {e}", flush=True)
+        return False
+    target = _c11_find_tap_target(dump.stdout or "")
+    if target is None:
+        print("[call] _c11_tap_hangup_button: no hang-up button found in UI dump", flush=True)
+        return False
+    x, y = target
+    try:
+        subprocess.run(["adb", "-s", serial, "shell", "input", "tap", str(x), str(y)],
+                        capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        print(f"[call] _c11_tap_hangup_button: tap failed: {e}", flush=True)
+        return False
+    print(f"[call] _c11_tap_hangup_button: tapped hang-up button at ({x}, {y})", flush=True)
+    return True
+
+
+def c11_gv_hangup() -> bool:
+    """Hang up C11's active call.
+
+    Found live 2026-09-11, the hard way, in two stages:
+
+    1. `bt_call_hangup()` (AT+CHUP over the HFP RFCOMM channel) is
+       accepted by C11's Bluetooth stack and reports "OK" -- but does NOT
+       actually end a Google Voice SelfManaged VoIP call. Confirmed
+       directly: sent AT+CHUP, got "OK" back, then screenshotted C11 and
+       the call was still live, timer still counting up. A real Android
+       platform gap (AT-command call control apparently doesn't reliably
+       bridge to third-party SelfManaged calls), not a bug in how the AT
+       command was sent. Fixed by switching to KEYCODE_ENDCALL, Android's
+       own global "end call" signal -- confirmed live to actually end a
+       (short) call at the time.
+
+    2. On a genuinely longer live call (a real ~1 min conversation, not
+       the voicemail-detection path the first fix was verified against),
+       KEYCODE_ENDCALL was sent TWICE (both accepted by adbd, confirmed
+       in logcat) and the call remained live for minutes afterward --
+       confirmed via screenshot, timer still counting. So even
+       KEYCODE_ENDCALL is not unconditionally reliable against this
+       Google Voice VoIP call type; root cause not pinned down further
+       (not a lock-screen issue -- C11 was unlocked/awake at the time,
+       per `c11_wake_unlock`'s own dial-time wake). What IS confirmed
+       reliable: a direct tap on the actual on-screen hang-up button
+       always worked when tried. This function now sends KEYCODE_ENDCALL,
+       verifies via `_c11_call_activity_resumed()` (VoipCallActivity ->
+       CallSurveyActivity is a real, confirmed-reliable transition,
+       unlike `mCalls`/`bt_call_active()`), retries the keyevent once,
+       and falls back to `_c11_tap_hangup_button()` (uiautomator-located
+       tap) if the call is still live after that.
+    """
+    import time as _t
+    serial = c11_adb_serial()
+    if not serial:
+        print("[call] c11_gv_hangup: C11_ADB_SERIAL not set", flush=True)
+        return False
+    _c11_send_endcall(serial)
+    _t.sleep(1.5)
+    if not _c11_call_activity_resumed(serial):
+        return True
+    print("[call] c11_gv_hangup: call still active after KEYCODE_ENDCALL, retrying", flush=True)
+    _c11_send_endcall(serial)
+    _t.sleep(1.5)
+    if not _c11_call_activity_resumed(serial):
+        return True
+    print("[call] c11_gv_hangup: still active after retry, falling back to UI tap", flush=True)
+    if _c11_tap_hangup_button(serial):
+        _t.sleep(1.0)
+        if not _c11_call_activity_resumed(serial):
+            return True
+        print("[call] c11_gv_hangup: still active after UI tap -- giving up, call may be orphaned", flush=True)
+    return False
 
 
 def bt_call_answer() -> bool:
@@ -4389,7 +4506,9 @@ class C11CallIO(SCOCallIO):
     """
 
     def hangup(self) -> None:
-        c11_gv_hangup()
+        if not c11_gv_hangup():
+            print("[call] C11CallIO.hangup(): all hangup attempts failed -- "
+                  "call may still be live, check C11 directly", flush=True)
 
 
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,

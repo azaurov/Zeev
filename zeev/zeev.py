@@ -3901,8 +3901,19 @@ def c11_ensure_bt_connected(timeout: int = 15) -> bool:
     phone happens to already be connected -- this targets C11's known MAC
     directly, then confirms via bt_hfp_detect() that it's really C11 (not
     some other paired phone, e.g. the S22, that happened to already be
-    connected) that answers."""
+    connected) that answers.
+
+    Checks bt_hfp_detect() FIRST, before touching bluetoothctl at all --
+    found live: `bluetoothctl connect <mac>` on an already-connected
+    device doesn't error quickly, it just hangs for the full subprocess
+    timeout (confirmed: burned the whole 15s budget this way while C11 was
+    already fine per bluealsa-aplay -l the entire time), needlessly
+    delaying every call by that long for the overwhelmingly common case
+    (C11 was already connected from a previous call).
+    """
     import time as _t
+    if bt_hfp_detect().upper() == C11_BT_MAC.upper():
+        return True
     try:
         subprocess.run(
             ["bluetoothctl", "connect", C11_BT_MAC],
@@ -3967,6 +3978,37 @@ def c11_gv_dial(number: str) -> bool:
               flush=True)
         return False
     return True
+
+
+def c11_gv_hangup() -> bool:
+    """Hang up C11's active call via the global KEYCODE_ENDCALL keyevent.
+
+    Found live 2026-09-11, the hard way: `bt_call_hangup()` (AT+CHUP over
+    the HFP RFCOMM channel) is accepted by C11's Bluetooth stack and
+    reports "OK" -- but does NOT actually end a Google Voice SelfManaged
+    VoIP call. Confirmed directly: sent AT+CHUP, got "OK" back, then
+    screenshotted C11 and the call was still live, timer still counting
+    up. This is a real Android platform gap (AT-command call control
+    apparently doesn't reliably bridge to third-party SelfManaged calls),
+    not a bug in how the AT command was sent -- same reasoning `bt_call_at`
+    already uses correctly. KEYCODE_ENDCALL is the same global "end call"
+    signal Android's own Telecom framework listens for regardless of which
+    app owns the call, and was confirmed live to actually end it (screen
+    showed "Ending…" then "Call ended").
+    """
+    serial = c11_adb_serial()
+    if not serial:
+        print("[call] c11_gv_hangup: C11_ADB_SERIAL not set", flush=True)
+        return False
+    try:
+        result = subprocess.run(
+            ["adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_ENDCALL"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"[call] c11_gv_hangup failed: {e}", flush=True)
+        return False
+    return result.returncode == 0
 
 
 def bt_call_answer() -> bool:
@@ -4274,6 +4316,28 @@ class SCOCallIO:
 
     def play_wav(self, path: str) -> bool:
         return play_wav_sco(path, self.sco_dev, self.samplerate)
+
+
+class C11CallIO(SCOCallIO):
+    """SCOCallIO with one override: hangup() uses c11_gv_hangup() (a
+    KEYCODE_ENDCALL adb keyevent) instead of the inherited AT+CHUP path,
+    which does not reliably end a Google Voice call on C11 -- see
+    c11_gv_hangup()'s own docstring. Everything else (speak, capture,
+    fast_detect, is_hungup/AT+CLCC liveness check, DTMF) is inherited
+    unchanged; only call termination needed a different mechanism.
+
+    is_hungup() (inherited, AT+CLCC-based) is worth watching in future
+    live calls -- it produced one false "hung up" reading moments after
+    dialing during testing (most likely a startup race in how quickly the
+    RFCOMM/AT-command channel stabilizes after C11 places a VoIP call, not
+    yet confirmed to recur mid-conversation) alongside the SCO audio
+    channel itself being genuinely fine throughout. Not fixed here since
+    it wasn't reproduced as an ongoing problem -- flagged for whoever
+    debugs the next `is_hungup() == True` surprise on this backend.
+    """
+
+    def hangup(self) -> None:
+        c11_gv_hangup()
 
 
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
@@ -16278,10 +16342,11 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en", via: str = "s
             print(f"[call] GV connect wait: timed out after 30s, proceeding anyway", flush=True)
     elif via == "c11":
         # C11 places the call itself (its own Google Voice app, via adb) --
-        # the audio side reuses SCOCallIO completely unchanged, the same
-        # way the S22 path below does, since once a real Telecom call
-        # exists on C11, Android's Bluetooth HFP AG stack bridges it over
-        # SCO like any other call regardless of who/what placed it.
+        # the audio side reuses SCOCallIO's speak/capture/fast_detect/
+        # is_hungup unchanged, the same way the S22 path below does, since
+        # once a real Telecom call exists on C11, Android's Bluetooth HFP
+        # AG stack bridges it over SCO like any other call regardless of
+        # who/what placed it. Only hangup() differs -- see C11CallIO.
         if not c11_ensure_bt_connected(timeout=15):
             print("[call] C11 not connected via Bluetooth HFP — aborting "
                   "(check C11's Bluetooth is on; a crashed Bluetooth HAL "
@@ -16303,9 +16368,9 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en", via: str = "s
         time.sleep(3)
         if bt_hfp_detect().upper() != C11_BT_MAC.upper():
             print("[call] C11 HFP link dropped after dial — aborting", flush=True)
-            bt_call_hangup()
+            c11_gv_hangup()
             sys.exit(5)
-        call_io = SCOCallIO(C11_BT_MAC)
+        call_io = C11CallIO(C11_BT_MAC)
     else:
         # Ensure HFP is up before dialing (will pair/trust if necessary)
         phone_mac = bt_ensure_hfp_connected(timeout=20)

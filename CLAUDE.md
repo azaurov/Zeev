@@ -136,8 +136,44 @@ confirmed live) even though `dumpsys telecom`'s `mCalls:` shows nothing
 (that field is NOT a reliable liveness check for this call type — it read
 empty through two separate genuinely-active calls); check the app's own
 UI/notification banner instead, or just always call `hangup()`.
-`tests/test_c11_call.py` pins the pure-logic pieces (number formatting,
-missing-serial handling) — no live adb/Bluetooth in the test suite.
+- **`AT+CHUP` (the standard HFP hangup command, what `SCOCallIO.hangup()`
+  uses) is accepted by C11's Bluetooth stack and reports "OK" — but does
+  NOT actually end a Google Voice SelfManaged VoIP call.** Found live
+  wiring `--via c11` into `run_call_mode`: sent `AT+CHUP`, got `OK` back,
+  screenshotted C11 a moment later and the call was still visibly active,
+  timer still counting. A real Android platform gap (AT-command call
+  control doesn't reliably bridge to a third-party app's SelfManaged
+  call), not a bug in how the command was sent. **Fixed with `C11CallIO`**
+  (`SCOCallIO` subclass, one method overridden): `hangup()` sends a
+  `KEYCODE_ENDCALL` adb keyevent instead — Android's own global "end call"
+  signal, confirmed live to actually work (screen showed "Ending…" then
+  "Call ended"). Everything else (`speak`/`capture_popen`/`fast_detect`/
+  `is_hungup`/`send_dtmf`/`play_wav`) is inherited from `SCOCallIO`
+  unchanged. `run_call_mode`'s `via == "c11"` branch builds `C11CallIO`,
+  not `SCOCallIO`, and its own dropped-link abort path calls
+  `c11_gv_hangup()` directly (no `call_io` object exists yet at that
+  point).
+  - **Not yet confirmed whether `is_hungup()` (inherited, `AT+CLCC`-based)
+    has the same reliability gap mid-conversation** — it did produce one
+    false "hung up" reading moments after dialing (most likely a startup
+    race in how quickly the RFCOMM/AT-command channel stabilizes after
+    C11 places a VoIP call — the SCO *audio* channel itself was
+    confirmed genuinely fine at that same moment via direct `arecord`).
+    Not fixed since it wasn't reproduced as an ongoing problem; flag this
+    if a future call seems to end itself unexpectedly mid-conversation.
+  - **`c11_ensure_bt_connected()` also had a real live bug**: it
+    unconditionally ran `bluetoothctl connect <mac>` before checking
+    whether C11 was already connected — found live that this doesn't
+    error quickly on an already-connected device, it just hangs for the
+    full subprocess timeout (burned the whole 15s budget this way while
+    C11 was already fine the entire time, confirmed via
+    `bluealsa-aplay -l`). Fixed: checks `bt_hfp_detect()` first and skips
+    the `bluetoothctl connect` call entirely if C11's already connected —
+    the overwhelmingly common case in practice (C11 stays connected
+    across calls unless it reboots).
+- `tests/test_c11_call.py` pins the pure-logic pieces (number formatting,
+  missing-serial handling, the `C11CallIO`/`SCOCallIO` method-override
+  shape) — no live adb/Bluetooth in the test suite.
 
 - **Why an emulator wasn't used first**: a same-night investigation tried
   routing this through the real Google Voice *Android app* on

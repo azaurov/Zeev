@@ -111,3 +111,60 @@ def test_c11_gv_dial_returns_false_on_exception(zeev, monkeypatch):
 
 def test_c11_bt_mac_has_a_sensible_default(zeev):
     assert zeev.C11_BT_MAC.count(":") == 5  # a MAC address shape
+
+
+# ---------------------------------------------------------------------------
+# c11_gv_hangup() / C11CallIO -- AT+CHUP is accepted by C11's Bluetooth stack
+# but does NOT actually end a Google Voice SelfManaged call (confirmed live:
+# sent AT+CHUP, got "OK", the call was still visibly active moments later).
+# C11CallIO overrides hangup() to use KEYCODE_ENDCALL instead.
+# ---------------------------------------------------------------------------
+
+def test_c11_gv_hangup_requires_adb_serial(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "")
+    assert zeev.c11_gv_hangup() is False
+
+
+def test_c11_gv_hangup_sends_endcall_keyevent(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    captured = {}
+
+    class _FakeResult:
+        returncode = 0
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert zeev.c11_gv_hangup() is True
+    assert captured["cmd"] == ["adb", "-s", "1.2.3.4:5555", "shell",
+                                "input", "keyevent", "KEYCODE_ENDCALL"]
+
+
+def test_c11_gv_hangup_returns_false_on_exception(zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+
+    def _raise(cmd, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert zeev.c11_gv_hangup() is False
+
+
+def test_c11_call_io_overrides_hangup_only(zeev):
+    """Confirms C11CallIO inherits everything else from SCOCallIO
+    unchanged -- only hangup() should differ."""
+    assert issubclass(zeev.C11CallIO, zeev.SCOCallIO)
+    assert zeev.C11CallIO.hangup is not zeev.SCOCallIO.hangup
+    for name in ("speak", "capture_popen", "fast_detect", "is_hungup",
+                 "send_dtmf", "play_wav"):
+        assert getattr(zeev.C11CallIO, name) is getattr(zeev.SCOCallIO, name)
+
+
+def test_c11_call_io_hangup_calls_c11_gv_hangup(zeev, monkeypatch):
+    called = []
+    monkeypatch.setattr(zeev, "c11_gv_hangup", lambda: called.append(True) or True)
+    io = zeev.C11CallIO.__new__(zeev.C11CallIO)  # skip __init__ (needs real BT)
+    io.hangup()
+    assert called == [True]

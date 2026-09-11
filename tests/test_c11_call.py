@@ -260,6 +260,23 @@ def test_c11_gv_hangup_falls_back_to_ui_tap(zeev, monkeypatch):
     assert tap_calls == [True]
 
 
+def test_c11_gv_hangup_treats_tap_not_finding_a_button_as_success_if_call_already_ended(zeev, monkeypatch):
+    """Found live 2026-09-11: bt_call_loop's own exit-path hangup and
+    run_call_mode's finally-block hangup (or a SIGTERM handler racing a
+    natural loop exit) can both fire close together. If the first
+    KEYCODE_ENDCALL genuinely worked, just slower than the 1.5s check
+    window, this call site's tap fallback finds no button because the
+    call has already ended -- that must resolve to True, not a false
+    'all hangup attempts failed' alarm."""
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_send_endcall", lambda s: True)
+    resumed_results = iter([True, True, False])  # still active x2, ended by the time of the final check
+    monkeypatch.setattr(zeev, "_c11_call_activity_resumed", lambda s: next(resumed_results))
+    monkeypatch.setattr(zeev, "_c11_tap_hangup_button", lambda s: False)  # no button found
+    assert zeev.c11_gv_hangup() is True
+
+
 def test_c11_gv_hangup_gives_up_and_returns_false_if_nothing_works(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
     monkeypatch.setattr("time.sleep", lambda s: None)

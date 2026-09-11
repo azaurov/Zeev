@@ -4172,11 +4172,18 @@ def c11_gv_hangup() -> bool:
     if not _c11_call_activity_resumed(serial):
         return True
     print("[call] c11_gv_hangup: still active after retry, falling back to UI tap", flush=True)
-    if _c11_tap_hangup_button(serial):
-        _t.sleep(1.0)
-        if not _c11_call_activity_resumed(serial):
-            return True
-        print("[call] c11_gv_hangup: still active after UI tap -- giving up, call may be orphaned", flush=True)
+    _c11_tap_hangup_button(serial)
+    # Re-check regardless of whether a button was found/tapped -- found live
+    # 2026-09-11: two concurrent hangup call sites (bt_call_loop's own exit
+    # path + run_call_mode's finally block, or a SIGTERM handler racing a
+    # natural loop exit) can mean the earlier KEYCODE_ENDCALL actually
+    # worked, just slower than the 1.5s check window -- by the time this
+    # site's tap fallback runs, the call has already ended and there is
+    # genuinely no button left to find. That's success, not failure.
+    _t.sleep(1.0)
+    if not _c11_call_activity_resumed(serial):
+        return True
+    print("[call] c11_gv_hangup: still active after UI tap -- giving up, call may be orphaned", flush=True)
     return False
 
 

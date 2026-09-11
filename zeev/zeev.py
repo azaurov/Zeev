@@ -3978,6 +3978,51 @@ def c11_wake_unlock(serial: str) -> None:
         print(f"[call] c11_wake_unlock failed (non-fatal): {e}", flush=True)
 
 
+def _c11_ensure_gv_warm(serial: str, timeout: float = 8.0) -> bool:
+    """Make sure Google Voice is actually running and resumed on C11
+    before the real CALL intent is fired.
+
+    Found live 2026-09-11: a cold GV process can silently swallow a CALL
+    intent -- it lands mid-way through the app's own account-ready/FCM
+    bootstrap (confirmed in logcat: `GatewayActivity -> onAccountReady ->
+    HomeActivity -> onAccountReady -> Fcm Registration...`) and the app
+    just settles on its own home screen instead of placing the call. No
+    ring, no VoipCallActivity, no error either -- from the outside it
+    looks like the call was placed and simply never rang. Launching GV
+    plainly first (its own launcher intent, not the CALL intent) and
+    waiting for it to become the actually-resumed app absorbs that
+    cold-start cost before the real dial attempt. Best-effort: a timeout
+    here is logged, not fatal -- c11_gv_dial() still tries the CALL
+    intent either way, since this is a mitigation for a race, not a hard
+    precondition confirmed to always be necessary.
+    """
+    import time as _t
+    try:
+        subprocess.run(
+            ["adb", "-s", serial, "shell", "monkey", "-p", C11_GV_PKG,
+             "-c", "android.intent.category.LAUNCHER", "1"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"[call] _c11_ensure_gv_warm: launch failed (non-fatal): {e}", flush=True)
+        return False
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            result = subprocess.run(
+                ["adb", "-s", serial, "shell", "dumpsys", "activity", "activities"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            break
+        if C11_GV_PKG in (result.stdout or ""):
+            return True
+        _t.sleep(0.5)
+    print("[call] _c11_ensure_gv_warm: GV did not become resumed in time "
+          "(non-fatal, proceeding with dial anyway)", flush=True)
+    return False
+
+
 def c11_gv_dial(number: str) -> bool:
     """Dial `number` via Google Voice on C11. C11 has no telephony/SIM at
     all, so bt_call_dial()'s ATD AT-command path (which asks the paired
@@ -3985,7 +4030,7 @@ def c11_gv_dial(number: str) -> bool:
     told to place the call itself, through its own Google Voice app, via
     an adb-driven Android intent.
 
-    Three gotchas found live, all handled here:
+    Four gotchas found live, all handled here:
     - The number must include the +1 country code -- a plain 10-digit
       string gets "Selected number is invalid" from GV (this was found on
       the in-app dial-pad path specifically; the ACTION_CALL intent form
@@ -3997,6 +4042,18 @@ def c11_gv_dial(number: str) -> bool:
       re-adds a second Google account, this will need that handling back.
     - C11 dozes/locks between calls (`c11_wake_unlock`, above) -- woken
       and unlocked before the CALL intent is fired, not after.
+    - **A cold GV process silently swallows the CALL intent** (found live
+      2026-09-11): when the app wasn't already running, the CALL intent
+      landed while GV was still doing its own account-ready/FCM
+      registration bootstrap (`GatewayActivity -> onAccountReady ->
+      HomeActivity -> onAccountReady -> Fcm Registration...`, confirmed
+      in logcat) and the call never actually dialed -- no ring, no
+      VoipCallActivity, the app just settled on its own home screen. Every
+      prior successful test happened to have GV already warm from recent
+      use, which is why this wasn't caught earlier. Fixed by
+      `_c11_ensure_gv_warm()`, below -- launches GV plainly first and
+      waits for it to actually become the resumed app before firing the
+      real CALL intent.
     """
     serial = c11_adb_serial()
     if not serial:
@@ -4006,6 +4063,7 @@ def c11_gv_dial(number: str) -> bool:
               flush=True)
         return False
     c11_wake_unlock(serial)
+    _c11_ensure_gv_warm(serial)
     digits = re.sub(r"[^\d]", "", number)
     if not digits:
         print(f"[call] No digits found in: {number!r}", flush=True)

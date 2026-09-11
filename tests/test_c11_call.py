@@ -27,6 +27,8 @@ def test_c11_gv_dial_requires_adb_serial(zeev, monkeypatch):
 
 def test_c11_gv_dial_rejects_no_digits(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
     assert zeev.c11_gv_dial("not a number") is False
 
 
@@ -34,6 +36,8 @@ def test_c11_gv_dial_formats_ten_digit_number_with_country_code(zeev, monkeypatc
     """Found live: GV's ACTION_CALL intent needs the full +1 country code --
     a plain 10-digit tel: URI gets rejected."""
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -52,6 +56,8 @@ def test_c11_gv_dial_formats_ten_digit_number_with_country_code(zeev, monkeypatc
 
 def test_c11_gv_dial_leaves_a_leading_plus_number_untouched(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -70,6 +76,8 @@ def test_c11_gv_dial_leaves_a_leading_plus_number_untouched(zeev, monkeypatch):
 
 def test_c11_gv_dial_targets_the_right_activity_and_serial(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "9.9.9.9:1234")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
     captured = {}
 
     class _FakeResult:
@@ -89,6 +97,8 @@ def test_c11_gv_dial_targets_the_right_activity_and_serial(zeev, monkeypatch):
 
 def test_c11_gv_dial_returns_false_on_adb_error(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
 
     class _FakeResult:
         returncode = 1
@@ -101,6 +111,8 @@ def test_c11_gv_dial_returns_false_on_adb_error(zeev, monkeypatch):
 
 def test_c11_gv_dial_returns_false_on_exception(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: True)
 
     def _raise(cmd, **kwargs):
         raise FileNotFoundError("adb not found")
@@ -132,9 +144,74 @@ def test_c11_gv_dial_wakes_and_unlocks_before_dialing(zeev, monkeypatch):
         return _FakeResult()
 
     monkeypatch.setattr(zeev, "c11_wake_unlock", _fake_wake_unlock)
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: calls.append(("warm", s)) or True)
     monkeypatch.setattr(subprocess, "run", _fake_run)
     assert zeev.c11_gv_dial("5081234567") is True
     assert calls[0] == ("wake_unlock", "1.2.3.4:5555")
+    assert calls[1] == ("warm", "1.2.3.4:5555")
+
+
+def test_c11_gv_dial_ensures_gv_warm_before_dialing(zeev, monkeypatch):
+    """Found live 2026-09-11: a cold GV process silently swallows the CALL
+    intent (app was still doing its own account-ready bootstrap), so no
+    call ever rang. _c11_ensure_gv_warm() must run after wake_unlock and
+    before the actual CALL intent, not skipped."""
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    monkeypatch.setattr(zeev, "c11_wake_unlock", lambda s: None)
+    calls = []
+    monkeypatch.setattr(zeev, "_c11_ensure_gv_warm", lambda s, **kw: calls.append(s) or True)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev.c11_gv_dial("5081234567") is True
+    assert calls == ["1.2.3.4:5555"]
+
+
+def test_c11_ensure_gv_warm_launches_and_waits_for_resumed(zeev, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    calls = []
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "dumpsys" in cmd:
+            r = _FakeResult()
+            r.stdout = zeev.C11_GV_PKG + " some other text"
+            return r
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert zeev._c11_ensure_gv_warm("1.2.3.4:5555") is True
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "monkey", "-p", zeev.C11_GV_PKG,
+            "-c", "android.intent.category.LAUNCHER", "1"] in calls
+
+
+def test_c11_ensure_gv_warm_times_out_and_returns_false(zeev, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""  # GV package never appears -- never becomes resumed
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: _FakeResult())
+    assert zeev._c11_ensure_gv_warm("1.2.3.4:5555", timeout=0.01) is False
+
+
+def test_c11_ensure_gv_warm_is_best_effort_on_launch_exception(zeev, monkeypatch):
+    def _raise(cmd, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert zeev._c11_ensure_gv_warm("1.2.3.4:5555") is False  # must not raise
 
 
 def test_c11_wake_unlock_sends_wakeup_and_dismiss_keyguard(zeev, monkeypatch):

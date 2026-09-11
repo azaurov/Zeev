@@ -3929,6 +3929,30 @@ def c11_ensure_bt_connected(timeout: int = 15) -> bool:
     return False
 
 
+def c11_wake_unlock(serial: str) -> None:
+    """Wake C11's screen and dismiss its keyguard before dialing.
+
+    Found live 2026-09-11: C11 goes to sleep (`mWakefulness=Dozing`)
+    between calls, same as any idle Android device. KEYCODE_ENDCALL
+    (`c11_gv_hangup`) is a global key and works regardless of screen
+    state, but the `am start` CALL intent in `c11_gv_dial` is not -- a
+    sleeping/locked screen is a real race for it, not yet a confirmed
+    live failure but worth closing before it becomes one. `wm
+    dismiss-keyguard` only works against C11's actual lock config (no
+    PIN/pattern set, confirmed via `locksettings get-disabled`) -- it
+    does not bypass a real secured lock screen, and isn't expected to if
+    C11 is ever given one. Best-effort: failures here are logged, not
+    fatal -- the dial attempt still proceeds either way.
+    """
+    try:
+        subprocess.run(["adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+                        capture_output=True, text=True, timeout=10)
+        subprocess.run(["adb", "-s", serial, "shell", "wm", "dismiss-keyguard"],
+                        capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        print(f"[call] c11_wake_unlock failed (non-fatal): {e}", flush=True)
+
+
 def c11_gv_dial(number: str) -> bool:
     """Dial `number` via Google Voice on C11. C11 has no telephony/SIM at
     all, so bt_call_dial()'s ATD AT-command path (which asks the paired
@@ -3936,7 +3960,7 @@ def c11_gv_dial(number: str) -> bool:
     told to place the call itself, through its own Google Voice app, via
     an adb-driven Android intent.
 
-    Two gotchas found live, both handled here:
+    Three gotchas found live, all handled here:
     - The number must include the +1 country code -- a plain 10-digit
       string gets "Selected number is invalid" from GV (this was found on
       the in-app dial-pad path specifically; the ACTION_CALL intent form
@@ -3946,6 +3970,8 @@ def c11_gv_dial(number: str) -> bool:
       function has no way to dismiss. Resolved by removing the second
       account from C11 entirely (2026-09-11) -- if a future C11 setup
       re-adds a second Google account, this will need that handling back.
+    - C11 dozes/locks between calls (`c11_wake_unlock`, above) -- woken
+      and unlocked before the CALL intent is fired, not after.
     """
     serial = c11_adb_serial()
     if not serial:
@@ -3954,6 +3980,7 @@ def c11_gv_dial(number: str) -> bool:
               "every C11 reboot, not fixable without rooting the device)",
               flush=True)
         return False
+    c11_wake_unlock(serial)
     digits = re.sub(r"[^\d]", "", number)
     if not digits:
         print(f"[call] No digits found in: {number!r}", flush=True)

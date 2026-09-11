@@ -113,6 +113,56 @@ def test_c11_bt_mac_has_a_sensible_default(zeev):
     assert zeev.C11_BT_MAC.count(":") == 5  # a MAC address shape
 
 
+def test_c11_gv_dial_wakes_and_unlocks_before_dialing(zeev, monkeypatch):
+    """Found live: C11 dozes/locks between calls. c11_wake_unlock() must
+    run before the CALL intent, not after or not at all."""
+    monkeypatch.setattr(zeev, "c11_adb_serial", lambda: "1.2.3.4:5555")
+    calls = []
+
+    def _fake_wake_unlock(serial):
+        calls.append(("wake_unlock", serial))
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(("run", cmd))
+        return _FakeResult()
+
+    monkeypatch.setattr(zeev, "c11_wake_unlock", _fake_wake_unlock)
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert zeev.c11_gv_dial("5081234567") is True
+    assert calls[0] == ("wake_unlock", "1.2.3.4:5555")
+
+
+def test_c11_wake_unlock_sends_wakeup_and_dismiss_keyguard(zeev, monkeypatch):
+    captured = []
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    zeev.c11_wake_unlock("1.2.3.4:5555")
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "input", "keyevent", "KEYCODE_WAKEUP"] in captured
+    assert ["adb", "-s", "1.2.3.4:5555", "shell", "wm", "dismiss-keyguard"] in captured
+
+
+def test_c11_wake_unlock_is_best_effort_on_exception(zeev, monkeypatch):
+    def _raise(cmd, **kwargs):
+        raise FileNotFoundError("adb not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    zeev.c11_wake_unlock("1.2.3.4:5555")  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # c11_gv_hangup() / C11CallIO -- AT+CHUP is accepted by C11's Bluetooth stack
 # but does NOT actually end a Google Voice SelfManaged call (confirmed live:

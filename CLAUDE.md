@@ -96,6 +96,135 @@ ssh ragnar@ragnarok "sudo systemctl start zeev-audio"
   - **The poisoned exchange was deleted from the Pi's live `messages` and `message_vecs`** (both halves — a user row and its assistant row, same pairing rule the vision-hallucination cleanups already established) after backing up `zeev.db` first. This was a one-time data fix, not something the code change alone could undo.
   - Pinned by `tests/test_call_outcome.py`.
 
+### Google Voice calling — no phone/SIM involved, two backends (`--via gv` / `--via c11`)
+
+Three `via` options for `run_call_mode`/`python3 zeev/zeev.py --call
+NUMBER --via {sco,gv,c11}`. `via="sco"` (the default) is completely
+unaffected by either of the below — every existing call site still passes
+`call_io=None`, which builds `SCOCallIO(mac)` exactly as before.
+
+**`--via gv`**: places a genuine Google Voice VoIP call via
+`voice.google.com` in a real Chrome browser, entirely independent of any
+phone/SIM/carrier. **Only runs on bosgame as of this writing** — the
+Chrome instance and its virtual audio devices live there, not on the Pi;
+there is no Pi↔bosgame relay yet (deferred, see below).
+
+**`--via c11`** (recommended over `--via gv` — see the comparison at the
+end of this section): also a genuine no-SIM Google Voice VoIP call, but
+placed by **C11** (a dedicated WiFi-only, no-telephony Android device —
+see [[dogcaller_vm_bosgame]]-adjacent memory for its other role in the
+Wyze camera rig) instead of a browser, and carried over the **same
+SCO/HFP audio path `--via sco` already uses in production** — zero new
+audio backend, `call_io = SCOCallIO(C11_BT_MAC)`, same as the S22. C11
+places the call itself via its own Google Voice app
+(`c11_gv_dial()` — an adb-driven `ACTION_CALL` intent into
+`AndroidCallIntentActivity`, since C11 has no modem for the normal
+`bt_call_dial()`'s `ATD` AT-command path to talk to). Needs
+`C11_ADB_SERIAL` in `.env` (C11's current wireless-debugging `IP:port` —
+**rotates on every C11 reboot**, Android's own security behavior, not
+fixable without rooting the device; must be refreshed by hand each time,
+check C11's own Wireless Debugging screen) and `C11_BT_MAC` (defaults to
+the known value, override only if C11 is ever re-paired under a different
+adapter). Live-verified 2026-09-11, twice, bidirectionally, after fixing
+a crashed Bluetooth HAL on C11 (`adb logcat` caught a real `SIGSEGV` in
+`android.hardware.bluetooth@1.0-service` — fixed by `adb reboot`, not a
+code issue) — real captured speech (RMS up to 2690/32767) and a real Zeev
+TTS line the user confirmed hearing "loud and clear." **Always hang up
+explicitly when testing this path** — a forgotten hangup leaves GV's
+app-internal state stuck ("You're already in a call" on the next dial,
+confirmed live) even though `dumpsys telecom`'s `mCalls:` shows nothing
+(that field is NOT a reliable liveness check for this call type — it read
+empty through two separate genuinely-active calls); check the app's own
+UI/notification banner instead, or just always call `hangup()`.
+`tests/test_c11_call.py` pins the pure-logic pieces (number formatting,
+missing-serial handling) — no live adb/Bluetooth in the test suite.
+
+- **Why an emulator wasn't used first**: a same-night investigation tried
+  routing this through the real Google Voice *Android app* on
+  `dogcaller-vm` (the same bosgame Android VM the Wyze camera automation
+  uses). Proven dead end via root-level `strace` evidence: the emulator's
+  qemu audio backend never even attempts a pulse connection before
+  failing, and separately, the AVD's audio *capture* path is broken for
+  all sources while playback works — neither is fixable by config. Full
+  writeup in project memory `gv_vm_calling_investigation.md`. The browser
+  approach below is unrelated to that dead end and doesn't share its
+  problems (ordinary WebRTC on bosgame's already-working PipeWire stack).
+- **Audio routing**: two persistent virtual PipeWire sinks, defined in
+  `~/.config/pipewire/pipewire-pulse.conf.d/99-dogcaller.conf` on bosgame
+  (survive a pipewire-pulse restart, unlike an ad-hoc `pactl load-module`)
+  — `dogcaller_call_out` (Chrome's selected speaker; the call's incoming
+  audio lands here, captured via `parec --device=dogcaller_call_out.monitor`)
+  and `dogcaller_mic_feed` (Chrome's selected microphone; `paplay
+  --device=dogcaller_mic_feed` is what makes the far end hear Zeev speak).
+  Chrome is launched with `PULSE_SINK`/`PULSE_SOURCE` env vars pinning it
+  to these — **load-bearing**: bosgame's real default sink is a Bluetooth
+  yard speaker (`bluez_output.*`, see `docs`/memory on the M400B yard
+  speaker), and a Chrome instance launched without this pin would play
+  call audio there instead. `gv_call.py`'s `ensure_virtual_sinks()` refuses
+  to launch Chrome at all if the sinks aren't enumerable yet, rather than
+  risk libpulse's silent fallback to the default sink.
+- **`zeev/gv_call.py`** — `GVSession` (Chrome/CDP lifecycle: launch or
+  reuse via a fixed debug port, persistent profile at
+  `~/.config/zeev-gv-chrome` so login survives a relaunch, `dial()`/
+  `state()`/`hangup()` via DOM manipulation) and `GVCallIO` (the
+  `bt_call_loop` backend adapter). Needs the `websocket-client` pip
+  package (imported defensively — raises a clear `GVCallError`, doesn't
+  crash at import, if missing). `--use-fake-ui-for-media-stream` on the
+  Chrome launch is load-bearing: without it, a fresh (non-logged-in-yet)
+  launch blocks forever on an unattended mic-permission dialog — it still
+  uses the real pinned devices, it just skips the interactive prompt.
+- **React-controlled input gotcha**: `voice.google.com`'s dial-pad input is
+  a React controlled component — setting `.value = ...` directly does
+  nothing; `dial()` goes through the native `HTMLInputElement` value
+  setter (`Object.getOwnPropertyDescriptor(...).set.call(input, digits)`)
+  and then dispatches a real `input` event so React's `onChange` actually
+  fires. Found live; would otherwise look like the number was entered
+  (DOM shows it) while the Call button stays inert.
+- **`bt_speak_sco` gained one param, `play_cmd`** — the entire multi-engine
+  TTS chain (Orpheus → Cartesia → Piper → gTTS / ElevenLabs for
+  non-English) is unchanged and shared by both backends; only the final
+  playback subprocess command is now overridable (defaults to the
+  original `aplay -D sco_dev ...` when not given). The one piece of that
+  chain that does NOT honor `play_cmd`: the zeev-audio Go daemon's own
+  `sco_speak()` shortcut, which plays straight to a real SCO device itself
+  — explicitly skipped when `play_cmd is not None` so it can't silently
+  ignore a non-SCO backend's playback target.
+- **`_vad_collect()` (turn>0 caller capture) needed no changes at all** —
+  it already just reads raw S16LE frames off any `Popen.stdout`, built for
+  `arecord` but equally happy fed by `parec --device=dogcaller_call_out.monitor
+  --raw --format=s16le --rate=16000 --channels=1` (`GVCallIO.capture_popen()`).
+- **Known gaps, deliberately deferred, not silently unhandled**:
+  - `GVCallIO.send_dtmf()` returns `False` + logs — IVR navigation through
+    Google Voice's web UI is unverified, not yet attempted.
+  - `GVCallIO.fast_detect()` is an MVP: plain capture, no reimplementation
+    of `bt_fast_detect`'s SCO-specific onset-heuristic/early-exit
+    optimization. Turn 0 falls through to `bt_call_loop`'s existing
+    LLM-based call-type classification, same as a genuine `bt_fast_detect`
+    miss would.
+  - No Pi↔bosgame HTTP relay yet (would mirror `dog_caller_server.py`/
+    `DOG_CALLER_URL` — a `gv_call_server.py` + thin HTTP client backend on
+    the Pi side). Until built, `--via gv` only works run directly on
+    bosgame.
+- Live-verified 2026-09-11: three real Google Voice calls placed by hand
+  (predating this code — the manual CDP spike this module formalizes),
+  including a real Zeev TTS line heard "loud and clear" by a human on the
+  far end. The actual `bt_call_loop`/`GVCallIO` code path itself (this
+  section) has compile/unit-test coverage (`tests/test_gv_call.py`) but
+  not yet its own live end-to-end call — that's the next verification
+  step, not yet done as of this writing.
+- **`--via gv` vs `--via c11`, which to use**: `c11` is the more reliable
+  of the two — it reuses `SCOCallIO` completely unchanged (no new backend
+  class, no DOM-scraping-based call-state detection, no browser at all),
+  the exact same hardware-level "is a call actually connected" signal
+  (BlueZ/BlueALSA) the S22 path already relies on in production. `gv`'s
+  own state-detection (`GVSession.state()`) needed three separate
+  iterations to get right (see the memory doc — two false-positive
+  signals found live before landing on the real one), and its `fast_detect()`
+  is a known-weaker MVP. Prefer `c11` unless C11 itself is unreachable
+  (e.g. mid-reboot, needing a fresh `C11_ADB_SERIAL`).
+- Full incident history/investigation trail, both backends: project
+  memory `gv_vm_calling_investigation.md`.
+
 ## Version Control / Deployment
 
 Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked; add generated/data files to `.gitignore` by default. Watch for CRLF line endings from copy-paste in shell scripts/sudoers.

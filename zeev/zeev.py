@@ -94,7 +94,10 @@ DOG_CALLER_KEY     = os.environ.get("DOG_CALLER_KEY",     "")   # shared secret 
 # now drive the Wyze app on a headless Android VM on bosgame instead of
 # the physical C11 phone -- see dogcaller-vm.service on bosgame -- that
 # part changed too, just not the same date; the physical phone is fully
-# retired for this rig, not just demoted. Not part of this repo -- reached
+# retired for the Wyze-app-driving role specifically. It is NOT retired
+# overall: as of 2026-09-11 it's the phone `--via c11` calling uses (see
+# C11_BT_MAC/c11_gv_dial below) -- a different job, same physical device.
+# Not part of this repo -- reached
 # over Tailscale the same way ZEEV_WATCH_URL reaches ragnarok, just in the
 # other direction (device mode on the Pi calling out to this box instead
 # of the reverse).
@@ -3522,7 +3525,8 @@ def bt_sco_rate(mac: str, retries: int = 6, delay: float = 0.5) -> int:
 
 
 def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assistant",
-                  record_path: str | None = None, lang: str = "en") -> None:
+                  record_path: str | None = None, lang: str = "en",
+                  play_cmd: list[str] | None = None) -> None:
     """
     Speak text through the SCO (HFP) playback device so the caller can hear Zeev.
     TTS chain (English): Orpheus WAV → Cartesia WAV → Piper raw PCM → gTTS MP3.
@@ -3533,6 +3537,11 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
     record_path: if set, also save the final SCO-rate PCM actually sent to aplay
     (post-resample) as a WAV file, so Zeev's side of a call can be reviewed like
     the caller's side.
+    play_cmd: override the final playback command (default: `aplay -D sco_dev
+    ...`, reading S16LE mono PCM at `samplerate` from stdin). Lets a non-SCO
+    backend (e.g. GVCallIO, see gv_call.py) reuse this entire multi-engine
+    TTS chain unchanged and just swap where the resulting audio actually
+    plays — the only thing that's backend-specific about "speaking."
     """
     if not text:
         return
@@ -3578,8 +3587,8 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
                 except Exception as e:
                     print(f"[call] Failed to save Zeev-side audio: {e}", flush=True)
             ap = subprocess.Popen(
-                ["aplay", "-D", sco_dev, "-f", "S16_LE",
-                 "-r", str(samplerate), "-c", "1", "-q", "-"],
+                play_cmd or ["aplay", "-D", sco_dev, "-f", "S16_LE",
+                              "-r", str(samplerate), "-c", "1", "-q", "-"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             ap.stdin.write(pcm_out)
@@ -3612,7 +3621,13 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
 
     # 3. Piper (Ryan, male) — local synthesis, works offline
     if not wav:
-        if _audio and _audio.available:
+        # The daemon plays straight to sco_dev itself (bypassing this
+        # process entirely, hence no record_path support on this path) --
+        # only correct when actually targeting a real SCO device. A
+        # non-None play_cmd means a different backend (e.g. GVCallIO) wants
+        # to choose where this plays, so this shortcut must be skipped in
+        # favor of the local-Piper/gTTS paths below, which do honor play_cmd.
+        if _audio and _audio.available and play_cmd is None:
             # Daemon handles Piper → resample → aplay in one round-trip, so this
             # path bypasses record_path (no PCM comes back to this process).
             if _audio.sco_speak(text, sco_dev, samplerate):
@@ -3684,8 +3699,8 @@ def bt_speak_sco(text: str, sco_dev: str, samplerate: int, persona: str = "assis
                 print(f"[call] Failed to save Zeev-side audio: {e}", flush=True)
 
         ap = subprocess.Popen(
-            ["aplay", "-D", sco_dev, "-f", "S16_LE",
-             "-r", str(samplerate), "-c", "1", "-q", "-"],
+            play_cmd or ["aplay", "-D", sco_dev, "-f", "S16_LE",
+                          "-r", str(samplerate), "-c", "1", "-q", "-"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         ap.stdin.write(pcm_out)
@@ -3853,6 +3868,105 @@ def bt_call_dial(number: str) -> bool:
         return False
     print(f"[call] Dialing {digits} via HFP {_BT_PHONE_MAC}", flush=True)
     return bt_call_at(_BT_PHONE_MAC, f"ATD{digits};")
+
+
+# --- C11 (WiFi-only, no-SIM Android device) as a Google Voice calling
+# phone -- `--via c11`. C11 places the call itself, via its own Google
+# Voice app; only the AUDIO side reuses the standard SCO/HFP machinery
+# above (SCOCallIO, bt_call_hangup, bt_call_active, ...) unchanged, once
+# a real Telecom call exists on C11 for Android's Bluetooth HFP AG stack
+# to bridge. See project memory `gv_vm_calling_investigation.md` for the
+# full investigation this is built from -- proven bidirectionally live
+# 2026-09-11 (real captured speech + a real Zeev TTS line heard "loud and
+# clear"), including the one real bug hit (a crashed Bluetooth HAL on
+# C11, fixed by a reboot -- unrelated to this code).
+C11_BT_MAC = os.environ.get("C11_BT_MAC", "87:EB:1E:CC:FD:BE")
+C11_GV_PKG = "com.google.android.apps.googlevoice"
+C11_GV_CALL_ACTIVITY = f"{C11_GV_PKG}/com.google.android.apps.voice.home.androidintents.AndroidCallIntentActivity"
+
+
+def c11_adb_serial() -> str:
+    """C11's current wireless-debugging `IP:port`. NOT stable across a C11
+    reboot -- Android regenerates this port every time (a deliberate
+    security property of Wireless Debugging, not fixable without rooting
+    the device, see the memory doc's tradeoff discussion). Must be kept
+    current in .env by hand (check C11's own Wireless Debugging screen)
+    whenever C11 restarts; this function does not attempt discovery."""
+    return os.environ.get("C11_ADB_SERIAL", "")
+
+
+def c11_ensure_bt_connected(timeout: int = 15) -> bool:
+    """Ensure C11 specifically (not just any paired phone) is connected
+    via HFP. Distinct from bt_ensure_hfp_connected(), which finds whatever
+    phone happens to already be connected -- this targets C11's known MAC
+    directly, then confirms via bt_hfp_detect() that it's really C11 (not
+    some other paired phone, e.g. the S22, that happened to already be
+    connected) that answers."""
+    import time as _t
+    try:
+        subprocess.run(
+            ["bluetoothctl", "connect", C11_BT_MAC],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception as e:
+        print(f"[call] C11 bluetoothctl connect failed: {e}", flush=True)
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        if bt_hfp_detect().upper() == C11_BT_MAC.upper():
+            return True
+        _t.sleep(1)
+    return False
+
+
+def c11_gv_dial(number: str) -> bool:
+    """Dial `number` via Google Voice on C11. C11 has no telephony/SIM at
+    all, so bt_call_dial()'s ATD AT-command path (which asks the paired
+    PHONE's own cellular modem to dial) does not apply here -- C11 must be
+    told to place the call itself, through its own Google Voice app, via
+    an adb-driven Android intent.
+
+    Two gotchas found live, both handled here:
+    - The number must include the +1 country code -- a plain 10-digit
+      string gets "Selected number is invalid" from GV (this was found on
+      the in-app dial-pad path specifically; the ACTION_CALL intent form
+      used here needs it too).
+    - A second Google account on C11 used to make GV intercept this intent
+      with an account-chooser dialog (SelectAccountActivity) that this
+      function has no way to dismiss. Resolved by removing the second
+      account from C11 entirely (2026-09-11) -- if a future C11 setup
+      re-adds a second Google account, this will need that handling back.
+    """
+    serial = c11_adb_serial()
+    if not serial:
+        print("[call] C11_ADB_SERIAL not set in .env -- check C11's Wireless "
+              "Debugging screen for its current IP:port (this rotates on "
+              "every C11 reboot, not fixable without rooting the device)",
+              flush=True)
+        return False
+    digits = re.sub(r"[^\d]", "", number)
+    if not digits:
+        print(f"[call] No digits found in: {number!r}", flush=True)
+        return False
+    if len(digits) == 10:
+        digits = "1" + digits
+    tel = f"+{digits}"
+    print(f"[call] Dialing {tel} via Google Voice on C11 ({serial})", flush=True)
+    try:
+        result = subprocess.run(
+            ["adb", "-s", serial, "shell", "am", "start",
+             "-a", "android.intent.action.CALL", "-d", f"tel:{tel}",
+             "-n", C11_GV_CALL_ACTIVITY],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as e:
+        print(f"[call] C11 adb dial failed: {e} -- is C11_ADB_SERIAL still "
+              "current? (rotates on every C11 reboot)", flush=True)
+        return False
+    if result.returncode != 0 or "Error" in (result.stdout + result.stderr):
+        print(f"[call] C11 adb dial command failed: {result.stdout} {result.stderr}",
+              flush=True)
+        return False
+    return True
 
 
 def bt_call_answer() -> bool:
@@ -4115,55 +4229,106 @@ def play_wav_sco(path, sco_dev, samplerate):
         return False
 
 
+class SCOCallIO:
+    """Default call_io backend for bt_call_loop — thin delegation to the
+    existing SCO/HFP functions, unchanged. Exists purely so bt_call_loop's
+    internals can be backend-agnostic; every existing call site (device
+    mode, terminal REPL, run_call_mode) gets this automatically when
+    call_io=None, so their behavior is byte-for-byte identical to before
+    this abstraction existed. See gv_call.py's GVCallIO for the other
+    implementation of this same method set (Google Voice, no phone/SIM)."""
+
+    def __init__(self, mac: str):
+        self.mac = mac
+        self.sco_dev = bt_hfp_dev(mac)
+        self.samplerate = bt_sco_rate(mac)
+
+    def speak(self, text: str, persona: str = "assistant", lang: str = "en",
+              record_path: str | None = None) -> None:
+        bt_speak_sco(text, self.sco_dev, self.samplerate, persona=persona,
+                     record_path=record_path, lang=lang)
+
+    def capture_popen(self) -> subprocess.Popen:
+        return subprocess.Popen(
+            ["arecord", "-D", self.sco_dev, "-f", "S16_LE",
+             "-r", str(self.samplerate), "-c", "1", "-q", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+    def fast_detect(self) -> tuple[bytes, str, str]:
+        return bt_fast_detect(self.sco_dev, self.samplerate)
+
+    def is_hungup(self) -> bool:
+        """BlueALSA can keep listing the SCO PCM for a beat after the call
+        has really ended, so bt_hfp_detect() alone is not reliable enough
+        to end the loop on."""
+        if not bt_hfp_detect():
+            return True
+        return not bt_call_active(self.mac)
+
+    def hangup(self) -> None:
+        bt_call_hangup()
+
+    def send_dtmf(self, digit: str) -> bool:
+        return bt_call_dtmf(self.mac, digit)
+
+    def play_wav(self, path: str) -> bool:
+        return play_wav_sco(path, self.sco_dev, self.samplerate)
+
+
 def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                  record_dir: str | None = None,
                  call_intent: str = "",
                  persona: str = "assistant",
                  lang: str = "en",
-                 dialed_number: str = "") -> None:
+                 dialed_number: str = "",
+                 call_io=None) -> None:
     """
-    Run the Zeev conversation loop over an active HFP call.
+    Run the Zeev conversation loop over an active call.
     speak_fn — unused (kept for backward-compat call signature); outgoing speech
-    is actually routed through the internal _sco_speak() below, not this callback.
+    is actually routed through the internal _do_speak() below, not this callback.
     stt_fn(pcm_bytes) — returns transcript string
     llm_fn(text) — returns Zeev's reply string
     record_dir — if set, saves each turn as WAV files
-    mac — phone MAC for SCO device address
+    mac — phone MAC for SCO device address (used only to build the default
+    SCOCallIO when call_io is not given; irrelevant for other backends)
     call_intent — why Alex is making this call (injected into IVR/voicemail context)
     persona — voice persona from _CALL_VOICES ('assistant', 'friendly', 'professional', 'calm')
     lang — non-English calls route TTS through bt_speak_sco's ElevenLabs/gTTS path
     dialed_number — for log_call_outcome(); purely descriptive, plays no role
     in placing the call (already dialed by the time this runs)
+    call_io — backend implementing speak/capture_popen/fast_detect/is_hungup/
+    hangup/send_dtmf/play_wav. Defaults to SCOCallIO(mac) (today's behavior,
+    unchanged) when not given — every existing call site (device mode,
+    terminal REPL, run_call_mode's default `--via sco`) passes None here and
+    is unaffected by this backend abstraction. Pass a GVCallIO (see
+    gv_call.py) to run this same loop over a Google Voice call instead.
     """
     global _IN_CALL
     _IN_CALL = True
-    sco_dev = bt_hfp_dev(mac)
-    samplerate = bt_sco_rate(mac)  # 16000 (mSBC) or 8000 (CVSD), queried live
+    call_io = call_io or SCOCallIO(mac)
+    samplerate = call_io.samplerate
     call_log: list[dict] = []
 
-    # Route outgoing speech through SCO so the caller can hear Zeev
+    # Route outgoing speech through the active backend so the caller can hear Zeev
     _zeev_speak_idx = [0]  # mutable counter for naming Zeev-side recordings
 
-    def _sco_speak(text: str) -> None:
+    def _do_speak(text: str) -> None:
         record_path = None
         if record_dir:
             import os as _os
             record_path = _os.path.join(
                 record_dir, f"call_turn{_zeev_speak_idx[0]:03d}_zeev.wav")
             _zeev_speak_idx[0] += 1
-        bt_speak_sco(text, sco_dev, samplerate, persona=persona, record_path=record_path, lang=lang)
+        call_io.speak(text, persona=persona, lang=lang, record_path=record_path)
 
-    print(f"[call] Loop started on {sco_dev} @ {samplerate}Hz", flush=True)
+    print(f"[call] Loop started on {type(call_io).__name__} @ {samplerate}Hz", flush=True)
 
     def _hangup_detected() -> bool:
-        """True once the far end has actually hung up. Checks both the SCO
-        PCM listing (bt_hfp_detect) and the phone's own AT+CLCC call list
-        (bt_call_active) — BlueALSA can keep listing the SCO PCM for a beat
-        after the call has really ended, so bt_hfp_detect() alone is not
-        reliable enough to end the loop on."""
-        if not bt_hfp_detect():
-            return True
-        return not bt_call_active(mac)
+        """True once the far end has actually hung up — delegated to the
+        backend (see SCOCallIO.is_hungup/GVCallIO.is_hungup for what each
+        one actually checks)."""
+        return call_io.is_hungup()
 
     # Speculatively pre-generate voicemail message while ringing, so it's ready at the beep
     _pregen_msg: list[str] = []  # list used as mutable container for thread result
@@ -4235,16 +4400,16 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if not msg:
                 msg = "Hi, this is Zeev calling on behalf of Alex. Please call back when you get a chance."
             print(f"[call] Zeev (voicemail/timeout): {msg}", flush=True)
-            _sco_speak(msg)
+            _do_speak(msg)
             _outcome = "no answer within 25s, assumed voicemail and left a message"
             _IN_CALL = False
-            bt_call_hangup()
+            call_io.hangup()
             break
-        # Turn 0: use fast detector (6s smart capture + phone-context STT + onset heuristic)
+        # Turn 0: use fast detector (backend-specific — see SCOCallIO/GVCallIO.fast_detect)
         # Subsequent turns: normal VAD capture
         if turn == 0:
             print("[call] Listening (fast detect)...", flush=True)
-            pcm, detected_type, transcript = bt_fast_detect(sco_dev, samplerate)
+            pcm, detected_type, transcript = call_io.fast_detect()
             if not pcm:
                 if _hangup_detected():
                     print("[call] Call ended (hangup detected)", flush=True)
@@ -4256,12 +4421,8 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 call_type = detected_type
                 print(f"[call] Detected: {call_type}", flush=True)
         else:
-            # Record caller's voice via SCO capture device
-            rec = subprocess.Popen(
-                ["arecord", "-D", sco_dev, "-f", "S16_LE",
-                 "-r", str(samplerate), "-c", "1", "-q", "-"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
+            # Record caller's voice via the active backend's capture device
+            rec = call_io.capture_popen()
             print("[call] Listening...", flush=True)
             # IVR menus can take 3-5s to play after an acknowledgment; use longer silence window
             silence_ms = 3000 if call_type == "ivr" else 900
@@ -4336,13 +4497,13 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 # Strip any LLM meta-commentary ("Beep.", "[pause]", etc.)
                 msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
                 print(f"[call] Zeev (voicemail): {msg}", flush=True)
-                _sco_speak(msg)
+                _do_speak(msg)
                 if record_dir:
                     with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                         lf.write(f"[voicemail detected]\nGreeting: {transcript}\nMessage left: {msg}\n")
                 _outcome = "reached voicemail and left a message"
                 _IN_CALL = False
-                bt_call_hangup()
+                call_io.hangup()
                 break
 
             elif call_type == "ivr":
@@ -4356,7 +4517,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
 
             else:
                 # live or unknown — greet now that we know a human picked up
-                _sco_speak("Hello, this is Zeev, Alex's AI assistant.")
+                _do_speak("Hello, this is Zeev, Alex's AI assistant.")
 
         # Re-check for voicemail on subsequent turns — covers cases where turn 0 captured
         # hold music/noise (Whisper hallucination) and the real greeting comes on turn 1+.
@@ -4383,24 +4544,24 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                     msg = "Hi, this is Zeev calling on behalf of Alex. Please call back. Thank you."
                 msg = re.sub(r'^\s*(?:beep\.?|tone\.?|\[.*?\])\s*', '', msg, flags=re.IGNORECASE).strip()
             print(f"[call] Zeev (voicemail): {msg}", flush=True)
-            _sco_speak(msg)
+            _do_speak(msg)
             if record_dir:
                 with open(_os.path.join(record_dir, "call_transcript.txt"), "a") as lf:
                     lf.write(f"[voicemail detected at turn {turn}]\nGreeting: {transcript}\nMessage: {msg}\n")
             _outcome = "reached voicemail (after a live-sounding greeting) and left a message"
             _IN_CALL = False
-            bt_call_hangup()
+            call_io.hangup()
             break
 
         # Hangup detection — only for live calls (IVR "Goodbye" is the IVR ending, not us)
         if call_type != "ivr" and re.search(
             r"\b(bye|goodbye|hang up|gotta go|talk later)\b", transcript, re.IGNORECASE
         ):
-            _sco_speak("Goodbye!")
+            _do_speak("Goodbye!")
             _outcome = (f"spoke with a live person ({len(call_log)} exchange"
                         f"{'s' if len(call_log) != 1 else ''}), call ended normally")
             _IN_CALL = False
-            bt_call_hangup()
+            call_io.hangup()
             break
 
         # A song request on a live call is answered by PLAYING the duet, not by
@@ -4413,7 +4574,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 song = render_birthday_duet(call_song_name(call_intent, call_log))
             except Exception as e:
                 print(f"[call] duet render failed: {e}", flush=True)
-            if song and play_wav_sco(song, sco_dev, samplerate):
+            if song and call_io.play_wav(song):
                 call_log.append({"role": "zeev", "text": "(sang happy birthday)"})
                 turn += 1
                 continue
@@ -4450,7 +4611,7 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
             if digit_m:
                 digit = digit_m.group(1)
                 print(f"[call] Zeev DTMF: {digit}", flush=True)
-                bt_call_dtmf(mac, digit)
+                call_io.send_dtmf(digit)
                 call_log.append({"role": "zeev", "text": f"[DTMF {digit}]"})
                 turn += 1
                 continue
@@ -4468,13 +4629,13 @@ def bt_call_loop(speak_fn, stt_fn, llm_fn, mac: str,
                 lf.write(f"[{turn}] Caller: {transcript}\n")
                 lf.write(f"[{turn}] Zeev:   {reply}\n\n")
 
-        _sco_speak(reply)
+        _do_speak(reply)
         turn += 1
 
     print("[call] Loop ended", flush=True)
     if _IN_CALL:  # not already hung up via break path
         _IN_CALL = False
-        bt_call_hangup()
+        call_io.hangup()
         _outcome = "call ended (hung up from elsewhere, e.g. voice command)"
 
     try:
@@ -16026,14 +16187,16 @@ def run_device_mode():
         time.sleep(1)
 
 
-def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
+def run_call_mode(number: str, intent: str = "", lang: str = "en", via: str = "sco") -> None:
     """
-    CLI entry point: dial `number` via HFP and run a single bt_call_loop
-    session, then hang up. Mirrors the device-mode "call NNN and ..." path
-    but is invokable from a shell, e.g.:
+    CLI entry point: dial `number` and run a single bt_call_loop session,
+    then hang up. Mirrors the device-mode "call NNN and ..." path but is
+    invokable from a shell, e.g.:
 
         python3 zeev/zeev.py --call 8577017252 --intent "have a fun chat"
         python3 zeev/zeev.py --call 6174106801 --intent "..." --lang ru
+        python3 zeev/zeev.py --call 6174106801 --intent "..." --via gv
+        python3 zeev/zeev.py --call 6174106801 --intent "..." --via c11
 
     Uses bt_speak_sco (not _speak_device) so it works without the Whisplay
     HAT wake-word listener. SIGINT hangs up cleanly.
@@ -16042,6 +16205,17 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
     and force the 70B model — the 8B model reliably romanizes Russian/Hebrew
     instead of using native script (see CLAUDE.md), which would come out as
     mispronounced nonsense through TTS.
+    via: "sco" (default) — Bluetooth HFP through a paired phone, unchanged
+    behavior. "gv" — places the call as a genuine Google Voice VoIP call
+    via a Chrome browser on bosgame, no phone/SIM/carrier involved at all
+    (see gv_call.py; only runs where that Chrome instance/virtual audio
+    setup lives — bosgame, not the Pi, as of this writing). "c11" — also a
+    genuine no-SIM Google Voice VoIP call, but placed by C11 (a dedicated
+    WiFi-only Android device) and carried over the same proven SCO/HFP
+    audio path the "sco" backend uses (see c11_gv_dial/SCOCallIO) —
+    architecturally the more reliable of the two GV backends; needs
+    C11_ADB_SERIAL in .env, refreshed after any C11 reboot (its wireless-
+    debugging port rotates then, see the memory doc).
     """
     global _SETTINGS_TTS_ON
     zeev_cleanup()    # clear any crash leftovers from a previous run
@@ -16055,24 +16229,100 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
     number = digits
 
     persona = extract_call_persona(intent or "")
-    print(f"[call] Dialing {number} intent={intent!r} persona={persona}", flush=True)
+    print(f"[call] Dialing {number} intent={intent!r} persona={persona} via={via}", flush=True)
 
-    # Ensure HFP is up before dialing (will pair/trust if necessary)
-    phone_mac = bt_ensure_hfp_connected(timeout=20)
-    if not phone_mac:
-        print("[call] No phone connected via HFP — aborting", flush=True)
-        sys.exit(3)
+    call_io = None
+    phone_mac = ""
+    if via == "gv":
+        import gv_call
+        gv_session = gv_call.GVSession()
+        try:
+            gv_session.launch_or_reuse()
+            gv_session.dial(number)
+        except gv_call.GVCallError as e:
+            print(f"[call] Google Voice dial failed: {e}", flush=True)
+            sys.exit(3)
+        call_io = gv_call.GVCallIO(gv_session, bt_speak_sco, _vad_collect)
+        # Wait for the call to actually connect before starting bt_call_loop.
+        # Found live: bt_call_loop's own 25s "assume voicemail if nobody
+        # speaks" clock starts the moment it's entered — fine for SCO/HFP,
+        # where bt_hfp_detect() above already confirms a genuinely
+        # *established* link before bt_call_loop ever starts. For GV, a
+        # flat short sleep here instead let real ring time (5-20s for a
+        # human to actually pick up) eat directly into that same 25s
+        # budget, so a real answer-and-speak-immediately call still got
+        # mistaken for voicemail — confirmed live 2026-09-11, several calls
+        # in a row while chasing this. Poll for the call to reach "active"
+        # so bt_call_loop's own timeout only ever measures real
+        # post-answer silence. Only "active" breaks early — "ended" is
+        # NOT trusted as an exit condition here: found live that
+        # gv_session.state() can report a stale "ended" left over from the
+        # *previous* call's post-call survey dialog at the very first poll
+        # (t=0), before the DOM has updated to reflect this dial()'s own
+        # fresh "Calling…" state, which made the wait exit instantly and
+        # reintroduced the exact same bug this loop exists to fix. A
+        # genuinely failed/declined GV call just rides out the full 30s
+        # here instead — rare, and still bounded.
+        _connect_deadline = time.time() + 30
+        _connect_start = time.time()
+        _last_state = None
+        while time.time() < _connect_deadline:
+            _st = gv_session.state()
+            if _st != _last_state:
+                print(f"[call] GV connect wait: {_st} @ {time.time()-_connect_start:.1f}s", flush=True)
+                _last_state = _st
+            if _st == "active":
+                break
+            time.sleep(1)
+        else:
+            print(f"[call] GV connect wait: timed out after 30s, proceeding anyway", flush=True)
+    elif via == "c11":
+        # C11 places the call itself (its own Google Voice app, via adb) --
+        # the audio side reuses SCOCallIO completely unchanged, the same
+        # way the S22 path below does, since once a real Telecom call
+        # exists on C11, Android's Bluetooth HFP AG stack bridges it over
+        # SCO like any other call regardless of who/what placed it.
+        if not c11_ensure_bt_connected(timeout=15):
+            print("[call] C11 not connected via Bluetooth HFP — aborting "
+                  "(check C11's Bluetooth is on; a crashed Bluetooth HAL "
+                  "needs a C11 reboot to clear, see the memory doc)", flush=True)
+            sys.exit(3)
+        global _BT_PHONE_MAC
+        _BT_PHONE_MAC = C11_BT_MAC
+        if not c11_gv_dial(number):
+            print(f"[call] c11_gv_dial({number}) failed — aborting", flush=True)
+            sys.exit(4)
+        # Same reasoning as the S22 path just below: give the call a
+        # moment, then confirm the SCO link is still (still) there before
+        # committing to bt_call_loop. Unlike the browser/gv path, no
+        # separate "wait for genuinely answered" polling is needed here --
+        # C11's SCO link exists as soon as dialing starts (ringback
+        # included), the same way the S22's already does, and
+        # bt_call_loop's own voicemail-timeout is already sized to absorb
+        # real ring time for that existing, proven path.
+        time.sleep(3)
+        if bt_hfp_detect().upper() != C11_BT_MAC.upper():
+            print("[call] C11 HFP link dropped after dial — aborting", flush=True)
+            bt_call_hangup()
+            sys.exit(5)
+        call_io = SCOCallIO(C11_BT_MAC)
+    else:
+        # Ensure HFP is up before dialing (will pair/trust if necessary)
+        phone_mac = bt_ensure_hfp_connected(timeout=20)
+        if not phone_mac:
+            print("[call] No phone connected via HFP — aborting", flush=True)
+            sys.exit(3)
 
-    if not bt_call_dial(number):
-        print(f"[call] bt_call_dial({number}) failed — aborting", flush=True)
-        sys.exit(4)
+        if not bt_call_dial(number):
+            print(f"[call] bt_call_dial({number}) failed — aborting", flush=True)
+            sys.exit(4)
 
-    # Give the call a moment to connect
-    time.sleep(3)
-    if not bt_hfp_detect():
-        print("[call] HFP dropped after dial — aborting", flush=True)
-        bt_call_hangup()
-        sys.exit(5)
+        # Give the call a moment to connect
+        time.sleep(3)
+        if not bt_hfp_detect():
+            print("[call] HFP dropped after dial — aborting", flush=True)
+            bt_call_hangup()
+            sys.exit(5)
 
     # Load prior conversation context for the LLM
     try:
@@ -16087,7 +16337,10 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
     # SIGINT/SIGTERM → hang up and exit (no zombie calls)
     def _shutdown(sig=None, frame=None):
         print(f"\n[call] Caught signal {sig} — hanging up", flush=True)
-        bt_call_hangup()
+        if call_io is not None:
+            call_io.hangup()
+        else:
+            bt_call_hangup()
         zeev_cleanup()
         sys.exit(0)
     signal.signal(signal.SIGINT, _shutdown)
@@ -16095,11 +16348,16 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
 
     _LANG_NAMES = {"ru": "Russian (Русский)", "es": "Spanish (Español)", "he": "Hebrew (עברית)"}
 
-    # SCO speak callback: Zeev's voice to the caller
+    # Speak callback: Zeev's voice to the caller (backend-agnostic; unused
+    # by bt_call_loop itself, kept for signature back-compat — see its
+    # own docstring)
     def _speak(text: str) -> None:
-        sco_dev = bt_hfp_dev(phone_mac)
-        samplerate = bt_sco_rate(phone_mac)
-        bt_speak_sco(text, sco_dev, samplerate, persona=persona, lang=lang)
+        if call_io is not None:
+            call_io.speak(text, persona=persona, lang=lang)
+        else:
+            sco_dev = bt_hfp_dev(phone_mac)
+            samplerate = bt_sco_rate(phone_mac)
+            bt_speak_sco(text, sco_dev, samplerate, persona=persona, lang=lang)
 
     # STT callback: raw 16k mono PCM → transcript
     def _stt(pcm: bytes) -> str:
@@ -16180,14 +16438,18 @@ def run_call_mode(number: str, intent: str = "", lang: str = "en") -> None:
                      call_intent=intent,
                      persona=persona,
                      lang=lang,
-                     dialed_number=number)
+                     dialed_number=number,
+                     call_io=call_io)
     except SystemExit:
         raise
     except Exception as e:
         print(f"[call] bt_call_loop crashed: {type(e).__name__}: {e}", flush=True)
     finally:
         print("[call] Hanging up", flush=True)
-        bt_call_hangup()
+        if call_io is not None:
+            call_io.hangup()
+        else:
+            bt_call_hangup()
         zeev_cleanup()
 
 
@@ -17036,10 +17298,10 @@ if __name__ == "__main__":
     elif "--device" in sys.argv or "-device" in sys.argv:
         run_device_mode()
     elif "--call" in sys.argv:
-        # --call <NUMBER> [--intent "TEXT"] [--lang xx]
+        # --call <NUMBER> [--intent "TEXT"] [--lang xx] [--via sco|gv|c11]
         argv = sys.argv[1:]
         if "--call" not in argv or len(argv) < 2:
-            print("Usage: zeev.py --call <NUMBER> [--intent \"TEXT\"] [--lang xx]", flush=True)
+            print("Usage: zeev.py --call <NUMBER> [--intent \"TEXT\"] [--lang xx] [--via sco|gv|c11]", flush=True)
             sys.exit(2)
         number = argv[argv.index("--call") + 1]
         intent = ""
@@ -17052,6 +17314,14 @@ if __name__ == "__main__":
             idx = argv.index("--lang")
             if idx + 1 < len(argv):
                 lang = argv[idx + 1]
-        run_call_mode(number, intent, lang)
+        via = "sco"
+        if "--via" in argv:
+            idx = argv.index("--via")
+            if idx + 1 < len(argv):
+                via = argv[idx + 1]
+            if via not in ("sco", "gv", "c11"):
+                print(f"Usage: --via must be 'sco', 'gv', or 'c11', got {via!r}", flush=True)
+                sys.exit(2)
+        run_call_mode(number, intent, lang, via=via)
     else:
         main()

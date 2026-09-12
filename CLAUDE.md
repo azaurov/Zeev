@@ -8,6 +8,25 @@ Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into 
 
 **Enforced, not just advisory**: `.claude/settings.json` has a `PreToolUse` hook on `Bash` that blocks `cat`/`less`/`head`/`tail`/`echo` commands targeting `.env` (exit 2, refuses the command outright) — verified live 2026-08-13.
 
+## watch_server `speak` command
+
+`/watch` accepts `cmd: "speak"` (`text`, optional `voice`, optional `volume`)
+— say something on the Pi's speaker, nothing else. Added 2026-09-11 for the
+dog-soothe routine in `~/troubleshooting/wyze-dog-caller` (`soothe.py`), which
+talks Leo down after the dog caller brings him in.
+
+- **Deliberately bypasses `finish_turn()`/session/`message_vecs`.** The caller
+  is an automation reciting its own fixed script, not a conversation turn.
+  Filing it as something Zeev said would let RAG surface it later as fact —
+  the failure documented under `_VISION_TAG` in `docs/wyze-cameras.md`.
+- **`volume` is restored in a `finally`.** This runs unattended; a raised
+  volume left behind would make the next spoken reply arbitrarily loud.
+- Lives in the special-cased dispatch block with `find_subject`/`snapshot`,
+  not `_COMMANDS`, because it takes request-body params.
+- `watch_server` runs as **`zeev-watch.service`** on the Pi — a separate
+  process from `zeev-device.service`. Restarting `zeev-device` does **not**
+  reload it; that cost real debugging time.
+
 ## Scope Discipline
 
 Change only what I asked for. Do not remove trigger words, edit model/max_tokens params, or add fallback paths (e.g. ffmpeg shims) that weren't requested — propose them separately instead.

@@ -575,6 +575,44 @@ def _blessing_cmd(entry):
     return _make_literal_blessing_cmd(entry["en"], entry["he"])
 
 
+def _cmd_speak(text, voice="", volume=None):
+    """Say `text` aloud on the Pi's speaker. Returns (ok, message).
+
+    Deliberately the dumbest possible speech path: straight to the audio
+    daemon, no LLM turn, no session, no DB write. Callers are automations
+    with their own script (the dog-soothe routine in ~/troubleshooting/
+    wyze-dog-caller talking to Leo), not conversation — routing them through
+    finish_turn() would file the words as something Zeev said in a turn and
+    let RAG surface them later as fact, the failure documented under
+    _VISION_TAG in docs/wyze-cameras.md.
+
+    `volume` is restored afterward whatever happens: this runs unattended,
+    and a raised volume left behind would make the next spoken reply — or
+    the next thing the household hears at 3am — arbitrarily loud."""
+    text = (text or "").strip()
+    if not text:
+        return False, "nothing to say (empty text)"
+    if zeev._audio is None:
+        return False, "the zeev-audio daemon isn't available"
+
+    previous = None
+    try:
+        if volume is not None:
+            previous = zeev._audio.get_volume()
+            zeev._audio.set_volume(int(volume))
+        ok = zeev._audio.speak_sync(text, voice=voice or "")
+    except Exception as e:
+        return False, f"speech failed: {e}"
+    finally:
+        if previous is not None:
+            try:
+                zeev._audio.set_volume(previous)
+            except Exception as e:
+                print(f"[watch] speak: volume restore failed: {e}", flush=True)
+
+    return bool(ok), "spoke it" if ok else "the audio daemon reported failure"
+
+
 _COMMANDS = {
     "pair_ble": _cmd_pair_ble,
     "world_news": _cmd_world_news,
@@ -649,6 +687,17 @@ def _make_handler():
                 if image:
                     payload["image"] = image
                 self._json(200, payload)
+                return
+            if cmd == "speak":
+                try:
+                    ok, message = _cmd_speak(
+                        data.get("text"), voice=data.get("voice", ""),
+                        volume=data.get("volume"))
+                except Exception as e:
+                    print(f"[watch] speak failed: {e}", flush=True)
+                    self._json(500, {"ok": False, "error": str(e)})
+                    return
+                self._json(200, {"ok": ok, "message": message})
                 return
             if cmd == "sweep":
                 try:

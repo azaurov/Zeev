@@ -47,6 +47,9 @@ AppSideService({
       if (jsonRpc.method === "FIND_SMOKEY") {
         return callZeev(ctx, "find_smokey");
       }
+      if (jsonRpc.method === "CALL_DOG") {
+        return callZeev(ctx, "call_dog");
+      }
       // Every blessing method is BLESSING_<KEY> on the watch side and
       // blessing_<key> on the server -- one generic mapping instead of a
       // growing pile of near-identical if-blocks per blessing.

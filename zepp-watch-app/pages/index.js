@@ -15,6 +15,7 @@ const COMMANDS = [
   { method: "PAIR_BLE", label: "Pair Headphones" },
   { method: "WORLD_NEWS", label: "World News" },
   { method: "FIND_SMOKEY", label: "Find Leo and/or Smokey" },
+  { method: "CALL_DOG", label: "Call Leo Inside" },
 ];
 
 // Blessings is a nav button, not a direct command -- it opens a submenu of

@@ -191,6 +191,31 @@ def test_pair_ble_connect_failure(watch_server, zeev, monkeypatch):
     assert data["ok"] is False
 
 
+def test_call_dog_relays_to_dog_caller(watch_server, zeev, monkeypatch):
+    calls = []
+
+    def fake_call(camera="backyard"):
+        calls.append(camera)
+        return True, "Called Leo inside."
+
+    monkeypatch.setattr(zeev, "call_dog_remote", fake_call)
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "call_dog"})
+    assert status == 200
+    assert data == {"ok": True, "message": "Called Leo inside."}
+    assert calls == ["backyard"]
+
+
+def test_call_dog_failure_passes_message_through(watch_server, zeev, monkeypatch):
+    monkeypatch.setattr(zeev, "call_dog_remote",
+                        lambda camera="backyard": (False, "I couldn't reach the dog caller right now."))
+    _ws, port = watch_server
+    status, data = _post(port, "/watch", {"cmd": "call_dog"})
+    assert status == 200
+    assert data["ok"] is False
+    assert "dog caller" in data["message"]
+
+
 def test_find_smokey_dispatches_sweep_for_both_leo_and_smokey(watch_server, zeev, monkeypatch):
     leo = {"name": "Leo", "kind": "dog", "cams": ["basement-cam"]}
     smokey = {"name": "Smokey", "kind": "cat", "cams": ["basement-cam"]}

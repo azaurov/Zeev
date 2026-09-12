@@ -617,6 +617,10 @@ _COMMANDS = {
     "pair_ble": _cmd_pair_ble,
     "world_news": _cmd_world_news,
     "find_smokey": _cmd_find_smokey,
+    # "Call Leo Inside" watch button: relays to dog_caller_server.py's /call
+    # (yard Bluetooth speaker) via the same helper device mode and web chat
+    # use. Already returns an (ok, message) pair and never raises.
+    "call_dog": lambda: zeev.call_dog_remote(),
 }
 _COMMANDS.update(
     (f"blessing_{entry['key']}", _blessing_cmd(entry)) for entry in _BLESSINGS

@@ -9637,8 +9637,11 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             have = f"The only cameras that exist are: {cam_names}"
         else:
             have = "The only cameras that exist are"
+        # "Wireless Outdoors 2 (formerly Secret)": users may still say
+        # "secret cam", and the LLM must not deny either name exists.
         _relay_labels = sorted(set(
-            k.replace("_", " ").title() for k in _RELAY_CAMERA_ALIASES.values()
+            relay_cam_label(k).title() + (" (formerly Secret)" if k == "secret" else "")
+            for k in _RELAY_CAMERA_ALIASES.values()
         ))
         have += (", " + ", ".join(_relay_labels) +
                  " (these take about 30s to check, through a relay, not "
@@ -10471,6 +10474,14 @@ _RELAY_CAMERA_ALIASES = {
     "frontyard": "front_yard",
     "secret cam": "secret",
     "secret camera": "secret",
+    # Renamed in the Wyze app to "wireless outdoors 2" on 2026-09-15; the
+    # key stays "secret" (it's dog_caller_server.py's API key too). Unlike
+    # bare "secret", the new name can't occur in ordinary speech, so it
+    # needs no cam/camera guard. Speech-to-text may spell out the digit.
+    "wireless outdoors 2": "secret",
+    "wireless outdoor 2": "secret",
+    "wireless outdoors two": "secret",
+    "wireless outdoor two": "secret",
     # HL_DB2 (Video Doorbell v2) -- no RTSP path either (see
     # docs/wyze-cameras.md), same relay route as the others.
     # "doorbell" alone is unambiguous enough to leave bare (unlike
@@ -10483,6 +10494,16 @@ _RELAY_CAMERA_ALIASES = {
     "front door cam": "doorbell",
     "front door camera": "doorbell",
 }
+
+# What to call a relay camera out loud when its key isn't its name.
+_RELAY_CAMERA_NAMES = {"secret": "wireless outdoors 2"}
+
+
+def relay_cam_label(key: str) -> str:
+    """Lowercase spoken name for a relay camera key ('front_yard' ->
+    'front yard', 'secret' -> 'wireless outdoors 2')."""
+    return _RELAY_CAMERA_NAMES.get(key, key.replace("_", " "))
+
 
 # PTZ-capable relay cameras -- only these support pan/tilt commands.
 # backyard/front_yard are static WVOD1 cameras, no D-pad in the Wyze app.
@@ -10642,7 +10663,7 @@ def call_dog_remote(camera="backyard"):
 def relay_camera_snapshot_remote(camera_key: str, pan_direction: str = None,
                                   pan_taps: int = 1, spotlight: bool = None):
     """Relay a photo request for a relay-only camera (Living Room,
-    Backyard, Front Yard, Secret -- see _RELAY_CAMERA_ALIASES) to
+    Backyard, Front Yard, Wireless Outdoors 2/secret -- see _RELAY_CAMERA_ALIASES) to
     dog_caller_server.py's /snapshot route. Slower than the RTSP path
     (navigates the real Wyze app on the headless Android VM on bosgame,
     ~10-30s) and can fail fast with a "busy" message if a call_dog() or
@@ -10885,7 +10906,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, relay_cams: list | N
                     else f"Checking the {nxt}.")
     if not found:
         for j, rcam in enumerate(relay_cams):
-            label = rcam.replace("_", " ")
+            label = relay_cam_label(rcam)
             if on_progress:
                 on_progress(f"Checking the {label}.")
             _ok, msg, img = relay_camera_snapshot_remote(rcam)
@@ -10921,7 +10942,7 @@ def sweep_for_subject(subj: dict, cams: list | None = None, relay_cams: list | N
                  f"I can see: {desc}")
     elif not frames:
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in relay_cams])
+                                 + [relay_cam_label(p) for p in relay_cams])
         reply = (f"I couldn't get a picture from the {where} just "
                  "now — it may be asleep or offline.")
     elif vision_failures >= frames:
@@ -10936,13 +10957,13 @@ def sweep_for_subject(subj: dict, cams: list | None = None, relay_cams: list | N
         # Maria a plain "I didn't see smokey/leo" as if the cameras had been
         # checked.
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in relay_cams])
+                                 + [relay_cam_label(p) for p in relay_cams])
         reply = (f"I got a picture from the {where}, but couldn't analyze "
                  f"it just now — the vision service is unavailable, so I "
                  f"can't say whether {name} is there.")
     else:
         where = " or the ".join([wyze_cam_label(c) for c in cams]
-                                 + [p.replace("_", " ") for p in relay_cams])
+                                 + [relay_cam_label(p) for p in relay_cams])
         # "I didn't see him", not "he isn't there": a small model missing a
         # dark cat on a dark couch is the wrong-city failure class again.
         reply = f"I didn't see {name} on the {where}."
@@ -12773,7 +12794,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # so naming one is enough on its own.
             _relay_cam = resolve_relay_camera(user_msg)
             if _relay_cam and DOG_CALLER_KEY:
-                _relay_cam_label = _relay_cam.replace("_", " ").title()
+                _relay_cam_label = relay_cam_label(_relay_cam).title()
                 _pan_dir = extract_pan_direction(user_msg) if _relay_cam in _PTZ_RELAY_CAMERAS else None
                 _spotlight = extract_spotlight_intent(user_msg) or None
                 _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""
@@ -12875,7 +12896,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         _cam_label = wyze_cam_label(_fetch_cam)
                         sse({"image": f"data:image/jpeg;base64,{_cam_image}"})
                 elif _fetch_cam and _fetch_kind == "relay" and DOG_CALLER_KEY:
-                    _fetch_label = _fetch_cam.replace("_", " ").title()
+                    _fetch_label = relay_cam_label(_fetch_cam).title()
                     sse({"info": f"[getting a fresh frame from {_fetch_label}...]"})
                     _ok, _msg, _img = relay_camera_snapshot_remote(_fetch_cam)
                     if _img:
@@ -13949,7 +13970,7 @@ def handle_transcript(ctx, transcript, _depth=0):
     # just announcing "here's a photo."
     _relay_cam = resolve_relay_camera(transcript)
     if _relay_cam and DOG_CALLER_KEY:
-        _relay_cam_label = _relay_cam.replace("_", " ").title()
+        _relay_cam_label = relay_cam_label(_relay_cam).title()
         _pan_dir = extract_pan_direction(transcript) if _relay_cam in _PTZ_RELAY_CAMERAS else None
         _spotlight = extract_spotlight_intent(transcript) or None
         _pan_msg = f" and panning {_pan_dir}" if _pan_dir else ""

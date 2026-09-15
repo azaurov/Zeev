@@ -375,6 +375,7 @@ House cameras reach the same vision path as the Pi's own eye. Full incident hist
 - `resolve_wyze_cam()` asks rather than guesses; a missed camera gate does NOT fail safe — the 8B has invented entire fabricated camera feeds before.
 - Never put a camera password in a URL or shell command (`%`/`@` characters break `printf`/URL parsing) — `WYZE_RTSP_USER`/`WYZE_RTSP_PASS` are plain values, percent-encoded by `wyze_stream_url()`.
 - `"secret"` alone is NOT a matched relay alias — it's an ordinary English word; the match requires `"secret cam"`/`"secret camera"` to avoid false-positive on unrelated speech.
+- The `secret` camera was renamed in the Wyze app to **"wireless outdoors 2"** (2026-09-15). The key stays `secret` (it is also dog_caller_server.py's API key); `"wireless outdoors 2"`/`"two"` are bare aliases, and `relay_cam_label()` gives the spoken name — use it instead of `key.replace("_", " ")`.
 
 ### Named subjects ("check on Smokey")
 

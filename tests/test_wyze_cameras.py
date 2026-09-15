@@ -476,6 +476,8 @@ def test_sweep_prompt_demands_brevity(zeev):
 @pytest.mark.parametrize("text,expected", [
     ("check the secret cam",          "secret"),
     ("look at the secret camera",     "secret"),
+    ("check wireless outdoors 2",     "secret"),
+    ("show me the wireless outdoor two cam", "secret"),
     ("what's on the living room cam", "living_room"),
     ("check the living room",         "living_room"),
     ("show me the livingroom camera", "living_room"),
@@ -570,6 +572,20 @@ def test_capability_guard_lists_secret_cam(zeev, monkeypatch):
     assert "Backyard" in p
     assert "Front Yard" in p
     assert "Living Room" in p
+
+
+def test_capability_guard_lists_renamed_secret_cam(zeev, monkeypatch):
+    """Renamed in the Wyze app to "wireless outdoors 2" (2026-09-15): the
+    guard must carry the new name, and asking by it must trigger the guard."""
+    monkeypatch.setattr(zeev, "WYZE_CAMERAS", ["smokeys-cam", "bedroom-cam"])
+    p = zeev._build_system_prompt("what's on wireless outdoors 2")
+    assert "## Cameras:" in p
+    assert "Wireless Outdoors 2 (formerly Secret)" in p
+
+
+def test_relay_cam_label(zeev):
+    assert zeev.relay_cam_label("secret") == "wireless outdoors 2"
+    assert zeev.relay_cam_label("front_yard") == "front yard"
 
 
 # --- pan direction extraction ----------------------------------------------

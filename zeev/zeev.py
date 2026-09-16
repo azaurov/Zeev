@@ -5379,6 +5379,50 @@ def _fact_key(f):
     return k
 
 
+# A fact matching any of these is a moment, not a standing truth. The
+# extraction prompt already forbids them (see extract_memory below), but that
+# guard is prompt-only and the models doing the extraction are small --
+# qwen2.5, then llama3.2:1b, then gpt-oss-20b -- and they do not reliably obey
+# it. Found live 2026-09-16: USER_FACTS held "The user is going back home
+# today in the car." (near-verbatim from Zeev's OWN reply, so it broke the
+# who-said-it guard too), "Alex is going home in the car", and "Alex is going
+# to drive safely" -- that last one extracted from Zeev's own "Drive safely,
+# Alex." Since facts are injected into every system prompt unconditionally,
+# this self-reinforced: Zeev signed off with "drive safely" -> that got stored
+# -> Zeev kept wishing Alex safe travels on turns with no journey in them,
+# from 2026-08-07 through 2026-09-16. Same self-reinforcing shape as the
+# detect_active_speaker "Maria" loop.
+#
+# Deliberately narrow: only phrasings that are unambiguously about a moment.
+# "Alex is interviewing with Google" and "Alex is actively job searching" are
+# temporary too, but they hold for months and Alex wants them recalled -- a
+# blanket "is <verb>ing" rule would eat those and most of the real list.
+_TRANSIENT_FACT_RE = re.compile(
+    r"\b(?:"
+    r"today|tonight|tomorrow|yesterday|right now|currently|at the moment|"
+    r"this (?:morning|afternoon|evening|week|weekend|month)|"
+    r"last night|earlier today|just (?:now|finished|got)|"
+    r"is (?:going|heading|driving|flying|travel?ling) \b|"
+    r"is going to\b|is about to\b|is (?:searching|looking) for\b|"
+    r"will be \w+ing\b"
+    r")",
+    re.I,
+)
+
+
+def _is_transient_fact(f):
+    """True if `f` describes a moment rather than a standing truth about Alex.
+
+    Pure and module-level so it can be tested without an LLM round trip.
+    `facts` has no timestamp column on purpose (most stored facts -- has a
+    cat, speaks Hebrew, lives in Canton -- are genuinely permanent and dating
+    them all would just add prompt noise), so anything transient that lands
+    here reads as permanently true forever after. Rejecting at write time is
+    the only place this can be caught.
+    """
+    return bool(_TRANSIENT_FACT_RE.search(f))
+
+
 def extract_memory(session_msgs):
     """Extract new user facts from session_msgs via the active LLM. Updates USER_FACTS in-place."""
     global USER_FACTS
@@ -5432,6 +5476,9 @@ def extract_memory(session_msgs):
             existing_keys = {_fact_key(m) for m in merged}
             for f in new_facts:
                 if not isinstance(f, str) or not f.strip():
+                    continue
+                if _is_transient_fact(f):
+                    print(f"[memory] dropped transient fact: {f.strip()}", flush=True)
                     continue
                 key = _fact_key(f)
                 if key not in existing_keys:

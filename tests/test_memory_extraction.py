@@ -113,3 +113,75 @@ def test_extract_memory_still_accepts_genuinely_new_facts(zeev, monkeypatch):
         ])
 
     assert result == ["Alex enjoys jazz music.", "Alex has a dog named Leo"]
+
+
+# ---------------------------------------------------------------------------
+# Transient-fact filter (2026-09-16)
+#
+# The two guards above are prompt-only, and the small models doing the
+# extraction (qwen2.5 -> llama3.2:1b -> gpt-oss-20b) don't reliably obey
+# either. Found live: `facts` held "The user is going back home today in the
+# car." -- near-verbatim from Zeev's OWN reply, so it broke the who-said-it
+# guard AND the no-temporary-states guard at once -- plus "Alex is going to
+# drive safely", extracted from Zeev's own sign-off. Because facts are
+# injected into every system prompt, this self-reinforced into a six-week
+# verbal tic: Zeev wished Alex safe travels on turns with no journey in them.
+# _is_transient_fact is the code-level backstop the prompt guard needed.
+# ---------------------------------------------------------------------------
+
+def test_transient_filter_rejects_the_real_incident_facts(zeev):
+    """The three rows actually found in the live facts table on 2026-09-16."""
+    for f in ("The user is going back home today in the car.",
+              "Alex is going to drive safely",
+              "Alex is going home in the car"):
+        assert zeev._is_transient_fact(f), f
+
+
+def test_transient_filter_rejects_other_moment_phrasings(zeev):
+    """Other same-class junk found in the live table, plus the historical
+    "nieces will be flying to London" fabrication CLAUDE.md records."""
+    for f in ("Alex is looking for Shrimp Sauce on Amazon",
+              "Alex is searching for something on Amazon",
+              "Alex is currently near Boston, Massachusetts",
+              "Alex's nieces will be flying to London",
+              "Alex is driving to Boston tonight",
+              "Alex just finished a job interview",
+              "Alex is heading out this weekend"):
+        assert zeev._is_transient_fact(f), f
+
+
+def test_transient_filter_keeps_durable_facts(zeev):
+    """The filter is deliberately narrow. A blanket "is <verb>ing" rule would
+    eat most of the real list -- these are all genuine rows from the live
+    table and every one must survive."""
+    for f in ("Alex is interviewing with Google for a Technical Account "
+              "Manager (TAM) role in Cloud Consulting",
+              "Alex is actively job searching for production support, "
+              "solutions engineering, or technical account management roles "
+              "in Greater Boston",
+              "Alex is learning to play guitar and enjoys jazz in the evenings",
+              "Alex is building a Raspberry Pi AI companion called Zeev",
+              "Alex is married to Maria",
+              "Alex has a cat named Smokey",
+              "Alex speaks Hebrew fluently",
+              "Alex lives in Canton, Massachusetts (near Boston)"):
+        assert not zeev._is_transient_fact(f), f
+
+
+def test_extract_memory_drops_transient_fact_end_to_end(zeev, monkeypatch):
+    """The filter must actually be wired into the merge loop, not just exist.
+    A durable fact in the same response still gets through."""
+    monkeypatch.setattr(zeev, "USER_FACTS", ["Alex enjoys jazz music."])
+    saved = {}
+    monkeypatch.setattr(zeev, "save_memory", lambda facts: saved.update(f=list(facts)))
+
+    payload = json.dumps({"facts": ["Alex is going to drive safely",
+                                    "Alex has a dog named Leo"]})
+    with patch.object(zeev, "_feiergente_complete", return_value=(payload, None)):
+        result = zeev.extract_memory([
+            {"role": "user", "content": "bye"},
+            {"role": "assistant", "content": "Drive safely, Alex."},
+        ])
+
+    assert result == ["Alex enjoys jazz music.", "Alex has a dog named Leo"]
+    assert "Alex is going to drive safely" not in saved["f"]

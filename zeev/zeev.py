@@ -2877,6 +2877,47 @@ def _is_whisper_hallucination(text):
     return re.sub(r"[^\w\s]", "", (text or "").lower()).strip() in _WHISPER_HALLUCINATIONS
 
 
+def _looks_like_noise(text):
+    """True if a transcript has no pronounceable word in it -- Whisper's
+    rendering of a cough, a TV consonant burst, a chair scrape.
+
+    Why this is so narrow. A wake-word false positive costs more than one
+    wasted reply: it plants a user/assistant pair in `messages`, which then
+    feeds RAG and extract_memory (see _is_transient_fact -- that is exactly
+    how "Alex is going to drive safely" got stored). So dropping a false
+    positive before handle_transcript is worth doing. But the obvious gate --
+    reject short transcripts -- is unbuildable here. Checked against every
+    user message in the live DB on 2026-09-16: 167 distinct utterances of
+    three words or fewer, including "Bye.", "Yes.", "Hello", "Okay.", "No.",
+    "peace", "leave", "continue", "test", "French lady.", and a bare "2" (a
+    /bt pair selection). A word-count gate eats all of those; an allowlist
+    wide enough to spare them is a second intent router, not a gate.
+
+    What is left is the one signal with no false-positive risk: a transcript
+    containing no vowel-bearing word at all. Validated against all 1287 user
+    messages in the live DB -- the only rejections were three bare ".".
+    This catches the "Ct" class and nothing else; a false positive that
+    transcribes as a grammatical sentence ("Peeces off and puts them right
+    back in the ground.", a real one, 2026-09-14) is not reachable by any
+    text heuristic and is not attempted here.
+
+    Non-Latin script always passes: Hebrew writes no vowels at all, and the
+    same reasoning covers the Cyrillic and Arabic turns already in the DB.
+    A digit always passes -- "2" is a real command, not noise.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False                      # empty is the caller's own case
+    if re.search(r"\d", t):
+        return False
+    letters = re.findall(r"[^\W\d_]", t)
+    if not letters:
+        return True                       # punctuation only, e.g. "."
+    if any(ord(ch) > 0x24F for ch in letters):
+        return False                      # non-Latin script -- can't judge
+    return not re.search(r"[aeiouy]", t, re.I)
+
+
 # Phone-context Whisper prompt — biases transcription toward call vocabulary,
 # suppresses hallucinations on silence/ring tone.
 _FOLLOWUP_WHISPER_PROMPT = (
@@ -15938,6 +15979,13 @@ def run_device_mode():
             return ""
         text = (stt(wav, prompt=_FOLLOWUP_WHISPER_PROMPT) or "").strip()
         print(f"[followup] heard: {text!r}", flush=True)
+        # _has_speech above only proves a voice was present, not that Whisper
+        # made a word of it -- a cough into an open follow-up mic clears the
+        # speech check and still comes back as "Ct". Same gate as the wake
+        # path; "" is already this function's no-answer return.
+        if _looks_like_noise(text):
+            print(f"[followup] noise gate: dropped {text!r}", flush=True)
+            return ""
         return text
 
     # Everything the module-level handle_transcript() used to capture from this
@@ -15993,6 +16041,20 @@ def run_device_mode():
                 _set_face("error", "Didn't catch that")
                 board.set_rgb(*_LED_ERROR)
                 time.sleep(2)
+                _go_ready() if _busy.is_set() else _go_idle()
+                return
+
+            # A wake-word false positive that reached STT. Go straight back to
+            # idle: no reply, and -- the point of the gate -- no `messages`
+            # row for RAG and extract_memory to feed on later. Deliberately
+            # silent rather than showing "Didn't catch that": this fires on
+            # room noise at 2am, and an error face plus LED is itself the
+            # disturbance being removed. Logged under its own tag so that
+            # `grep 'noise gate'` still counts false positives in a weekly
+            # log audit -- a gate that swallows them invisibly would make the
+            # next audit under-report.
+            if _looks_like_noise(transcript):
+                print(f"[stt] noise gate: dropped {transcript!r}", flush=True)
                 _go_ready() if _busy.is_set() else _go_idle()
                 return
 

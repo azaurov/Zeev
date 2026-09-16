@@ -328,7 +328,7 @@ OWW_SETTLE     = float(os.environ.get("OWW_SETTLE",    "1.5"))
 # every 80ms frame. Set OWW_ENERGY_GATE=0 to score every frame.
 OWW_ENERGY_GATE  = os.environ.get("OWW_ENERGY_GATE", "1").lower() not in ("0", "false", "no")
 OWW_ENERGY_MULT  = float(os.environ.get("OWW_ENERGY_MULT", "1.8"))   # × rolling median
-# How often the wake listener prints its energy-gate summary, in 80ms frames.
+# How often the wake listener prints its energy-gate summary, in seconds.
 # This was every 750 frames (60s), which made it ~90% of everything zeev-device
 # ever logged -- measured 2026-09-16: 2169 of ~2400 journal lines over two days.
 # The journal is capped by SystemMaxUse (200M) rather than MaxRetentionSec
@@ -339,7 +339,15 @@ OWW_ENERGY_MULT  = float(os.environ.get("OWW_ENERGY_MULT", "1.8"))   # × rollin
 # line was costing exactly the data it sits next to. The figure it prints is a
 # cumulative ratio that moves very slowly; half-hourly is plenty to spot a
 # mis-set OWW_ENERGY_MULT, which is all it is for.
-OWW_GATE_LOG_FRAMES = int(os.environ.get("OWW_GATE_LOG_FRAMES", "22500"))  # ≈30 min
+#
+# Seconds rather than a frame-count modulo: the print sits on one branch of the
+# gate's if/elif/else (the below-threshold frame), so `seen % N == 0` was
+# skippable -- if that exact frame landed during speech or a post-onset hold,
+# the line was missed entirely and the next chance came a full interval later.
+# At the old 60s spacing a miss cost a minute and nobody noticed; at 30 minutes
+# it would cost an hour. A timestamp check can't be skipped by a frame landing
+# on the wrong branch, and it is also what the interval actually means.
+OWW_GATE_LOG_SEC = float(os.environ.get("OWW_GATE_LOG_SEC", "1800"))  # 30 min
 OWW_ENERGY_MIN   = float(os.environ.get("OWW_ENERGY_MIN",  "500"))   # absolute floor
 OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of inference
 # The pre-roll must refill the model's window, not just catch the attack: the
@@ -16185,6 +16193,7 @@ def run_device_mode():
         hold = 0                          # frames of inference still owed
         gate = OWW_ENERGY_MIN
         seen = scored = 0                 # for the periodic skip-ratio log
+        last_gate_log = time.time()       # first summary one interval from now
 
         def _release():
             nonlocal proc
@@ -16255,6 +16264,14 @@ def run_device_mode():
                     # said -- once a turn starts the mic is already carrying
                     # speech, so the recorder can never measure this itself.
                     _WAKE_NOISE_MED[0] = med
+                # Above the branching below on purpose: every frame reaches
+                # this line, so the summary can't be skipped by one landing
+                # mid-speech or mid-hold.
+                if time.time() - last_gate_log >= OWW_GATE_LOG_SEC:
+                    last_gate_log = time.time()
+                    print(f"[wake] energy gate: scored {scored}/{seen} frames "
+                          f"({100.0 * scored / max(seen, 1):.0f}%), gate {gate:.0f}",
+                          flush=True)
                 if hold > 0:
                     hold -= 1
                 elif rms >= gate:
@@ -16270,10 +16287,6 @@ def run_device_mode():
                     hold = OWW_HOLD_FRAMES
                 else:
                     preroll.append(frame)
-                    if seen % OWW_GATE_LOG_FRAMES == 0:
-                        print(f"[wake] energy gate: scored {scored}/{seen} frames "
-                              f"({100.0 * scored / max(seen, 1):.0f}%), gate {gate:.0f}",
-                              flush=True)
                     continue
                 preroll.append(frame)
 

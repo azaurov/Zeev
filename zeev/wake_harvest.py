@@ -6,7 +6,7 @@ wake_harvest.py — active learning from wake-word false-positive logs
 Parses journalctl for openWakeWord triggers and the transcript each one
 produced, walks a reviewer through the ones that don't already have a saved
 verdict, and saves the ones marked false as hard negatives -- a JSON array
-of strings droppable straight into the `custom_negative_strings` list of the
+of strings droppable straight into the `custom_negative_phrases` list of the
 training notebook (docs/wake-word-training.md).
 
 Usage:
@@ -186,7 +186,7 @@ def main():
     if new_negatives:
         save_negatives(out_path, existing + new_negatives)
         print(f"\nSaved {len(new_negatives)} new hard negative(s) to {args.out}.")
-        print("Drop these into `custom_negative_strings` in the openWakeWord "
+        print("Drop these into `custom_negative_phrases` in the openWakeWord "
               "training notebook -- see docs/wake-word-training.md.")
     else:
         print("\nNo new hard negatives harvested.")

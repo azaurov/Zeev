@@ -248,6 +248,47 @@ Measured across the two runs:
 **Read the phonemizer line before letting a run finish.** It is the only place
 the notebook tells you what it actually thinks the word sounds like.
 
+### Hard negatives — the key is `custom_negative_phrases`, and they are text
+
+`zeev/wake_harvest.py` exports a JSON array of real false-wake transcripts and
+tells you to drop them into the notebook. This is where they go — cell 10, in
+the same `config = {…}` dict as the sample counts above:
+
+```python
+    'custom_negative_phrases': [],   # ← your harvested strings here
+```
+
+Two things about it that are easy to get wrong:
+
+- **The key is `custom_negative_phrases`.** Until 2026-09-16 `wake_harvest.py`,
+  `docs/research-directions.md` and `docs/whisplay-device-mode.md` all called it
+  `custom_negative_strings`, which does not exist. The list must exist as a
+  mutable list (upstream does `adversarial_texts = config[...]` then `.extend(...)`,
+  so a missing key is a `KeyError`), but `[]` is fine — auto-generated
+  adversarial phonemes are still appended either way.
+- **They are phrases, not recordings.** The notebook TTS-synthesizes them in
+  cell 11 along with everything else. There is **no** path for supplying real
+  recorded audio as a negative, so "save the clip that fired it" is not an
+  option here.
+
+**Set expectations low for harvested negatives against this device's false
+wakes.** `_wake_dispatch` beeps and then starts a *fresh* `_record_utterance`;
+the detector keeps a preroll ring buffer for its own scoring, but none of that
+audio is retained. So the transcript paired with a trigger is whatever was said
+**after** it, not what caused it — visible in the log, where genuine wakes
+transcribe with no "hey zeev" in them at all. A false wake logged as
+`'Lieutenant.'` was not fired by the word "Lieutenant"; something a second
+earlier fired it. Feeding that string in trains the model that clean Piper TTS
+saying "Lieutenant." is a negative, which is both unrelated to the real acoustic
+event and redundant with the bulk ACAV/FMA speech negatives already mixed in.
+
+Harvested negatives are worth including when a false wake is a genuine
+near-homophone the *user* said (those do appear in the transcript, because the
+utterance that follows the wake phrase is the same utterance). They are close to
+useless for the TV/ambient-noise class. Capturing the detector's preroll frames
+on trigger would give the real triggering audio, but there is nowhere to put
+audio in this notebook, so that only becomes useful with a different pipeline.
+
 ### Validation metrics are measured on TTS voices, not yours
 
 `recall` and `fp/hr` come from synthetic speech. They rank models usefully but

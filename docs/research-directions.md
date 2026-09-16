@@ -145,7 +145,7 @@ Implemented (`zeev/wake_harvest.py`): an interactive CLI that parses
 `journalctl -u zeev-device` for openWakeWord triggers and the transcript
 each one produced, walks a reviewer through the ones with no saved verdict
 yet, and exports the ones marked false as a JSON array of strings droppable
-straight into `custom_negative_strings` in the training notebook.
+straight into `custom_negative_phrases` in the training notebook.
 
 - **Pairing a trigger with its transcript relies on a real property of the
   log, not a guess**: `_wake_dispatch` prints nothing of its own between a

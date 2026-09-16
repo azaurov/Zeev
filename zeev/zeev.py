@@ -328,6 +328,18 @@ OWW_SETTLE     = float(os.environ.get("OWW_SETTLE",    "1.5"))
 # every 80ms frame. Set OWW_ENERGY_GATE=0 to score every frame.
 OWW_ENERGY_GATE  = os.environ.get("OWW_ENERGY_GATE", "1").lower() not in ("0", "false", "no")
 OWW_ENERGY_MULT  = float(os.environ.get("OWW_ENERGY_MULT", "1.8"))   # × rolling median
+# How often the wake listener prints its energy-gate summary, in 80ms frames.
+# This was every 750 frames (60s), which made it ~90% of everything zeev-device
+# ever logged -- measured 2026-09-16: 2169 of ~2400 journal lines over two days.
+# The journal is capped by SystemMaxUse (200M) rather than MaxRetentionSec
+# (30day), so that one line was evicting real history: `journalctl --since
+# '30 days ago'` returned the same 13 wake triggers as '7 days ago', because
+# nothing older than ~8 days had survived. Wake-trigger history is what
+# zeev/wake_harvest.py mines and what any false-positive audit reads, so the
+# line was costing exactly the data it sits next to. The figure it prints is a
+# cumulative ratio that moves very slowly; half-hourly is plenty to spot a
+# mis-set OWW_ENERGY_MULT, which is all it is for.
+OWW_GATE_LOG_FRAMES = int(os.environ.get("OWW_GATE_LOG_FRAMES", "22500"))  # ≈30 min
 OWW_ENERGY_MIN   = float(os.environ.get("OWW_ENERGY_MIN",  "500"))   # absolute floor
 OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of inference
 # The pre-roll must refill the model's window, not just catch the attack: the
@@ -16258,7 +16270,7 @@ def run_device_mode():
                     hold = OWW_HOLD_FRAMES
                 else:
                     preroll.append(frame)
-                    if seen % 750 == 0:
+                    if seen % OWW_GATE_LOG_FRAMES == 0:
                         print(f"[wake] energy gate: scored {scored}/{seen} frames "
                               f"({100.0 * scored / max(seen, 1):.0f}%), gate {gate:.0f}",
                               flush=True)

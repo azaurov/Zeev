@@ -3,7 +3,7 @@
 parse_wake_triggers, review_triggers, load_negatives and save_negatives are
 the pure/injectable logic behind zeev/wake_harvest.py, the CLI that turns
 journalctl into hard negatives for the next openWakeWord retraining round
-(docs/wake-word-training.md's custom_negative_strings). All testable here
+(docs/wake-word-training.md's custom_negative_phrases). All testable here
 without real journalctl or stdin.
 """
 import sys

@@ -167,3 +167,58 @@ def test_deploy_script_runs_the_suite_before_shipping():
         "runs is decoration -- this is the line that makes every other test in "
         "this directory load-bearing."
     )
+
+
+# --------------------------------------------------------------------------
+# 2026-09-17/18 -- Groq retired qwen/qwen3.6-27b, MODELS["2"] kept naming it.
+#
+# Every call on the "smart" tier (Torah, tool calls, search) returned
+# `404 ... does not exist`, visible only as a line in the Pi's journal, while the
+# rest of the app carried on. The ID was hardcoded in FIVE places (MODELS, the
+# short-label map, a litellm router block, the web UI dropdown, and
+# quantum_daily.py) and the migration only found the litellm one by grepping.
+#
+# This pins that every Groq model ID written into the source is one MODELS knows
+# about, so a future rename cannot leave a stale copy behind. It cannot tell you
+# a model still EXISTS on Groq -- that needs the network; run
+# ~/homelab-ops/scripts/llm_probe.py for that.
+# --------------------------------------------------------------------------
+import ast
+import re
+
+_GROQ_ID_RE = re.compile(r"^(?:groq/)?((?:qwen/qwen[\d.]+-[\w-]+)|(?:openai/gpt-oss-[\w-]+))$")
+
+
+def _string_constants(path):
+    tree = ast.parse(Path(path).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+
+
+def test_every_hardcoded_groq_model_id_is_one_MODELS_knows(zeev):
+    known = {mid for mid, _ in zeev.MODELS.values()}
+    stale = []
+    for path in (ZEEV_PY, REPO / "zeev" / "quantum_daily.py"):
+        for s in _string_constants(path):
+            m = _GROQ_ID_RE.match(s.strip())
+            if m and m.group(1) not in known:
+                stale.append((path.name, s))
+    assert not stale, (
+        f"Groq model id(s) hardcoded but absent from MODELS: {stale}. Groq retires "
+        "models without much warning (qwen3.6-27b, 2026-09-17); every copy of an "
+        "id must move together."
+    )
+
+
+def test_web_dropdown_offers_only_models_that_exist_in_MODELS(zeev):
+    known = {mid for mid, _ in zeev.MODELS.values()} | {"auto"}
+    offered = set(re.findall(r'<option value="([^"]+)"', ZEEV_PY.read_text()))
+    groq_like = {o for o in offered if "/" in o or o == "auto"}
+    assert groq_like <= known, f"web UI offers a model MODELS does not know: {groq_like - known}"
+
+
+def test_model_short_labels_cover_every_model(zeev):
+    """_MODEL_SHORT keys a log/label lookup by model id; a missing entry is silent."""
+    for mid, _ in zeev.MODELS.values():
+        assert mid in zeev._MODEL_SHORT, f"{mid} has no short label"

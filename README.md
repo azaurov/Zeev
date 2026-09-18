@@ -86,7 +86,7 @@ For driving the web server headlessly (e.g. from an agent, or when port 5000 is 
 |-----|-------|----------|
 | Auto | *(routed per message)* | Default |
 | 1 | `openai/gpt-oss-20b` | Fast — casual chat |
-| 2 | `qwen/qwen3.6-27b` | Smart — code, writing |
+| 2 | `qwen/qwen3.8-27b` | Smart — code, writing |
 | 3 | `openai/gpt-oss-120b` | Reasoning — math, logic |
 
 Use `/model` in the terminal or the model selector in the web UI to lock to a specific model. `/model 0` returns to auto-routing.

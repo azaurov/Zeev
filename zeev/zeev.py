@@ -1485,9 +1485,18 @@ _SMART_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Slot 2 was qwen/qwen3.6-27b until Groq retired it: by 2026-09-17 every call
+# returned `404 ... does not exist` (seen live in the Pi journal). qwen3.8-27b is
+# the replacement and measured cleaner on Groq 2026-09-18: by default it no longer
+# spends tokens on inlined reasoning (4 tokens for a one-line answer), it still
+# accepts reasoning_effort="none" -- so the suppression wired in below stays valid
+# -- and additionally accepts "low", keeping any reasoning in a separate field
+# rather than in `content`. Streaming, tool calls and the 8000 TPM cap are as
+# before. The many comments below that describe qwen3.6-27b's inlined <think>
+# block are historical and deliberately left as written.
 MODELS = {
     "1": ("openai/gpt-oss-20b",             "GPT-OSS 20B   — fast"),
-    "2": ("qwen/qwen3.6-27b",               "Qwen3.6 27B   — smart"),
+    "2": ("qwen/qwen3.8-27b",               "Qwen3.8 27B   — smart"),
     "3": ("openai/gpt-oss-120b",             "GPT-OSS 120B  — reasoning"),
 }
 
@@ -1573,7 +1582,7 @@ def _dream_quantum_llm(msgs, max_tokens=300, json_mode=False):
 # migration recommendations (console.groq.com/docs/deprecations).
 _MODEL_SHORT = {
     "openai/gpt-oss-20b":           "GPT-OSS-20B",
-    "qwen/qwen3.6-27b":             "Qwen27B",
+    "qwen/qwen3.8-27b":             "Qwen27B",
     "openai/gpt-oss-120b":          "GPT-OSS",
 }
 PRIOR_TURNS  = 15
@@ -8813,7 +8822,7 @@ def _get_litellm_router():
         smart_models.append({
             "model_name": "zeev-routed-smart",
             "litellm_params": {
-                "model": "groq/qwen/qwen3.6-27b",
+                "model": "groq/qwen/qwen3.8-27b",
                 "api_key": GROQ_API_KEY,
             }
         })
@@ -11576,7 +11585,7 @@ footer {
     <select id="modelSel">
       <option value="auto" selected>Auto</option>
       <option value="openai/gpt-oss-20b">GPT-OSS 20B Fast</option>
-      <option value="qwen/qwen3.6-27b">Qwen3.6 27B Smart</option>
+      <option value="qwen/qwen3.8-27b">Qwen3.8 27B Smart</option>
       <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
     </select>
   </div>

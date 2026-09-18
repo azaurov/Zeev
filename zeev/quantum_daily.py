@@ -41,7 +41,7 @@ import requests
 from quantum import quantum_reason
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-MODEL      = "qwen/qwen3.6-27b"
+MODEL      = "qwen/qwen3.8-27b"
 JSON_MODEL = "openai/gpt-oss-20b"
 
 # qwen3.6-27b inlines its <think>...</think> reasoning into plain-text

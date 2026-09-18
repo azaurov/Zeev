@@ -359,6 +359,85 @@ OWW_HOLD_FRAMES  = int(os.environ.get("OWW_HOLD_FRAMES",  "25"))     # ~2s of in
 # window by itself (5/5 throughout).
 OWW_PREROLL      = int(os.environ.get("OWW_PREROLL",      "20"))     # ~1.6s replayed
 
+# --- Wake-trigger audio capture -------------------------------------------
+# Saves the audio that CAUSED each wake trigger, plus the scores behind it.
+#
+# Why this exists: every attempt so far to explain the false-wake rate has had
+# to guess at what the mic actually heard, because nothing kept it.
+# wake_harvest.py can only pair a journal line with the transcript that came
+# AFTER the trigger, which is the wrong audio. Replaying downloaded broadcast
+# speech through the models was measured on 2026-09-18 across 42 minutes /
+# 31,498 frames and peaked at 0.0426 against a 0.84 threshold -- 20x below
+# firing -- so ordinary speech cannot reproduce these triggers at all and no
+# offline corpus substitutes for the room itself.
+#
+# Every trigger is captured, genuine and false alike: a corpus of false wakes
+# alone can only prove a change makes the device deafer, never that it still
+# answers Alex.
+OWW_CAPTURE      = os.environ.get("OWW_CAPTURE", "1") not in ("0", "false", "no")
+OWW_CAPTURE_DIR  = Path(os.environ.get("OWW_CAPTURE_DIR", str(BASE_DIR / "data" / "wake_captures")))
+# Seconds of audio kept before each trigger. The phrase itself is ~1s and the
+# pre-roll replay covers ~1.6s, so 3s holds the whole phrase plus the room
+# ahead of it -- which is the part that tells a TV from a person.
+OWW_CAPTURE_SECS = float(os.environ.get("OWW_CAPTURE_SECS", "3.0"))
+# Cap on retained clips. ~96KB per 3s clip; 800 is ~77MB, and at the measured
+# ~1.4 false wakes/hour plus real use that is roughly a fortnight.
+OWW_CAPTURE_MAX  = int(os.environ.get("OWW_CAPTURE_MAX", "800"))
+
+
+def wake_capture_save(frames, fired, score, scores, gate, capture_dir=None,
+                      max_files=None):
+    """Write one trigger's audio + metadata. Returns the WAV path, or None.
+
+    `frames` is raw 16kHz mono S16LE bytes in order, oldest first -- the ring
+    buffer as it stood when the trigger fired, INCLUDING frames the energy gate
+    skipped, because what the room was doing before the gate opened is half the
+    evidence.
+
+    Never raises: this runs inside the wake loop, and a full disk or a bad path
+    must not cost Alex his wake word. Callers still wrap it, belt and braces.
+    """
+    import json as _json
+    import wave as _wave
+
+    d = Path(capture_dir) if capture_dir else OWW_CAPTURE_DIR
+    cap = max_files if max_files is not None else OWW_CAPTURE_MAX
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    wav_path = d / f"{stamp}-{fired or 'unknown'}.wav"
+    with _wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"".join(frames))
+    meta = {
+        "ts": time.time(),
+        "iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "fired": fired,
+        "score": round(float(score), 4),
+        # Every model's score at the firing frame, not just the winner: if both
+        # models peak on the same audio they did not learn separable phrases,
+        # which is a live open question in docs/wake-word-training.md.
+        "scores": {k: round(float(v), 4) for k, v in (scores or {}).items()},
+        "thresholds": {k: oww_threshold(k) for k in (scores or {})},
+        "energy_gate": bool(OWW_ENERGY_GATE),
+        "gate_level": round(float(gate), 1),
+        "seconds": round(len(frames) * 1280 / 16000.0, 2),
+        # Filled in later by hand or by wake_harvest.py. Unlabelled is the
+        # honest default -- guessing here would poison the very corpus this
+        # exists to build.
+        "label": None,
+    }
+    wav_path.with_suffix(".json").write_text(_json.dumps(meta, indent=2))
+    # Prune oldest first, counting pairs so a clip and its metadata never
+    # outlive each other.
+    clips = sorted(d.glob("*.wav"), key=lambda f: f.stat().st_mtime)
+    for old in clips[:-cap] if cap > 0 else []:
+        old.unlink(missing_ok=True)
+        old.with_suffix(".json").unlink(missing_ok=True)
+    return wav_path
+
+
 # Rolling median RMS of the room, published by _wake_listener and consumed by
 # _record_utterance as the VAD silence threshold. [0.0] means "not measured
 # yet" and the recorder falls back to the daemon default.
@@ -16190,6 +16269,11 @@ def run_device_mode():
         # contiguous run that covers the attack of the phrase.
         levels = deque(maxlen=80)         # ~6s of frame RMS, for the noise floor
         preroll = deque(maxlen=max(1, OWW_PREROLL))
+        # Raw bytes of the last OWW_CAPTURE_SECS, for wake_capture_save(). Kept
+        # separate from `preroll`: that one holds decoded frames and is emptied
+        # into the model on speech onset, while this must survive untouched and
+        # include the frames the gate skipped.
+        capture = deque(maxlen=max(1, int(OWW_CAPTURE_SECS * 16000 / frame_samples)))
         hold = 0                          # frames of inference still owed
         gate = OWW_ENERGY_MIN
         seen = scored = 0                 # for the periodic skip-ratio log
@@ -16252,6 +16336,10 @@ def run_device_mode():
 
             frame = np.frombuffer(data, dtype=np.int16)
             seen += 1
+            if OWW_CAPTURE:
+                # Before the gate, so a clip shows what preceded the trigger
+                # even across frames that were never scored.
+                capture.append(data)
 
             if OWW_ENERGY_GATE:
                 rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
@@ -16308,6 +16396,15 @@ def run_device_mode():
             print(f"[wake] {best_name or label} trigger (score {score:.2f})"
                   + (f" -> voice {voice}" if voice else ""), flush=True)
             _WAKE_VOICE[0] = voice or None
+            if OWW_CAPTURE:
+                # Before _release()/dispatch so the buffer is exactly what fired
+                # it. Failure here is logged and swallowed: instrumentation must
+                # never cost a wake.
+                try:
+                    _p = wake_capture_save(list(capture), best_name, score, scores, gate)
+                    print(f"[wake] captured {_p.name}", flush=True)
+                except Exception as e:
+                    print(f"[wake] capture failed: {e}", flush=True)
             _release()
             try:
                 model.reset()      # don't let this detection re-fire on itself

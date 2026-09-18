@@ -18,7 +18,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.command' | grep -Eq '(cat|less|head|tail|echo).*\\.env' && { echo 'BLOCKED: refusing to dump .env — print key NAMES only' >&2; exit 2; }; exit 0"
+            "command": "jq -r '.tool_input.command' | grep -Eq '(cat|less|head|tail|echo).*\\.env' && { echo 'BLOCKED: refusing to dump .env \u2014 print key NAMES only' >&2; exit 2; }; exit 0"
+          },
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command'); case \"$cmd\" in *\"git commit\"*) add=$( { git diff --cached -U0 -- . ':(exclude).claude/settings*.json'; git diff -U0 -- . ':(exclude).claude/settings*.json'; } | grep '^+' | grep -v '^+++' ); hit=$(printf '%s\\n' \"$add\" | grep -nE '(^|[^0-9.-])(4[0-9]\\.[0-9]{4,}|-7[0-9]\\.[0-9]{4,})|_API_KEY=[^ ]|gsk_[A-Za-z0-9]{8,}|AIza[0-9A-Za-z_-]{10,}|sk-[A-Za-z0-9]{16,}'); [ -n \"$hit\" ] && { echo \"BLOCKED: possible PII/secret in the diff being committed:\" >&2; printf '%s\\n' \"$hit\" | head -5 >&2; echo \"(coords, *_API_KEY=, gsk_/AIza/sk- tokens). Confirm with the user before committing; tests/test_gps_vicinity.py holds known fixture coords.\" >&2; exit 2; };; esac; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "st=0; for f in $CLAUDE_FILE_PATHS; do case \"$f\" in *.py) python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' \"$f\" || { echo \"SYNTAX ERROR in $f \u2014 fix before continuing\" >&2; st=2; };; esac; done; exit $st"
           }
         ]
       }

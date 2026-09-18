@@ -10,8 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Infrastructure Map
 
-- feiergente01 = GPU host (all LLM/inference workloads run here, NOT bosgame)
-- bosgame = Ubuntu server: nginx, admin panel, hotspot (do not modify hotspot without explicit request)
+- feiergente01 = the only GPU host (Iris Xe iGPU): second Kokoro TTS instance (`REMOTE_PIPER_URL2`) and its own Ollama (`qwen2.5:7b`), fully iGPU-offloaded. The news-digest/weekly-reflection LLM path runs here, not on bosgame.
+- bosgame = Ubuntu server, CPU-only inference: Ollama (`llama3.1:8b`, `llama3.2:1b`, `nomic-embed-text` embeddings), primary Kokoro/Piper TTS, plus nginx, admin panel and hotspot (do not modify hotspot without explicit request)
 - Raspberry Pi = assistant/voice/dog-caller, M400B Bluetooth speaker
 - c11 = Android device (Termux; no standard sshd), used for Google Voice calling
 - Midnight reboot on the Pi is INTENTIONAL — do not propose removing it.

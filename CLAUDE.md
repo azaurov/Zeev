@@ -318,6 +318,18 @@ Never commit data files (e.g. `adult_jokes.json`, imported corpora) unless asked
 
 When producing a list, audit result, or report for me to read (flagged jokes, test failures, findings), print it directly in your chat message. Do not leave results only in Bash stdout or a background job — I can't reliably see that output.
 
+## Regression Harness
+
+**Every bug you fix gets a regression test before the task is done.** Not "if it's easy to test" — before you call it fixed. `tests/test_regression_history.py` and `scripts/smoke/` exist because this project's expensive bugs have all been *silent*: nothing raised, nothing logged, and the system reported success while doing nothing. A test that only asserts "no exception" would have passed through every one of them.
+
+- **Assert the thing actually happened.** Frames were emitted, the timer fired within tolerance, the call reached the ringing state, the asset's checksum is unchanged, the reply is non-empty. "Returned without raising" is not a passing condition for this class of bug.
+- **A skip is not a pass.** Smoke scripts exit 0/1/**77** and `make smoke` reports SKIP separately. While writing them, `systemctl … | grep -q` under `set -o pipefail` returned 141 (grep exits early → SIGPIPE), so the timer check silently skipped on the one host that owns those units — the exact failure class the directory exists to catch. Capture output first, match second.
+- **Structural tests are legitimate** where behaviour can't be reached: a print trapped inside a branch and a deleted guard in `deploy.sh` are caught by reading the source, not by calling a function.
+- **A regression test is only as good as the invariant it pins.** The reverted `c11_gv_dial` optimization (47464b3 → 4a9d66a) shipped *with* a test — one that asserted the optimistic behaviour that made calls never ring. Pin what the user experiences ("the phone rang"), not what the implementation currently does.
+- **Prove a new test fails.** Re-introduce the bug, watch it go red, restore, watch it go green. A test that has never failed has never been shown to test anything.
+
+`make check` = `make test` (full pytest, xdist when available) + `make smoke`. Wired into `.githooks/pre-push` (enable once: `git config core.hooksPath .githooks`) and `.github/workflows/check.yml` (pytest only — smoke scripts probe real systemd units, a Bluetooth speaker and the Pi, so on a CI runner they'd be a wall of green skips that reads like coverage). `./deploy.sh` remains the only sanctioned path to the Pi and runs the same suite plus its own gates.
+
 ## Testing
 
 Run `pytest` with an explicit timeout and never leave a suite running in the foreground for more than ~5 minutes unmonitored; if it hangs, kill it and report which test hung. `tests/` has ~989 tests. **Use `pytest-xdist`** (`sudo apt install python3-pytest-xdist`, then `pytest -n auto`) — measured live on this box: 770s serial vs 279s parallel (4 workers; `-n auto` picked 4, not `nproc`'s 8 — cgroup/affinity limited), a ~2.8x speedup. `-n auto` is a **hard usage error**, not a graceful no-op, if `pytest-xdist` isn't installed — check `python3 -c "import xdist"` first if scripting this (see `deploy.sh`). Don't mistake a slow-but-progressing run for a hang — one single unmocked-network test (`_build_system_prompt` real GPS/weather/RAG calls) has been observed taking 58s by itself; check the log for movement before killing it.

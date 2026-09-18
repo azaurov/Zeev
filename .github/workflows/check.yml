@@ -1,0 +1,24 @@
+name: check
+
+# Runs the pytest suite only. The shell smoke tests are deliberately excluded:
+# they probe real systemd units, a Bluetooth speaker and a Raspberry Pi, none of
+# which exist on a CI runner. They would skip (exit 77) there and a wall of
+# green skips is worse than no signal -- it reads like coverage.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install test deps
+        # The app itself needs only stdlib + requests; the suite adds pytest.
+        run: pip install pytest pytest-xdist requests
+      - name: Run tests
+        run: timeout 600 python3 -m pytest -n auto -q --no-header tests/

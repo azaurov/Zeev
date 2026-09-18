@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Runs `make check` before a push. Enable once with:
+#     git config core.hooksPath .githooks
+#
+# Bypass with `git push --no-verify` when you genuinely need to push a known-red
+# branch -- but a bypass that becomes routine is the same as having no hook.
+set -uo pipefail
+echo "[pre-push] make check"
+if ! make -s check; then
+    echo "[pre-push] BLOCKED: make check failed. Fix it, or push with --no-verify." >&2
+    exit 1
+fi

@@ -2,11 +2,37 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Verify Before Concluding
+
+- Never report a fix as working based on code reading alone. Always verify empirically: re-run the service, check `journalctl -u <unit> --since '2 min ago'`, or trigger the real device/call and confirm the observed output.
+- Before diagnosing a failure, check whether the device/camera/speaker is actually online and reachable. Hardware offline is more common than a code bug.
+- If you self-correct a diagnosis, update any memory/notes files you already wrote with the wrong conclusion.
+
+## Infrastructure Map
+
+- feiergente01 = GPU host (all LLM/inference workloads run here, NOT bosgame)
+- bosgame = Ubuntu server: nginx, admin panel, hotspot (do not modify hotspot without explicit request)
+- Raspberry Pi = assistant/voice/dog-caller, M400B Bluetooth speaker
+- c11 = Android device (Termux; no standard sshd), used for Google Voice calling
+- Midnight reboot on the Pi is INTENTIONAL — do not propose removing it.
+
+## Systemd & Scheduling Conventions
+
+- Before creating any new cron job or timer, run `systemctl list-timers --all` and `crontab -l` to confirm an equivalent job does not already exist; prefer overriding an existing unit over adding a duplicate.
+- Network-dependent mounts must use `_netdev` and automount in /etc/fstab.
+- Units depending on Tailscale/remote upstreams must not hard-fail at boot; add `After=network-online.target` and a retry/resolve guard.
+- Boot-verification scripts must handle `Type=oneshot` units (inactive/dead is success, not failure).
+
 ## Secrets
 
 Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into the transcript. To inspect config, print only key NAMES (e.g. `grep -o '^[A-Z_]*=' .env`) or masked values. If a secret is ever printed, stop and tell me immediately so I can rotate it.
 
 **Enforced, not just advisory**: `.claude/settings.json` has a `PreToolUse` hook on `Bash` that blocks `cat`/`less`/`head`/`tail`/`echo` commands targeting `.env` (exit 2, refuses the command outright) — verified live 2026-08-13.
+
+### Secrets & PII
+
+- Never commit home coordinates, street addresses, API keys, or device identifiers to public repos. Grep new/edited files for lat/long patterns and `*_API_KEY` before committing.
+- Check `git remote -v` before promising to push; some repos are local-only.
 
 ## watch_server `speak` command
 

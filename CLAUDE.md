@@ -11,10 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Infrastructure Map
 
 - feiergente01 = the only GPU host (Iris Xe iGPU): second Kokoro TTS instance (`REMOTE_PIPER_URL2`) and its own Ollama (`qwen2.5:7b`), fully iGPU-offloaded. The news-digest/weekly-reflection LLM path runs here, not on bosgame.
-- bosgame = Ubuntu server, CPU-only inference: Ollama (`llama3.1:8b`, `llama3.2:1b`, `nomic-embed-text` embeddings), primary Kokoro/Piper TTS, plus nginx, admin panel and hotspot (do not modify hotspot without explicit request)
-- Raspberry Pi = assistant/voice/dog-caller, M400B Bluetooth speaker
-- c11 = Android device (Termux; no standard sshd), used for Google Voice calling
-- Midnight reboot on the Pi is INTENTIONAL — do not propose removing it.
+- bosgame (10.0.0.141) = Ubuntu server, CPU-only inference: Ollama (`llama3.1:8b`, `llama3.2:1b`, `nomic-embed-text` embeddings), primary Kokoro/Piper TTS, plus nginx, the admin panel and the hotspot (do not modify the hotspot without an explicit request). Also hosts the dog-caller rig: `dogcaller-vm.service` (headless Android VM running the Wyze app, superseded the C11 phone 2026-09-09) and the M400B yard Bluetooth speaker (`yard-speaker-connect`/`-ping`/`-battery-log` units).
+- ragnarok (Raspberry Pi Zero 2W) = the Zeev device itself: `zeev-device`, `zeev-audio`, `zeev-watch`, Whisplay HAT, PiSugar battery. It does **not** host the dog caller or the M400B speaker — it reaches both over HTTP via `DOG_CALLER_URL` on bosgame.
+- C11 = a WiFi-only, no-telephony Android device used for `--via c11` Google Voice calling. Reached over **wireless-debugging adb** (`C11_ADB_SERIAL`, an `IP:port` that rotates on every C11 reboot), not ssh; its call audio rides the same SCO/HFP path as the S22.
+- **The nightly reboot is on bosgame, not the Pi** — `daily-reboot.timer`, 23:50 Sun–Thu, with a 10-minute warning. It is INTENTIONAL; do not propose removing it. The Pi has no scheduled reboot (verified live 2026-09-18: empty `crontab -l`, no reboot timer).
 
 ## Systemd & Scheduling Conventions
 

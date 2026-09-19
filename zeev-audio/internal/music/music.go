@@ -11,6 +11,32 @@ import (
 	"time"
 )
 
+// tailBuffer keeps the last max bytes written to it. ffmpeg and aplay stderr
+// used to be discarded, so a track that died on its own left "exit status 1"
+// and nothing to say why (the Macarena, 2026-09-19).
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+// String returns the tail as a single line, since it lands in a journal entry.
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(strings.Fields(string(t.b)), " ")
+}
+
 // ytdlpBinary prefers yt-dlp-fast (scripts/yt-dlp-fast, installed beside
 // yt-dlp on the Pi), which skips the ~6s zipapp startup, and falls back to plain
 // yt-dlp anywhere it is not installed.
@@ -26,6 +52,9 @@ func ytdlpBinary() string {
 // ffmpeg cleanly mid-song and the track just stops, with nothing in the log.
 func ffmpegArgs(audioURL string) []string {
 	return []string{
+		// Warnings and errors only: the default banner and per-second progress
+		// would fill the stderr tail with noise instead of the failure.
+		"-hide_banner", "-loglevel", "warning", "-nostats",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
@@ -126,6 +155,9 @@ func Play(query, dev string) (string, error) {
 			"-c", "2",
 		)
 
+		fErrBuf, aErrBuf := &tailBuffer{max: 400}, &tailBuffer{max: 400}
+		ffmpeg.Stderr, aplay.Stderr = fErrBuf, aErrBuf
+
 		pipe, err := ffmpeg.StdoutPipe()
 		if err != nil {
 			log.Printf("music: ffmpeg stdout: %v", err)
@@ -148,8 +180,9 @@ func Play(query, dev string) (string, error) {
 		began := time.Now()
 		fErr := ffmpeg.Wait()
 		aErr := aplay.Wait()
-		log.Printf("music: %q ended after %s (ffmpeg: %v, aplay: %v, cancelled: %t)",
-			title, time.Since(began).Round(time.Second), fErr, aErr, ctx.Err() != nil)
+		log.Printf("music: %q ended after %s (ffmpeg: %v, aplay: %v, cancelled: %t) ffmpeg stderr: %q aplay stderr: %q",
+			title, time.Since(began).Round(time.Second), fErr, aErr, ctx.Err() != nil,
+			fErrBuf.String(), aErrBuf.String())
 	}()
 
 	return title, nil

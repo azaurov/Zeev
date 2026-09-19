@@ -3,6 +3,7 @@ package music
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +73,21 @@ func TestYtdlpBinaryPrefersFastWrapper(t *testing.T) {
 	}
 	if got := ytdlpBinary(); got != "yt-dlp-fast" {
 		t.Errorf("wrapper installed: got %q, want yt-dlp-fast", got)
+	}
+}
+
+func TestTailBufferKeepsTheEndOnOneLine(t *testing.T) {
+	b := &tailBuffer{max: 20}
+	b.Write([]byte("early noise that must be dropped\n"))
+	b.Write([]byte("aplay: pcm_write:2178:\nwrite error: Broken pipe\n"))
+	got := b.String()
+	if len(got) > 20 || strings.Contains(got, "\n") || strings.Contains(got, "early") {
+		t.Errorf("tail not bounded/single-line/latest: %q", got)
+	}
+	if !strings.HasSuffix(got, "Broken pipe") {
+		t.Errorf("must keep the END of the output, got %q", got)
+	}
+	if (&tailBuffer{max: 10}).String() != "" {
+		t.Error("empty buffer must render empty")
 	}
 }

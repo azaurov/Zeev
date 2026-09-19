@@ -31,3 +31,27 @@ func TestFFmpegArgsReconnectBeforeInput(t *testing.T) {
 		t.Errorf("output must remain pipe:1")
 	}
 }
+
+func TestParseResolve(t *testing.T) {
+	const u = "https://rr3---sn-x.googlevideo.com/videoplayback?expire=1"
+	title, url, err := parseResolve("Ray Parker Jr. - Ghostbusters\n"+u+"\n", "ghost")
+	if err != nil || title != "Ray Parker Jr. - Ghostbusters" || url != u {
+		t.Fatalf("got %q %q %v", title, url, err)
+	}
+	// A title that itself looks like a URL must not be taken for the stream.
+	_, url, _ = parseResolve("https://not-the-stream.example\n"+u, "q")
+	if url != u {
+		t.Errorf("stream URL must be the last http line, got %q", url)
+	}
+	// Missing title falls back to the query.
+	if title, _, _ := parseResolve(u, "ghost"); title != "ghost" {
+		t.Errorf("title fallback = %q", title)
+	}
+	// No URL is an error, never a silent "playing" of nothing.
+	if _, _, err := parseResolve("Some Title\n", "q"); err == nil {
+		t.Error("expected an error when yt-dlp printed no URL")
+	}
+	if _, _, err := parseResolve("", "q"); err == nil {
+		t.Error("expected an error on empty output")
+	}
+}

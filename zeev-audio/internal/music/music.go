@@ -11,6 +11,16 @@ import (
 	"time"
 )
 
+// ytdlpBinary prefers yt-dlp-fast (scripts/yt-dlp-fast, installed beside
+// yt-dlp on the Pi), which skips the ~6s zipapp startup, and falls back to plain
+// yt-dlp anywhere it is not installed.
+func ytdlpBinary() string {
+	if _, err := exec.LookPath("yt-dlp-fast"); err == nil {
+		return "yt-dlp-fast"
+	}
+	return "yt-dlp"
+}
+
 // ffmpegArgs decodes the resolved stream to raw PCM. The -reconnect flags are
 // load-bearing: without them a dropped or stalled googlevideo connection ends
 // ffmpeg cleanly mid-song and the track just stops, with nothing in the log.
@@ -75,7 +85,7 @@ func Play(query, dev string) (string, error) {
 	// One yt-dlp run for both title and URL. It used to be two sequential runs
 	// (--get-url, then --get-title), each repeating the whole search and
 	// extraction: measured on the Pi, 22s + 25s = 47s against 20s combined.
-	resolveCmd := exec.CommandContext(ctx, "yt-dlp",
+	resolveCmd := exec.CommandContext(ctx, ytdlpBinary(),
 		"--default-search", "ytsearch1",
 		"--get-title",
 		"--get-url",

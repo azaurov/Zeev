@@ -1,0 +1,46 @@
+#!/bin/bash
+# yt-dlp without the ~6s zipapp startup tax on the Pi Zero 2W.
+#
+# /usr/local/bin/yt-dlp is a zipapp, and Python cannot cache bytecode for code
+# inside a zip, so every launch recompiles yt-dlp: `--version` alone measured
+# 8.2s, against 2.3s for the same release extracted to a directory.
+#
+# The zip stays the single source of truth: `yt-dlp -U` and the weekly
+# /etc/cron.d/yt-dlp-update keep updating it in place. This wrapper extracts it
+# to a cache directory and re-extracts whenever the zip's size/mtime changes, so
+# an update is picked up on the next call instead of running a stale copy.
+# Any failure falls back to running the zip itself -- never to failing a play.
+#
+# YTDLP_ZIP / YTDLP_CACHE exist so tests can point it at a fake zip.
+ZIP="${YTDLP_ZIP:-/usr/local/bin/yt-dlp}"
+CACHE="${YTDLP_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/yt-dlp-x}"
+
+fallback() { exec "$ZIP" "$@"; }
+
+[ -r "$ZIP" ] || fallback "$@"
+STAMP="$(stat -c '%s-%Y' "$ZIP" 2>/dev/null)" || fallback "$@"
+
+if [ "$(cat "$CACHE/.stamp" 2>/dev/null)" != "$STAMP" ] || [ ! -f "$CACHE/__main__.py" ]; then
+    mkdir -p "$(dirname "$CACHE")" 2>/dev/null || fallback "$@"
+    (
+        # One extractor at a time; a second caller waits, then re-checks.
+        flock -w 120 9 || exit 1
+        if [ "$(cat "$CACHE/.stamp" 2>/dev/null)" != "$STAMP" ] || [ ! -f "$CACHE/__main__.py" ]; then
+            TMP="$(mktemp -d "$CACHE.tmp.XXXXXX")" || exit 1
+            if python3 -m zipfile -e "$ZIP" "$TMP" >/dev/null 2>&1 \
+               && [ -f "$TMP/__main__.py" ]; then
+                # Compile now so the first real call does not pay for it.
+                python3 -m compileall -q "$TMP" >/dev/null 2>&1
+                echo "$STAMP" > "$TMP/.stamp"
+                rm -rf "$CACHE.old"
+                [ -d "$CACHE" ] && mv "$CACHE" "$CACHE.old"
+                mv "$TMP" "$CACHE" && rm -rf "$CACHE.old"
+            else
+                rm -rf "$TMP"; exit 1
+            fi
+        fi
+    ) 9>"$CACHE.lock" || fallback "$@"
+fi
+
+[ -f "$CACHE/__main__.py" ] || fallback "$@"
+exec python3 "$CACHE" "$@"

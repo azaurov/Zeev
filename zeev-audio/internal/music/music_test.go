@@ -1,6 +1,10 @@
 package music
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // A stream that drops mid-song ends ffmpeg cleanly and the track just stops
 // (found live 2026-09-19, Ghostbusters theme). The reconnect flags must be
@@ -53,5 +57,20 @@ func TestParseResolve(t *testing.T) {
 	}
 	if _, _, err := parseResolve("", "q"); err == nil {
 		t.Error("expected an error on empty output")
+	}
+}
+
+func TestYtdlpBinaryPrefersFastWrapper(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	if got := ytdlpBinary(); got != "yt-dlp" {
+		t.Errorf("no wrapper installed: got %q, want yt-dlp", got)
+	}
+	f := filepath.Join(dir, "yt-dlp-fast")
+	if err := os.WriteFile(f, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := ytdlpBinary(); got != "yt-dlp-fast" {
+		t.Errorf("wrapper installed: got %q, want yt-dlp-fast", got)
 	}
 }

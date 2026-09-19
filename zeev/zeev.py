@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import wave
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1171,6 +1172,112 @@ def render_birthday_duet(name="Alex"):
         w.writeframes((mix * 32767).astype(np.int16).tobytes())
     print(f"[duet] rendered {out.name} ({total:.1f}s, {_DUET_BPM:.0f} BPM)", flush=True)
     return str(out)
+
+
+# ── Wolf howl ────────────────────────────────────────────────────────────
+# Synthesised, not TTS: Kokoro/Orpheus read "Awooo" as phonetic text. A howl is a
+# gliding tone (rise, hold with vibrato, fall) over a few decaying harmonics, so
+# a few lines of numpy make one and nothing has to be shipped as an asset --
+# zeev/data/ is git-ignored, so a committed WAV would never reach the Pi.
+# Keyed on "howl", not "wolf": "cry wolf" and "wolf down" are ordinary speech.
+# Questions about howling ("why does my dog howl") are not requests to howl.
+_HOWL_MAX_START = 60
+_HOWL_RE = re.compile(r"\bhowl\b|\bawoo+", re.IGNORECASE)
+_HOWL_EXCLUDE_RE = re.compile(
+    r"^\W*(why|how|what|when|where|who|which|is|are|does|did)\b"
+    r"|\b(dog|dogs|cat|cats|wind|neighbou?rs?)\b",
+    re.IGNORECASE,
+)
+# Two styles. "classic" is live; "creepy" is kept for later and reachable only
+# via render_howl(style="creepy"), no gate selects it yet.
+# voices: (start, peak, end) Hz + seconds, Zeev lower/longer than Sarina.
+# tone: rise_frac, fall_start, vib_depth, vib_hz, wobble, detune (0 = none),
+#       breath, gain_div, attack_s, release_s, together_s
+_HOWL_STYLES = {
+    "classic": {
+        "voices": {"zeev": (260.0, 420.0, 300.0, 2.8),
+                   "sarina": (390.0, 640.0, 450.0, 2.4)},
+        "tone": (0.3, 0.6, 0.018, 5.5, 0.0, 0.0, 0.05, 2.1, 0.18, 0.6, 3.0),
+    },
+    "creepy": {
+        "voices": {"zeev": (150.0, 265.0, 165.0, 4.2),
+                   "sarina": (230.0, 410.0, 250.0, 3.8)},
+        "tone": (0.42, 0.55, 0.03, 4.2, 0.008, 0.014, 0.08, 3.4, 0.5, 1.2, 4.0),
+    },
+}
+_HOWL_DEFAULT_STYLE = "classic"
+
+
+def howl_intent(text):
+    """True for a request for the two of them to howl."""
+    t = text or ""
+    return (bool(_HOWL_RE.search(t[:_HOWL_MAX_START]))
+            and not _HOWL_EXCLUDE_RE.search(t)
+            and not _TOOL_INTENT_RE.search(t)
+            and not _bt_call_match(t))
+
+
+def _howl_tone(f0, f1, f2, dur, np, tone, sr=_DUET_SR, seed=0):
+    """One howl, float64 in [-1, 1]: glide f0 -> f1 -> f2 with vibrato."""
+    rise_f, fall_s, vdepth, vhz, wobble, detune, breath_g, gdiv, atk, rel, _ = tone
+    n = int(dur * sr)
+    x = np.linspace(0.0, 1.0, n)
+    rise = np.clip(x / rise_f, 0, 1)
+    fall = np.clip((x - fall_s) / (1 - fall_s), 0, 1)
+    rise, fall = rise * rise * (3 - 2 * rise), fall * fall * (3 - 2 * fall)
+    f = f0 + (f1 - f0) * rise
+    f = f + (f2 - f1) * fall
+    # Vibrato arrives once the note is held, like a real one.
+    vib = 1.0 + vdepth * np.clip((x - 0.25) / 0.2, 0, 1) * np.sin(2 * np.pi * vhz * x * dur)
+    if wobble:
+        vib = vib + wobble * np.sin(2 * np.pi * 0.9 * x * dur)
+    phase = 2 * np.pi * np.cumsum(f * vib) / sr
+    amps = (1.0, 0.5, 0.28, 0.16, 0.09, 0.05)
+    if detune:
+        # A second, slightly sharp voice beats against the first.
+        p2 = phase * (1 + detune)
+        y = sum(a * (np.sin(k * phase) + 0.6 * np.sin(k * p2))
+                for k, a in enumerate(amps, start=1))
+    else:
+        y = sum(a * np.sin(k * phase) for k, a in enumerate(amps, start=1))
+    rng = np.random.default_rng(seed)
+    breath = np.convolve(rng.standard_normal(n), np.ones(24) / 24, mode="same")
+    y = y / gdiv + breath_g * breath
+    env = np.minimum(1.0, x * dur / atk) * np.minimum(1.0, (1 - x) * dur / rel)
+    env = env * (0.75 + 0.25 * np.sin(np.pi * np.clip(x / 0.6, 0, 1)))
+    return y * env
+
+
+def render_howl(style=_HOWL_DEFAULT_STYLE):
+    """Zeev, then Sarina, then both together. Returns a WAV path, or None.
+
+    None is an ordinary outcome (no numpy) and the caller falls back to
+    speaking "Awoo" in each voice. The caller deletes the file after playing.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    st = _HOWL_STYLES[style]
+    tone, v = st["tone"], st["voices"]
+    z = _howl_tone(*v["zeev"][:3], v["zeev"][3], np, tone, seed=1)
+    s = _howl_tone(*v["sarina"][:3], v["sarina"][3], np, tone, seed=2)
+    n = int(_DUET_SR * tone[10])
+    off = int(0.25 * _DUET_SR)
+    both = np.zeros(n)
+    both[:len(z)] += z[:n] * 0.7
+    both[off:off + len(s)] += s[:n - off] * 0.7
+    gap = np.zeros(int(0.35 * _DUET_SR))
+    mix = np.concatenate([z, gap, s, gap, both])
+    peak = float(np.max(np.abs(mix)))
+    if peak > 0:
+        mix = mix / peak * 0.9
+    fd, out = tempfile.mkstemp(prefix="zeev_howl_", suffix=".wav")
+    os.close(fd)
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(_DUET_SR)
+        w.writeframes((mix * 32767).astype(np.int16).tobytes())
+    return out
 
 
 # Tracked so the button can cut the song off like any other reply -- the
@@ -13828,6 +13935,36 @@ def handle_transcript(ctx, transcript, _depth=0):
             ctx._set_face("speaking", line)
             ctx._speak_device(line, voice)
         finish_turn(ctx, " ".join(line for _, line in lines), user_text=transcript,
+                    face=False, led=False, speak=False)
+        return
+
+    # ── Wolf howl ────────────────────────────────────────────────────────
+    # Both voices, as a synthesised howl (see render_howl). Same shape as the
+    # birthday duet: render, play the file, and fall back to spoken "Awoo".
+    if howl_intent(transcript):
+        print("[howl] Zeev and Sarina howling", flush=True)
+        ctx.board.set_rgb(*ctx._LED_SPEAKING)
+        ctx._set_face("speaking", "Awoooo!")
+        wav = None
+        try:
+            wav = render_howl()
+        except Exception as e:
+            print(f"[howl] render failed: {e}", flush=True)
+        played = False
+        if wav:
+            try:
+                played = play_duet_wav(wav, bt_audio_dev())
+            finally:
+                try:
+                    os.unlink(wav)
+                except OSError:
+                    pass
+        if not played:
+            for voice, line in (("daniel", "Awoooooooo!"), ("sarina", "Awooooo!")):
+                if ctx._speak_cancel.is_set():
+                    break
+                ctx._speak_device(line, voice)
+        finish_turn(ctx, "Awooo! Awooo!", user_text=transcript,
                     face=False, led=False, speak=False)
         return
 

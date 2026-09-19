@@ -8,7 +8,24 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
+
+// ffmpegArgs decodes the resolved stream to raw PCM. The -reconnect flags are
+// load-bearing: without them a dropped or stalled googlevideo connection ends
+// ffmpeg cleanly mid-song and the track just stops, with nothing in the log.
+func ffmpegArgs(audioURL string) []string {
+	return []string{
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5",
+		"-i", audioURL,
+		"-f", "s16le",
+		"-ar", "44100",
+		"-ac", "2",
+		"pipe:1",
+	}
+}
 
 var (
 	mu      sync.Mutex
@@ -68,13 +85,7 @@ func Play(query, dev string) (string, error) {
 			cancelFn()
 		}()
 
-		ffmpeg := exec.CommandContext(ctx, "ffmpeg",
-			"-i", audioURL,
-			"-f", "s16le",
-			"-ar", "44100",
-			"-ac", "2",
-			"pipe:1",
-		)
+		ffmpeg := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs(audioURL)...)
 		aplay := exec.CommandContext(ctx, "aplay",
 			"-D", dev,
 			"-f", "S16_LE",
@@ -98,8 +109,14 @@ func Play(query, dev string) (string, error) {
 			ffmpeg.Process.Kill()
 			return
 		}
-		ffmpeg.Wait()
-		aplay.Wait()
+		// Exit status and elapsed time are logged so a track that stops early can
+		// be told apart from one that finished: a Wait error with the context
+		// still live means ffmpeg/aplay died on their own, not that Stop() ran.
+		began := time.Now()
+		fErr := ffmpeg.Wait()
+		aErr := aplay.Wait()
+		log.Printf("music: %q ended after %s (ffmpeg: %v, aplay: %v, cancelled: %t)",
+			title, time.Since(began).Round(time.Second), fErr, aErr, ctx.Err() != nil)
 	}()
 
 	return title, nil

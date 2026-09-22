@@ -53,6 +53,18 @@ talks Leo down after the dog caller brings him in.
   process from `zeev-device.service`. Restarting `zeev-device` does **not**
   reload it; that cost real debugging time.
 
+`cmd: "listen"` (`start`/`end` epoch seconds, or `seconds`) returns WAV of what
+the living-room mic heard — for the dog calmer's bark check (2026-09-22).
+- **Reads `zeev/mic_ring.py`'s tmpfs buffer (`/dev/shm/zeev_mic`, last 120s),
+  never the mic.** The WM8960 capture is one hw subdevice the wake listener
+  owns, so a second `arecord` gets "device busy"; the wake loop writes every
+  frame to the ring instead. Gaps during turns are real (the listener releases
+  the mic) and are reported via `covered`, never stitched over.
+  `ZEEV_MIC_RING=0` disables it.
+- **Refused with 403 through the public proxy** (any `X-Forwarded-For`/
+  `X-Real-IP`/`CF-Connecting-IP`): room audio is for direct LAN/tailnet
+  callers only. Pinned by `tests/test_mic_ring.py`.
+
 ## Scope Discipline
 
 Change only what I asked for. Do not remove trigger words, edit model/max_tokens params, or add fallback paths (e.g. ffmpeg shims) that weren't requested — propose them separately instead.

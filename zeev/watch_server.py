@@ -613,6 +613,42 @@ def _cmd_speak(text, voice="", volume=None):
     return bool(ok), "spoke it" if ok else "the audio daemon reported failure"
 
 
+def _cmd_listen(start=None, end=None, seconds=None):
+    """What the living-room mic heard over a window, as WAV. Returns
+    (ok, message, extra) where extra carries wav_b64/covered/latest_end.
+
+    Reads mic_ring's tmpfs buffer, which device mode's wake listener fills
+    -- never the capture device itself (a single hw subdevice the wake
+    listener owns). Caller is the dog calmer in ~/troubleshooting/
+    wyze-dog-caller asking whether a Wyze sound event was barking; it does
+    the analysis itself so both of its mics share one bark_stats().
+
+    `start`/`end` are epoch seconds (a Wyze event's time can be a minute
+    old by the time it's polled, so a past window is the useful one);
+    `seconds` alone means "the last N seconds"."""
+    import base64
+    import time as _time
+
+    import mic_ring
+
+    now = _time.time()
+    if start is None:
+        start = now - float(seconds or 20)
+        end = now
+    start = float(start)
+    end = float(end if end is not None else now)
+    pcm, covered, latest = mic_ring.read_window(start, end)
+    extra = {"covered": covered, "latest_end": latest}
+    if not pcm:
+        why = ("no mic audio buffered at all -- is device mode's wake listener running?"
+               if latest is None else
+               f"no mic audio in that window (newest is {int(now - latest)}s old; "
+               "the wake listener releases the mic during turns)")
+        return False, why, extra
+    extra["wav_b64"] = base64.b64encode(mic_ring.to_wav(pcm)).decode()
+    return True, f"heard {covered}s", extra
+
+
 _COMMANDS = {
     "pair_ble": _cmd_pair_ble,
     "world_news": _cmd_world_news,
@@ -702,6 +738,23 @@ def _make_handler():
                     self._json(500, {"ok": False, "error": str(e)})
                     return
                 self._json(200, {"ok": ok, "message": message})
+                return
+            if cmd == "listen":
+                # Room audio: LAN/tailnet callers only. The public route
+                # (bosgame nginx -> /watch) always adds X-Forwarded-For, and
+                # the watch app has no business hearing the living room.
+                if any(self.headers.get(h) for h in
+                       ("X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP")):
+                    self._json(403, {"ok": False, "error": "listen is not available through the proxy"})
+                    return
+                try:
+                    ok, message, extra = _cmd_listen(
+                        data.get("start"), data.get("end"), data.get("seconds"))
+                except Exception as e:
+                    print(f"[watch] listen failed: {e}", flush=True)
+                    self._json(500, {"ok": False, "error": str(e)})
+                    return
+                self._json(200, {"ok": ok, "message": message, **extra})
                 return
             if cmd == "sweep":
                 try:

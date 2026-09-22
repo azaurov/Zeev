@@ -16420,6 +16420,16 @@ def run_device_mode():
         # into the model on speech onset, while this must survive untouched and
         # include the frames the gate skipped.
         capture = deque(maxlen=max(1, int(OWW_CAPTURE_SECS * 16000 / frame_samples)))
+        # Rolling copy of the room for watch_server's `listen` (the dog
+        # calmer's bark check). This loop is the only thing allowed to hold
+        # the capture device, so it has to be the one that shares it.
+        mic_ring = None
+        try:
+            import mic_ring as _mic_ring_mod
+            if _mic_ring_mod.ENABLED:
+                mic_ring = _mic_ring_mod.RingWriter()
+        except Exception as e:
+            print(f"[wake] mic ring unavailable: {e}", flush=True)
         hold = 0                          # frames of inference still owed
         gate = OWW_ENERGY_MIN
         seen = scored = 0                 # for the periodic skip-ratio log
@@ -16482,6 +16492,8 @@ def run_device_mode():
 
             frame = np.frombuffer(data, dtype=np.int16)
             seen += 1
+            if mic_ring is not None:
+                mic_ring.append(data)
             if OWW_CAPTURE:
                 # Before the gate, so a clip shows what preceded the trigger
                 # even across frames that were never scored.

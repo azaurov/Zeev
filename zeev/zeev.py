@@ -16437,6 +16437,8 @@ def run_device_mode():
 
         def _release():
             nonlocal proc
+            if mic_ring is not None:
+                mic_ring.gap()
             if proc:
                 try:
                     proc.kill()

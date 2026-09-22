@@ -43,18 +43,21 @@ class RingWriter:
         self._failed = False
 
     def append(self, data):
-        now = self.clock()
-        if not self.buf:
-            # The frame was captured over the last len/BPS seconds.
-            self.start = now - len(data) / BYTES_PER_SEC
-        elif abs((self.start + len(self.buf) / BYTES_PER_SEC) - (now - len(data) / BYTES_PER_SEC)) > 1.0:
-            # The stream was released (a turn) and reopened: flush what we
-            # have rather than pretend the two sides are contiguous.
-            self.flush()
-            self.start = now - len(data) / BYTES_PER_SEC
+        # Reads lag capture by a variable amount (the loop falls behind while
+        # the model scores, then drains the pipe in a burst), and never lead
+        # it. So each frame bounds the chunk's true start from above, and the
+        # tightest bound -- the promptest read -- is the best estimate. A
+        # clock-jump heuristic here flushed on every burst (seen live).
         self.buf += data
+        est = self.clock() - len(self.buf) / BYTES_PER_SEC
+        self.start = est if self.start is None else min(self.start, est)
         if len(self.buf) >= self.chunk_bytes:
             self.flush()
+
+    def gap(self):
+        """The stream stopped (the listener released the mic for a turn).
+        Close the chunk so audio after the gap is filed at its own time."""
+        self.flush()
 
     def flush(self):
         if not self.buf:

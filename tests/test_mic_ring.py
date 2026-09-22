@@ -63,7 +63,8 @@ def test_gap_is_not_stitched_over(tmp_path):
     clock = Clock(2000.0)
     w = mic_ring.RingWriter(str(tmp_path), clock=clock)
     _feed(w, clock, _tone(100, 3))
-    clock.t += 30  # a turn: the wake listener released the mic
+    w.gap()        # a turn: the wake listener released the mic...
+    clock.t += 30  # ...for 30s
     _feed(w, clock, _tone(200, 3))
     w.flush()
     pcm, covered, _ = mic_ring.read_window(2000.0, 2040.0, str(tmp_path))
@@ -76,6 +77,34 @@ def test_gap_is_not_stitched_over(tmp_path):
     pcm2, covered2, _ = mic_ring.read_window(2035.0, 2040.0, str(tmp_path))
     assert covered2 == pytest.approx(1.0, abs=0.01)
     assert set(struct.unpack(f"<{len(pcm2) // 2}h", pcm2)) == {200}
+
+
+def test_bursty_reads_keep_true_timestamps_and_no_false_gaps(tmp_path):
+    # The Pi's loop reads in bursts: several frames back to back (clock
+    # barely moves), then a stall. Capture itself is continuous and real-time.
+    clock = Clock(6000.0)
+    w = mic_ring.RingWriter(str(tmp_path), clock=clock)
+    pcm = _tone(0, 10) + _tone(8000, 10)
+    frames = [pcm[i:i + FRAME] for i in range(0, len(pcm), FRAME)]
+    captured = 6000.0
+    for i, frame in enumerate(frames):
+        captured += len(frame) / BPS
+        lag = 1.5 if i % 20 < 15 else 0.0   # 15 late reads, then 5 prompt ones
+        clock.t = captured + lag
+        w.append(frame)
+    w.flush()
+    chunks = mic_ring._chunks(str(tmp_path))
+    assert len(chunks) == 4  # 20s in 5s chunks: no burst-induced splits
+    pcm_w, covered, _ = mic_ring.read_window(6012.0, 6016.0, str(tmp_path))
+    assert covered == pytest.approx(4.0, abs=0.01)
+    assert set(struct.unpack(f"<{len(pcm_w) // 2}h", pcm_w)) == {8000}
+
+
+def test_release_closes_the_chunk():
+    src = (Path(__file__).resolve().parent.parent / "zeev" / "zeev.py").read_text()
+    release = src[src.index("        def _release():"):]
+    release = release[:release.index("\n\n")]
+    assert "mic_ring.gap()" in release
 
 
 def test_old_audio_is_pruned(tmp_path):

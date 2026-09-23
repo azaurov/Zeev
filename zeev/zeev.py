@@ -12818,22 +12818,16 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             pass
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            if self.path.split("?")[0] in ("/", "/index.html", "/classic"):
+                # `/` is the noir-splash UI (zeev/web_ui.html), read per request so edits
+                # show without a restart. `/classic` is the previous design, kept as the
+                # one-line revert; `/` also falls back to it if the file is unreadable.
                 body = _WEB_HTML.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            elif self.path.split("?")[0] == "/next":
-                # Preview of the noir-splash redesign (zeev/web_ui_next.html), read per
-                # request so edits show without a restart. `/` is untouched until approved.
-                try:
-                    body = (Path(__file__).parent / "web_ui_next.html").read_bytes()
-                except OSError:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
+                if self.path.split("?")[0] != "/classic":
+                    try:
+                        body = (Path(__file__).parent / "web_ui.html").read_bytes()
+                    except OSError as e:
+                        print(f"[web] web_ui.html unreadable ({e}) — serving classic UI", flush=True)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))

@@ -1,12 +1,12 @@
-"""The noir-splash redesign (zeev/web_ui_next.html, served at /next) must not lose
-anything the live page (_WEB_HTML) can do. A restyle fails silently: a renamed
+"""The noir-splash UI (zeev/web_ui.html, served at /) must not lose anything the
+classic page (_WEB_HTML, still served at /classic) can do. A restyle fails silently: a renamed
 id makes a button dead with no error anywhere, so parity is pinned here."""
 import re
 from pathlib import Path
 
 import pytest
 
-NEXT = Path(__file__).parent.parent / "zeev" / "web_ui_next.html"
+NEXT = Path(__file__).parent.parent / "zeev" / "web_ui.html"
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +60,9 @@ def test_reduced_motion_is_respected(nxt):
     assert "prefers-reduced-motion" in nxt
 
 
-def test_preview_route_exists_and_live_route_is_untouched(zeev):
+def test_root_serves_new_ui_and_classic_is_the_revert(zeev):
     src = Path(zeev.__file__).read_text()
-    assert '== "/next"' in src and "web_ui_next.html" in src
-    assert 'if self.path in ("/", "/index.html"):\n                body = _WEB_HTML.encode' in src
+    assert '("/", "/index.html", "/classic")' in src
+    assert "web_ui.html" in src and "web_ui_next.html" not in src
+    assert 'body = _WEB_HTML.encode("utf-8")' in src                     # classic + fallback
+    assert 'if self.path.split("?")[0] != "/classic":' in src            # /classic never gets the new file

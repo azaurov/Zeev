@@ -29,6 +29,7 @@ def _no_requesty(zeev, monkeypatch):
     # The real .env is loaded at import; these tests are about OpenRouter only.
     monkeypatch.setattr(zeev, "REQUESTY_API_KEY", "")
     monkeypatch.setattr(zeev, "ANYAPI_API_KEY", "")
+    monkeypatch.setattr(zeev, "CLOUDFLARE_AI_URL", "")
 
 
 def _groq_429_then_none(*a, **kw):

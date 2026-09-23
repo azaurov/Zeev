@@ -87,6 +87,15 @@ REQUESTY_URL       = "https://router.requesty.ai/v1/chat/completions"
 # Free plan is 100K tokens/DAY (~50 fallback calls), its own pool.
 ANYAPI_API_KEY     = os.environ.get("ANYAPI_API_KEY",     "")
 ANYAPI_URL         = "https://api.anyapi.ai/v1/chat/completions"
+# Cloudflare Workers AI -- vision ("cloudflare:" VISION_MODELS entries) and a
+# chat fallback (_CLOUDFLARE_CHAT_CANDIDATES). Free plan: 10,000 neurons/day,
+# then calls fail rather than bill. The URL needs the account id, so both vars
+# must be set; CLOUDFLARE_AI_URL is "" otherwise and every Cloudflare path is off.
+CLOUDFLARE_API_KEY    = os.environ.get("CLOUDFLARE_API_KEY",    "")
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_AI_URL     = (f"https://api.cloudflare.com/client/v4/accounts/"
+                         f"{CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions"
+                         if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID else "")
 ZEEV_WATCH_KEY    = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
 # Same host the nginx /watch location already proxies to for the Zepp watch
 # app -- reachable over Tailscale from any box on the tailnet, not just the
@@ -1736,7 +1745,16 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # _VISION_HONESTY: 5.7s scene, 34.6s flyer with the text read accurately.
 # AnyAPI's ling-3.0-flash-vl was 429'd on the flyer 3 of 3 tries (untested,
 # not rejected); nex-n2.5-mini returned EMPTY content on the flyer.
+#
+# "cloudflare:" entries go FIRST (Workers AI, own 10K-neuron/day pool, ~150
+# calls). Benchmarked 2026-09-23 with _VISION_HONESTY: llama-4-scout 1.9s
+# scene / 2.4s text-dense flyer, accurate; mistral-small-3.1 4.4s / 6.0s with
+# the most accurate flyer read of any model tested (every name and "6:00 PM"
+# right) -- vs nemotron-omni's ~34s on the same flyer. Workers AI gemma-4-26b
+# and qwen3.8-27b returned EMPTY content (all reasoning) on chat; not used.
 VISION_MODELS = [
+    "cloudflare:@cf/meta/llama-4-scout-17b-16e-instruct",
+    "cloudflare:@cf/mistralai/mistral-small-3.1-24b-instruct",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
     "requesty:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -8788,10 +8806,23 @@ _REQUESTY_FREE_CANDIDATES = [
     "mistral/leanstral-1-5",
 ]
 
+# Cloudflare Workers AI chat, tried after Requesty and before OpenRouter.
+# llama-3.3-70b-fp8-fast: not a reasoning model, 0.6-0.9s TTFT on the same
+# ~5.7KB-prompt streaming benchmark (2026-09-23), ~100 turns/day of the free
+# 10K neurons. Rejected: llama-3.1-8b prefixed replies with "Sarina's voice:"
+# (would be spoken); gemma-4-26b and qwen3.8-27b were all-reasoning, empty.
+# NOTE Workers AI streams digit-only tokens as JSON numbers ("content": 12) --
+# _iter_llm_tokens_raw coerces them; without that a reply with a number in it
+# raises TypeError mid-turn.
+_CLOUDFLARE_CHAT_CANDIDATES = [
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+]
+
 
 def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning_effort=None):
-    """Like _groq_post, but on a 429/cooldown falls through to Requesty's and
-    then OpenRouter's free tiers so a Groq rate limit doesn't stall the reply."""
+    """Like _groq_post, but on a 429/cooldown falls through to Requesty's,
+    Cloudflare Workers AI's and then OpenRouter's free tiers so a Groq rate
+    limit doesn't stall the reply. Each miss costs a round trip (~1-3s)."""
     msgs = _apply_language_suffix(msgs)
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
                             reasoning_effort=reasoning_effort)
@@ -8806,6 +8837,16 @@ def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning
                 return rq_resp, rq_err
             status = rq_resp.status_code if rq_resp is not None else rq_err
             print(f"[llm] Requesty {rq_model} failed ({status}) — trying next candidate", flush=True)
+    if rate_limited and CLOUDFLARE_AI_URL:
+        for cf_model in _CLOUDFLARE_CHAT_CANDIDATES:
+            print(f"[llm] Groq 429 on {model} — falling back to Cloudflare ({cf_model})", flush=True)
+            cf_resp, cf_err = _openai_compat_post(
+                CLOUDFLARE_AI_URL, CLOUDFLARE_API_KEY, msgs, cf_model, stream, max_tokens,
+            )
+            if not cf_err and cf_resp is not None and cf_resp.status_code == 200:
+                return cf_resp, cf_err
+            status = cf_resp.status_code if cf_resp is not None else cf_err
+            print(f"[llm] Cloudflare {cf_model} failed ({status}) — trying next candidate", flush=True)
     if rate_limited and OPENROUTER_API_KEY:
         for or_model in _OPENROUTER_FREE_CANDIDATES:
             print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
@@ -9143,7 +9184,13 @@ def _iter_llm_tokens_raw(resp, provider, on_finish=None):
                 break
             try:
                 choice = json.loads(data)["choices"][0]
-                yield choice.get("delta", {}).get("content", "")
+                tok = choice.get("delta", {}).get("content", "")
+                # Cloudflare Workers AI streams digit-only tokens as JSON
+                # numbers ("content": 12); a non-str here raises TypeError in
+                # every caller that joins tokens into the reply.
+                if tok is not None and not isinstance(tok, str):
+                    tok = str(tok)
+                yield tok
                 if on_finish and choice.get("finish_reason"):
                     on_finish(choice["finish_reason"])
             except (json.JSONDecodeError, KeyError, IndexError):
@@ -10296,8 +10343,8 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
     list is retried up to `VISION_RETRIES` more times after a short delay --
     see the module-level comment above for why that's worth doing here.
     """
-    if not (OPENROUTER_API_KEY or REQUESTY_API_KEY or ANYAPI_API_KEY):
-        return None, "no OPENROUTER/REQUESTY/ANYAPI_API_KEY (Groq no longer serves vision models)"
+    if not (OPENROUTER_API_KEY or REQUESTY_API_KEY or ANYAPI_API_KEY or CLOUDFLARE_AI_URL):
+        return None, "no OPENROUTER/REQUESTY/ANYAPI/CLOUDFLARE key (Groq no longer serves vision models)"
     msgs = _build_vision_msgs(image_b64, question)
     last = "no models tried"
     for attempt in range(VISION_RETRIES + 1):
@@ -10306,6 +10353,9 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
                 m, url, key = entry[len("requesty:"):], REQUESTY_URL, REQUESTY_API_KEY
             elif entry.startswith("anyapi:"):
                 m, url, key = entry[len("anyapi:"):], ANYAPI_URL, ANYAPI_API_KEY
+            elif entry.startswith("cloudflare:"):
+                m, url = entry[len("cloudflare:"):], CLOUDFLARE_AI_URL
+                key = CLOUDFLARE_API_KEY if url else ""
             else:
                 m, url, key = entry, "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
             if not key:

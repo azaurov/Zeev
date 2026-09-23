@@ -13,6 +13,14 @@ and a vision call works with only a Requesty key.
 """
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_cloudflare(zeev, monkeypatch):
+    # The real .env is loaded at import; these tests exercise Requesty/AnyAPI.
+    monkeypatch.setattr(zeev, "CLOUDFLARE_AI_URL", "")
+
 
 def _groq_429(*a, **kw):
     resp = MagicMock()

@@ -20,6 +20,7 @@ import pytest
 def _no_cloudflare(zeev, monkeypatch):
     # The real .env is loaded at import; these tests exercise Requesty/AnyAPI.
     monkeypatch.setattr(zeev, "CLOUDFLARE_AI_URL", "")
+    monkeypatch.setattr(zeev, "FREEAI_API_KEY", "")
 
 
 def _groq_429(*a, **kw):

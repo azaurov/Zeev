@@ -20,6 +20,7 @@ def _no_requesty(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "REQUESTY_API_KEY", "")
     monkeypatch.setattr(zeev, "ANYAPI_API_KEY", "")
     monkeypatch.setattr(zeev, "CLOUDFLARE_AI_URL", "")
+    monkeypatch.setattr(zeev, "FREEAI_API_KEY", "")
 
 
 def test_retries_the_whole_model_list_after_a_full_failure(zeev):

@@ -21,6 +21,7 @@ import pytest
 def _only_cloudflare(zeev, monkeypatch):
     monkeypatch.setattr(zeev, "REQUESTY_API_KEY", "")
     monkeypatch.setattr(zeev, "ANYAPI_API_KEY", "")
+    monkeypatch.setattr(zeev, "FREEAI_API_KEY", "")
     monkeypatch.setattr(zeev, "CLOUDFLARE_API_KEY", "cf-key")
     monkeypatch.setattr(zeev, "CLOUDFLARE_AI_URL", "https://cf.example/ai/v1/chat/completions")
 

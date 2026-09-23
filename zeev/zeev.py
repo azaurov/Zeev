@@ -91,6 +91,10 @@ ANYAPI_URL         = "https://api.anyapi.ai/v1/chat/completions"
 # chat fallback (_CLOUDFLARE_CHAT_CANDIDATES). Free plan: 10,000 neurons/day,
 # then calls fail rather than bill. The URL needs the account id, so both vars
 # must be set; CLOUDFLARE_AI_URL is "" otherwise and every Cloudflare path is off.
+# Free.ai (api.free.ai) -- last-resort chat fallback only. 30K tokens/DAY
+# (~15 calls), the smallest free pool of any provider here.
+FREEAI_API_KEY        = os.environ.get("FREEAI_API_KEY",        "")
+FREEAI_URL            = "https://api.free.ai/v1/chat/completions"
 CLOUDFLARE_API_KEY    = os.environ.get("CLOUDFLARE_API_KEY",    "")
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 CLOUDFLARE_AI_URL     = (f"https://api.cloudflare.com/client/v4/accounts/"
@@ -8818,11 +8822,22 @@ _CLOUDFLARE_CHAT_CANDIDATES = [
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ]
 
+# Free.ai, tried LAST -- only when Groq, Requesty, Cloudflare and every
+# OpenRouter candidate have all failed at once. qwen3-8b is self-hosted by
+# Free.ai: 0.45-0.58s TTFT, no reasoning tokens, accurate on the 2026-09-23
+# streaming benchmark. Rejected: qwen7b (actually Qwen3-30B; placed Ezekiel's
+# exiles in "Jerusalem's deportation camp"); qwen-vl misread a flyer's "6:00"
+# as "6:00am" and asserted it was written, so Free.ai is not a vision provider.
+# mistral/deepseek-r1 are only on Free.ai's non-standard /v1/chat/ endpoint.
+_FREEAI_CHAT_CANDIDATES = [
+    "qwen3-8b",
+]
+
 
 def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning_effort=None):
     """Like _groq_post, but on a 429/cooldown falls through to Requesty's,
-    Cloudflare Workers AI's and then OpenRouter's free tiers so a Groq rate
-    limit doesn't stall the reply. Each miss costs a round trip (~1-3s)."""
+    Cloudflare Workers AI's, OpenRouter's and finally Free.ai's free tiers so a
+    Groq rate limit doesn't stall the reply. Each miss costs a round trip (~1-3s)."""
     msgs = _apply_language_suffix(msgs)
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
                             reasoning_effort=reasoning_effort)
@@ -8865,6 +8880,16 @@ def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning
                 return or_resp, or_err
             status = or_resp.status_code if or_resp is not None else or_err
             print(f"[llm] OpenRouter {or_model} failed ({status}) — trying next candidate", flush=True)
+    if rate_limited and FREEAI_API_KEY:
+        for fa_model in _FREEAI_CHAT_CANDIDATES:
+            print(f"[llm] Groq 429 on {model} — last resort, Free.ai ({fa_model})", flush=True)
+            fa_resp, fa_err = _openai_compat_post(
+                FREEAI_URL, FREEAI_API_KEY, msgs, fa_model, stream, max_tokens,
+            )
+            if not fa_err and fa_resp is not None and fa_resp.status_code == 200:
+                return fa_resp, fa_err
+            status = fa_resp.status_code if fa_resp is not None else fa_err
+            print(f"[llm] Free.ai {fa_model} failed ({status})", flush=True)
     return resp, err
 
 

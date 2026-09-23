@@ -165,3 +165,56 @@ def test_vision_skips_requesty_entry_without_its_key(zeev):
 
     assert text == "A tree."
     assert seen == ["or/model-a"]
+
+
+def test_vision_anyapi_entry_hits_anyapi_with_bare_model_id(zeev):
+    """AnyAPI (added 2026-09-23) is a third free vision pool behind the same
+    "provider:" prefix mechanism -- the prefix must never reach the API."""
+    seen = []
+
+    def fake_post(url, headers, json, timeout):
+        seen.append((url, headers["Authorization"], json["model"]))
+        return _vision_ok("A lit tent under the Milky Way.")
+
+    with patch.object(zeev, "VISION_MODELS", ["anyapi:vendor/model-y:free"]), \
+         patch.object(zeev, "ANYAPI_API_KEY", "any-key"), \
+         patch.object(zeev, "REQUESTY_API_KEY", ""), \
+         patch.object(zeev, "OPENROUTER_API_KEY", ""), \
+         patch.object(zeev, "requests") as fake_requests:
+        fake_requests.post.side_effect = fake_post
+        text, err = zeev.vision_complete("ZmFrZQ==", "what's here?")
+
+    assert text == "A lit tent under the Milky Way."
+    assert seen == [(zeev.ANYAPI_URL, "Bearer any-key", "vendor/model-y:free")]
+
+
+def test_vision_falls_through_to_anyapi_when_earlier_providers_429(zeev):
+    seen = []
+
+    def fake_post(url, headers, json, timeout):
+        seen.append(url)
+        if url != zeev.ANYAPI_URL:
+            resp = MagicMock()
+            resp.status_code = 429
+            return resp
+        return _vision_ok("A campfire.")
+
+    with patch.object(zeev, "VISION_MODELS", ["or/model-a", "requesty:vendor/model-x",
+                                               "anyapi:vendor/model-y:free", "or/paid"]), \
+         patch.object(zeev, "ANYAPI_API_KEY", "any-key"), \
+         patch.object(zeev, "REQUESTY_API_KEY", "rq-key"), \
+         patch.object(zeev, "OPENROUTER_API_KEY", "or-key"), \
+         patch.object(zeev, "VISION_RETRIES", 0), \
+         patch.object(zeev, "requests") as fake_requests:
+        fake_requests.post.side_effect = fake_post
+        text, err = zeev.vision_complete("ZmFrZQ==", "what's here?")
+
+    assert text == "A campfire."
+    assert seen[-1] == zeev.ANYAPI_URL
+    assert len(seen) == 3, "paid entry must not be reached once AnyAPI answers"
+
+
+def test_production_vision_list_puts_free_pools_before_the_paid_model(zeev):
+    paid = zeev.VISION_MODELS.index("google/gemma-4-26b-a4b-it")
+    assert zeev.VISION_MODELS.index("anyapi:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free") < paid
+    assert zeev.VISION_MODELS.index("requesty:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning") < paid

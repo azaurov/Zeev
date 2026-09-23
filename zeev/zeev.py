@@ -83,6 +83,10 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 # (which the dog detector's Leo check also spends). See _REQUESTY_FREE_CANDIDATES.
 REQUESTY_API_KEY   = os.environ.get("REQUESTY_API_KEY",   "")
 REQUESTY_URL       = "https://router.requesty.ai/v1/chat/completions"
+# AnyAPI (api.anyapi.ai) -- vision only, via an "anyapi:" VISION_MODELS entry.
+# Free plan is 100K tokens/DAY (~50 fallback calls), its own pool.
+ANYAPI_API_KEY     = os.environ.get("ANYAPI_API_KEY",     "")
+ANYAPI_URL         = "https://api.anyapi.ai/v1/chat/completions"
 ZEEV_WATCH_KEY    = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
 # Same host the nginx /watch location already proxies to for the Zepp watch
 # app -- reachable over Tailscale from any box on the tailnet, not just the
@@ -1726,10 +1730,17 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # as on OpenRouter). Requesty's gemma-4-31b-it and muse-glimmer-30b returned
 # EMPTY content (finish=length, all reasoning) on that flyer at 600 tokens;
 # don't add them without re-testing a text-heavy image.
+#
+# "anyapi:" likewise routes to AnyAPI -- the same nemotron-omni model again,
+# a third free pool (100K tokens/day). Benchmarked 2026-09-23 with
+# _VISION_HONESTY: 5.7s scene, 34.6s flyer with the text read accurately.
+# AnyAPI's ling-3.0-flash-vl was 429'd on the flyer 3 of 3 tries (untested,
+# not rejected); nex-n2.5-mini returned EMPTY content on the flyer.
 VISION_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
     "requesty:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    "anyapi:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it",
 ]
 VISION_TIMEOUT = float(os.environ.get("VISION_TIMEOUT", "60"))
@@ -10285,14 +10296,16 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
     list is retried up to `VISION_RETRIES` more times after a short delay --
     see the module-level comment above for why that's worth doing here.
     """
-    if not (OPENROUTER_API_KEY or REQUESTY_API_KEY):
-        return None, "no OPENROUTER_API_KEY or REQUESTY_API_KEY (Groq no longer serves vision models)"
+    if not (OPENROUTER_API_KEY or REQUESTY_API_KEY or ANYAPI_API_KEY):
+        return None, "no OPENROUTER/REQUESTY/ANYAPI_API_KEY (Groq no longer serves vision models)"
     msgs = _build_vision_msgs(image_b64, question)
     last = "no models tried"
     for attempt in range(VISION_RETRIES + 1):
         for entry in (models or VISION_MODELS):
             if entry.startswith("requesty:"):
                 m, url, key = entry[len("requesty:"):], REQUESTY_URL, REQUESTY_API_KEY
+            elif entry.startswith("anyapi:"):
+                m, url, key = entry[len("anyapi:"):], ANYAPI_URL, ANYAPI_API_KEY
             else:
                 m, url, key = entry, "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
             if not key:

@@ -14965,7 +14965,13 @@ def handle_transcript(ctx, transcript, _depth=0):
                             + [{"role": "user", "content": "Yes, please continue with more detail on that."}])
             content = ""
             try:
-                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False, max_tokens=300)
+                # gpt-oss models spend hidden reasoning tokens out of this same
+                # max_tokens budget (see CLAUDE.md's gpt-oss reasoning-overhead
+                # note) -- a plain max_tokens=300 with no reasoning_effort let
+                # reasoning alone exhaust the budget, so "pre-generated" detail
+                # was truncated to a dangling half-sentence or came back empty.
+                r, _ = _groq_post_with_fallback(detail_msgs, model_id, stream=False,
+                                                 max_tokens=600, reasoning_effort="low")
                 if r and r.status_code == 200:
                     content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
                     content = content.strip()

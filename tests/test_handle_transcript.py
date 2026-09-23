@@ -971,6 +971,54 @@ def test_pending_detail_topic_does_not_compound_on_repeated_failure(zeev, monkey
     )
 
 
+def test_prefetch_detail_uses_low_reasoning_effort_and_a_wider_budget(zeev, monkeypatch, ctx):
+    """Live 2026-09-21: the world-news "spiel" detail pre-generation called
+    _groq_post_with_fallback on gpt-oss-20b with max_tokens=300 and no
+    reasoning_effort. gpt-oss spends hidden reasoning tokens out of that same
+    budget (documented in CLAUDE.md's gpt-oss reasoning-overhead note), so
+    reasoning alone exhausted it -- one turn's "detail" was a dangling
+    half-sentence, the next was HTTP 200 with empty content. Alex heard
+    "You didn't finish" and the spiel looped back to the start instead of
+    ever delivering the promised detail. Pin reasoning_effort="low" plus a
+    wider budget on this specific call, the same fix already applied to
+    every other gpt-oss call site with a tight token budget."""
+    calls = []
+
+    def fake_fallback(msgs, model, **kwargs):
+        calls.append((msgs, kwargs))
+        if any(m.get("content") == "Yes, please continue with more detail on that."
+               for m in msgs):
+            return _FakeResp("Here is the detail."), None
+        return _FakeResp("The intro. Want to hear more?"), None
+
+    class _SyncThread:
+        """Runs _prefetch_detail's target inline instead of on a real
+        background thread, so this test isn't racing the main thread's own
+        end-of-turn pending-state clear for who touches the ready Event
+        first (both real threads finish in microseconds against a fake,
+        network-free LLM call -- the interleaving is otherwise undefined)."""
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(zeev, "_build_system_prompt", lambda *a, **k: "sys")
+    monkeypatch.setattr(zeev, "_groq_post_with_fallback", fake_fallback)
+    monkeypatch.setattr(zeev, "_groq_post", fake_fallback)
+    monkeypatch.setattr(zeev.threading, "Thread", _SyncThread)
+    ctx._followup_listen = lambda: ""
+
+    zeev.handle_transcript(ctx, "tell me about the siddur")
+
+    detail_calls = [kwargs for msgs, kwargs in calls
+                    if any(m.get("content") == "Yes, please continue with more detail on that."
+                           for m in msgs)]
+    assert detail_calls, "detail pre-generation call was never made"
+    assert detail_calls[0].get("reasoning_effort") == "low", detail_calls[0]
+    assert detail_calls[0].get("max_tokens", 0) >= 600, detail_calls[0]
+
+
 def test_model_supplied_offer_is_not_duplicated(zeev, monkeypatch, ctx):
     """When the model does comply, the offer must not be appended twice."""
     _run_llm_turn(zeev, monkeypatch, ctx,

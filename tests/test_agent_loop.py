@@ -40,6 +40,8 @@ def scripted(*msgs):
     "what's in my workspace", "read the file plan.txt", "list the files in the projects folder",
     "search my files for the garden budget", "look in the folder for tax stuff",
     "summarize the document about the roof", "find the file with the wifi password",
+    "read the README.txt file", "open budget.csv", "show me notes.md", "what's in plan.json",
+    "read the README.txt in the ~/zeev-workspace/ folder",
 ])
 def test_intent_matches_file_requests(zeev, text):
     assert zeev._AGENT_INTENT_RE.search(text)
@@ -49,6 +51,7 @@ def test_intent_matches_file_requests(zeev, text):
     "tell me about the Torah", "what's the weather", "how do I file my taxes",
     "find a way to relax", "what is in season in October", "can you read me the parsha",
     "I need to file a complaint", "check the weather in Canton",
+    "I love reading my notes.txt", "read the docs at example.com", "show me a picture of a dog",
 ])
 def test_intent_ignores_ordinary_chat(zeev, text):
     assert not zeev._AGENT_INTENT_RE.search(text)
@@ -58,8 +61,8 @@ def test_reminder_phrasing_wins_over_agent_gate(zeev):
     t = "remind me to read the file at four"
     assert zeev._AGENT_INTENT_RE.search(t) and zeev._TOOL_INTENT_RE.search(t)
     src = Path(zeev.__file__).read_text()
-    gate = re.search(r"if \(AGENT_ENABLED and _AGENT_INTENT_RE\.search\(user_msg\)\s+and not "
-                     r"_TOOL_INTENT_RE\.search\(user_msg\)\):", src)
+    gate = re.search(r"_agent_turn = bool\(AGENT_ENABLED and not _TOOL_INTENT_RE\.search\(user_msg\)\s+"
+                     r"and \(_AGENT_INTENT_RE\.search\(user_msg\)\s+or _agent_followup\(user_msg\)\)\)", src)
     assert gate, "web /chat agent gate must exclude _TOOL_INTENT_RE"
 
 

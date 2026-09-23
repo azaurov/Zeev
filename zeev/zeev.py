@@ -5585,6 +5585,15 @@ def _db() -> sqlite3.Connection:
                 outcome TEXT    NOT NULL,
                 ts      REAL    NOT NULL
             );
+            -- Web agent (file-reading) conversations, kept out of `messages` so a
+            -- summary of a file that later changes is never embedded and served
+            -- back as fact. Read explicitly by _agent_history_block(), dated.
+            CREATE TABLE IF NOT EXISTS agent_messages (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                role    TEXT    NOT NULL,
+                content TEXT    NOT NULL,
+                ts      REAL    NOT NULL
+            );
             -- Semantic index over `messages`. Vectors are computed remotely on
             -- bosgame (the Pi has neither the RAM nor the core to embed) and
             -- cached here, so retrieval itself is a local dot product.
@@ -5666,6 +5675,56 @@ def append_message(role, content):
             (role, content, datetime.now().isoformat()),
         )
         _db().commit()
+
+
+_AGENT_HISTORY_WINDOW = 7 * 86400     # older file conversations are too stale to surface
+_AGENT_HISTORY_ROWS = 6               # messages (3 exchanges), not exchanges
+_AGENT_HISTORY_ITEM_CHARS = 400
+_AGENT_HISTORY_TOTAL_CHARS = 1600
+
+
+def append_agent_message(role, content):
+    with _db_lock:
+        _db().execute(
+            "INSERT INTO agent_messages (role, content, ts) VALUES (?, ?, ?)",
+            (role, content, time.time()),
+        )
+        _db().commit()
+
+
+def _agent_history_block():
+    """Recent file-reading conversations as a dated prompt block, or "".
+
+    The agent's history lives in its own table (not `messages`, so it is never
+    embedded into history RAG and served back as fact after the files change),
+    but both sides can see it: the main chat prompt and the agent loop each
+    inject this block. Runs on every turn, so it fails open on any DB error.
+    """
+    try:
+        with _db_lock:
+            rows = _db().execute(
+                "SELECT role, content, ts FROM agent_messages WHERE ts >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (time.time() - _AGENT_HISTORY_WINDOW, _AGENT_HISTORY_ROWS),
+            ).fetchall()
+    except Exception as e:
+        print(f"[db] agent history read failed: {e}", flush=True)
+        return ""
+    lines, used = [], 0
+    for r in reversed(rows):
+        who = "Alex" if r["role"] == "user" else "You"
+        when = datetime.fromtimestamp(r["ts"]).strftime("%a %b %-d, %-I:%M %p")
+        text = " ".join(r["content"].split())[:_AGENT_HISTORY_ITEM_CHARS]
+        line = f"- [{when}] {who}: {text}"
+        if used + len(line) > _AGENT_HISTORY_TOTAL_CHARS:
+            break
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        return ""
+    return ("Recent conversations where Alex had you read files from his workspace "
+            "folder (the files may have changed since, so treat this as what was true "
+            "at the time, and re-read a file if he wants it current):\n" + "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -6122,9 +6181,41 @@ _AGENT_INTENT_RE = re.compile(
     r"(read|open|show|list|find|search|look (in|through|at|inside)|check|summari[sz]e|"
     r"what'?s in|what is in)\b.{0,30}\b(the|my|a|an|that|this|any|which) (\w+ )?"
     r"(files?|folders?|directory|directories|documents?)\b|"
-    r"\b(in|from|inside|through) (my|the) (files|folder|documents))\b",
+    r"\b(in|from|inside|through) (my|the) (files|folder|documents)|"
+    # a bare filename ("read the README.txt file", "open budget.csv"); the noun
+    # alternative above needs a plain word before "file", so a dotted name slipped past
+    r"(read|open|show|display|print|summari[sz]e|check|look at|what'?s in|what is in)\b"
+    r".{0,40}\b[\w\-]+\.(txt|md|csv|tsv|json|pdf|log|py|docx?|xlsx?|html?|ya?ml|ini|conf|cfg|rtf|xml)\b)",
     re.IGNORECASE,
 )
+
+# "read it again" / "what does it say" / "open the next one" carry no file noun, so
+# _AGENT_INTENT_RE misses them, and the main chat answered "I don't have access to
+# your files" (found live 2026-09-23). Only counts as a follow-up while an agent
+# exchange is fresh, so ordinary chat is not hijacked.
+_AGENT_FOLLOWUP_RE = re.compile(
+    r"^\W*(please\s+)?(read|open|show|display|print|summari[sz]e|list|search|check|look at)\b"
+    r".{0,40}\b(it|that|this|them|those|again|next|another|previous|last|first|second|third|one)\b"
+    r"|^\W*what (does|did) (it|that|that file|the file) say\b"
+    r"|^\W*(and |now )?(the )?(next|other|another|previous) (one|file)\b",
+    re.IGNORECASE,
+)
+_AGENT_FOLLOWUP_WINDOW = 600
+
+
+def _agent_followup(text, now=None):
+    """True when `text` reads as a follow-up to an agent exchange under 10 minutes old."""
+    if not _AGENT_FOLLOWUP_RE.search(text or ""):
+        return False
+    try:
+        with _db_lock:
+            row = _db().execute("SELECT MAX(ts) AS t FROM agent_messages").fetchone()
+    except Exception as e:
+        print(f"[db] agent follow-up check failed: {e}", flush=True)
+        return False
+    last = row["t"] if row else None
+    return last is not None and ((now or time.time()) - last) <= _AGENT_FOLLOWUP_WINDOW
+
 
 _AGENT_SYSTEM = (
     "You are Zeev, Alex's assistant. The user's workspace folder is reachable ONLY "
@@ -6169,7 +6260,8 @@ def _agent_post(msgs):
     return None, ""
 
 
-def run_agent_loop(history, on_step=None, post=None, max_steps=AGENT_MAX_STEPS):
+def run_agent_loop(history, on_step=None, post=None, max_steps=AGENT_MAX_STEPS, prior_block="",
+                   require_tool=True):
     """Bounded tool loop. Returns (reply_text | None, reason).
 
     reason is "ok", "no-provider", "empty" or "step-cap"; the caller says so
@@ -6177,8 +6269,11 @@ def run_agent_loop(history, on_step=None, post=None, max_steps=AGENT_MAX_STEPS):
     """
     from agent_fs import AGENT_TOOL_NAMES, run_agent_tool
     post = post or _agent_post
-    msgs = ([{"role": "system", "content": _AGENT_SYSTEM.format(now=_now_str())}]
-            + list(history)[-_AGENT_HISTORY_MSGS:])
+    sys_text = _AGENT_SYSTEM.format(now=_now_str())
+    if prior_block:
+        sys_text += "\n\n" + prior_block
+    msgs = [{"role": "system", "content": sys_text}] + list(history)[-_AGENT_HISTORY_MSGS:]
+    used_tool = nudged = False
     for _ in range(max_steps):
         msg, label = post(msgs)
         if not msg:
@@ -6186,7 +6281,18 @@ def run_agent_loop(history, on_step=None, post=None, max_steps=AGENT_MAX_STEPS):
         content = _strip_think_text(msg.get("content") or "")
         calls = msg.get("tool_calls") or []
         if not calls:
+            # With earlier file conversations in the prompt the model happily recites
+            # a stale answer ("read it again" made no tool call, found live
+            # 2026-09-23). A prompt caveat is not enough: make it look once.
+            if content and require_tool and not used_tool and not nudged:
+                nudged = True
+                msgs.append({"role": "assistant", "content": content})
+                msgs.append({"role": "user", "content": (
+                    "Use your tools to check the workspace now. Earlier answers may be out "
+                    "of date, so do not answer from memory.")})
+                continue
             return (content, "ok") if content else (None, "empty")
+        used_tool = True
         msgs.append({"role": "assistant", "content": content, "tool_calls": calls})
         for tc in calls:
             fn = tc.get("function") or {}
@@ -9927,6 +10033,10 @@ def _build_system_prompt(user_text, on_search=None, session=None):
             "or by guessing — you have no other way to know what happened on a call."
         )
 
+    _agent_hist = _agent_history_block()
+    if _agent_hist:
+        parts.append(f"\n\n## Workspace file conversations:\n{_agent_hist}")
+
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
         parts.append(
@@ -13533,18 +13643,30 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                         session[:] = session[-60:]
                 return
 
-            with lock:
-                session.append({"role": "user", "content": user_msg})
-                append_message("user", user_msg)
-                snapshot = list(session)
-
             # Read-only workspace agent (agent_fs.py). Excludes _TOOL_INTENT_RE so
             # "remind me to read the file" stays a reminder, same as every gate here.
-            if (AGENT_ENABLED and _AGENT_INTENT_RE.search(user_msg)
-                    and not _TOOL_INTENT_RE.search(user_msg)):
+            # Its turns go to agent_messages, not `messages`/`session` (see
+            # _agent_history_block); the agent still sees the main chat via `snapshot`.
+            _agent_turn = bool(AGENT_ENABLED and not _TOOL_INTENT_RE.search(user_msg)
+                               and (_AGENT_INTENT_RE.search(user_msg)
+                                    or _agent_followup(user_msg)))
+            # Read BEFORE saving this question, or it would appear in its own history.
+            _agent_prior = _agent_history_block() if _agent_turn else ""
+            with lock:
+                if _agent_turn:
+                    snapshot = list(session) + [{"role": "user", "content": user_msg}]
+                    append_agent_message("user", user_msg)
+                else:
+                    session.append({"role": "user", "content": user_msg})
+                    append_message("user", user_msg)
+                    snapshot = list(session)
+
+            if _agent_turn:
                 sse({"model": "agent"})
                 reply, why = run_agent_loop(
-                    snapshot, on_step=lambda n, a: sse({"info": _agent_step_label(n, a)}))
+                    snapshot,
+                    on_step=lambda n, a: sse({"info": _agent_step_label(n, a)}),
+                    prior_block=_agent_prior)
                 if not reply:
                     reply = {"step-cap": "I hit my step limit before finishing that. "
                                          "Try asking about one file at a time.",
@@ -13553,11 +13675,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 sse({"token": reply})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
-                with lock:
-                    session.append({"role": "assistant", "content": reply})
-                    append_message("assistant", reply)
-                    if len(session) > 60:
-                        session[:] = session[-60:]
+                append_agent_message("assistant", reply)
                 return
 
             quantum_idea = extract_quantum_query(user_msg)

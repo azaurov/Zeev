@@ -6176,6 +6176,16 @@ AGENT_ENABLED = os.environ.get("ZEEV_AGENT", "1") != "0"
 AGENT_MAX_STEPS = 5
 _AGENT_HISTORY_MSGS = 6      # recent turns only: Groq's qwen is capped at 8000 TPM
 
+_AGENT_FILENAME = (r"[\w\-]+\.(?:txt|md|csv|tsv|json|pdf|log|py|docx?|xlsx?|html?|ya?ml|ini|conf|cfg|rtf|xml)\b")
+
+
+def _agent_norm(text):
+    """Straight apostrophes. Phone and Mac keyboards type curly ones, so
+    "what\u2019s in the README.txt file" silently missed the gate and fell back to
+    plain chat (found live 2026-09-23)."""
+    return (text or "").replace("\u2019", "'").replace("\u2018", "'").replace("\u02bc", "'")
+
+
 _AGENT_INTENT_RE = re.compile(
     r"\b(workspace|"
     r"(read|open|show|list|find|search|look (in|through|at|inside)|check|summari[sz]e|"
@@ -6184,8 +6194,9 @@ _AGENT_INTENT_RE = re.compile(
     r"\b(in|from|inside|through) (my|the) (files|folder|documents)|"
     # a bare filename ("read the README.txt file", "open budget.csv"); the noun
     # alternative above needs a plain word before "file", so a dotted name slipped past
-    r"(read|open|show|display|print|summari[sz]e|check|look at|what'?s in|what is in)\b"
-    r".{0,40}\b[\w\-]+\.(txt|md|csv|tsv|json|pdf|log|py|docx?|xlsx?|html?|ya?ml|ini|conf|cfg|rtf|xml)\b)",
+    r"(read|open|show|display|print|summari[sz]e|check|look at|describe|tell me about|"
+    r"what'?s (in|inside)|what is (in|inside)|what (does|do|did)|contents? of)\b"
+    r".{0,40}\b" + _AGENT_FILENAME + r")",
     re.IGNORECASE,
 )
 
@@ -6203,9 +6214,13 @@ _AGENT_FOLLOWUP_RE = re.compile(
 _AGENT_FOLLOWUP_WINDOW = 600
 
 
+_AGENT_FILENAME_RE = re.compile(r"\b" + _AGENT_FILENAME)
+
+
 def _agent_followup(text, now=None):
     """True when `text` reads as a follow-up to an agent exchange under 10 minutes old."""
-    if not _AGENT_FOLLOWUP_RE.search(text or ""):
+    text = _agent_norm(text)
+    if not (_AGENT_FOLLOWUP_RE.search(text) or _AGENT_FILENAME_RE.search(text)):
         return False
     try:
         with _db_lock:
@@ -6215,6 +6230,11 @@ def _agent_followup(text, now=None):
         return False
     last = row["t"] if row else None
     return last is not None and ((now or time.time()) - last) <= _AGENT_FOLLOWUP_WINDOW
+
+
+def _agent_intent(text):
+    """Does this web message belong to the file agent? (normalised, follow-ups included)"""
+    return bool(_AGENT_INTENT_RE.search(_agent_norm(text)) or _agent_followup(text))
 
 
 _AGENT_SYSTEM = (
@@ -13663,8 +13683,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             # Its turns go to agent_messages, not `messages`/`session` (see
             # _agent_history_block); the agent still sees the main chat via `snapshot`.
             _agent_turn = bool(AGENT_ENABLED and not _TOOL_INTENT_RE.search(user_msg)
-                               and (_AGENT_INTENT_RE.search(user_msg)
-                                    or _agent_followup(user_msg)))
+                               and _agent_intent(user_msg))
             # Read BEFORE saving this question, or it would appear in its own history.
             _agent_prior = _agent_history_block() if _agent_turn else ""
             with lock:

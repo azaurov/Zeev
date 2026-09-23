@@ -42,9 +42,12 @@ def scripted(*msgs):
     "summarize the document about the roof", "find the file with the wifi password",
     "read the README.txt file", "open budget.csv", "show me notes.md", "what's in plan.json",
     "read the README.txt in the ~/zeev-workspace/ folder",
+    "tell me what's in the README.txt file", "tell me what\u2019s in the README.txt file",
+    "What\u2018s in README.txt?", "what does the README.txt file say", "what's inside notes.md",
+    "contents of budget.csv", "describe plan.json",
 ])
 def test_intent_matches_file_requests(zeev, text):
-    assert zeev._AGENT_INTENT_RE.search(text)
+    assert zeev._AGENT_INTENT_RE.search(zeev._agent_norm(text))   # pure: no DB read
 
 
 @pytest.mark.parametrize("text", [
@@ -62,7 +65,7 @@ def test_reminder_phrasing_wins_over_agent_gate(zeev):
     assert zeev._AGENT_INTENT_RE.search(t) and zeev._TOOL_INTENT_RE.search(t)
     src = Path(zeev.__file__).read_text()
     gate = re.search(r"_agent_turn = bool\(AGENT_ENABLED and not _TOOL_INTENT_RE\.search\(user_msg\)\s+"
-                     r"and \(_AGENT_INTENT_RE\.search\(user_msg\)\s+or _agent_followup\(user_msg\)\)\)", src)
+                     r"and _agent_intent\(user_msg\)\)", src)
     assert gate, "web /chat agent gate must exclude _TOOL_INTENT_RE"
 
 

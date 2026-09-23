@@ -194,3 +194,27 @@ def test_require_tool_can_be_disabled(zeev):
     zeev.run_agent_loop([{"role": "user", "content": "x"}],
                         post=lambda m: (n.append(1), ({"content": "hi"}, "f"))[1], require_tool=False)
     assert len(n) == 1
+
+
+# -- curly apostrophes / bare filenames (found live 2026-09-23) -----------------
+
+def test_curly_apostrophe_is_normalised(zeev):
+    assert zeev._agent_norm("what’s in it ‘x’ ʼy") == "what's in it 'x' 'y"
+    for q in ("tell me what’s in the README.txt file", "what's in the README.txt file"):
+        assert zeev._AGENT_INTENT_RE.search(zeev._agent_norm(q)), q       # pure: no DB read
+    assert not zeev._AGENT_INTENT_RE.search("tell me what’s in the README.txt file")  # raw curly misses
+
+
+def test_bare_filename_continues_a_fresh_exchange_only(db):
+    assert not db._agent_intent("and the todo.txt?")            # nothing recent: ordinary chat
+    db.append_agent_message("assistant", "README says hi")
+    assert db._agent_intent("and the todo.txt?")
+    assert not db._agent_intent("and how is the weather?")
+
+
+def test_gate_function_itself_normalises(zeev, monkeypatch):
+    """_agent_intent (what the handler calls) must accept the curly form; the helper
+    tests above would still pass if the gate stopped calling the helper."""
+    monkeypatch.setattr(zeev, "_agent_followup", lambda t, now=None: False)     # regex arm only
+    assert zeev._agent_intent("tell me what’s in the README.txt file")
+    assert not zeev._agent_intent("how’s your day going?")

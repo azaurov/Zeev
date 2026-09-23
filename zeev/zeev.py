@@ -1363,6 +1363,54 @@ def play_duet_wav(path, adev):
         _duet_proc = None
 
 
+# ── Image generation ("draw me a ...") ──────────────────────────────────
+# Cloudflare Workers AI flux-1-schnell, web /chat only (the only surface that
+# can show an image). Draws from the same 10,000 neurons/day pool as the
+# Cloudflare chat/vision fallbacks. Measured 2026-09-23: 3.0s, 1024x1024 JPEG.
+# The trigger needs a drawing verb AND an image noun (or "draw me"), so the
+# camera gates' "take a picture" / "what do you see" never reach it.
+_IMAGE_GEN_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+_IMAGE_GEN_RE = re.compile(
+    r"\b(?:draw|paint|sketch|generate|create|make|render|illustrate)\s+(?:for\s+)?(?:me\s+)?"
+    r"(?:an?\s+|the\s+|some\s+)?(?:\w+\s+){0,2}?"
+    r"(?:picture|image|photo|photograph|drawing|illustration|painting|portrait|artwork)s?\s+"
+    r"(?:of|showing|depicting|with)\s+(?P<subject>.+)"
+    r"|\b(?:draw|paint|sketch)\s+(?:for\s+)?me\s+(?:an?\s+|the\s+|some\s+)?(?P<subject2>.+)",
+    re.I | re.S)
+
+
+def image_gen_subject(text):
+    """The thing to draw, or None when `text` isn't a draw request."""
+    text = (text or "").replace("\u2019", "'")
+    if _TOOL_INTENT_RE.search(text):
+        return None
+    m = _IMAGE_GEN_RE.search(text)
+    if not m or m.start() > 60:
+        return None
+    subj = (m.group("subject") or m.group("subject2") or "").strip(" .!?\n")
+    return subj[:400] or None
+
+
+def generate_image(prompt):
+    """(base64_jpeg, None) on success, (None, reason) otherwise. Never raises."""
+    if not CLOUDFLARE_AI_URL:
+        return None, "image generation needs the Cloudflare keys"
+    url = (f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}"
+           f"/ai/run/{_IMAGE_GEN_MODEL}")
+    try:
+        r = requests.post(url, headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"},
+                          json={"prompt": prompt, "steps": 4}, timeout=60)
+        j = r.json()
+    except Exception as e:
+        print(f"[imagegen] error: {e}", flush=True)
+        return None, "the image service didn't answer"
+    img = (j.get("result") or {}).get("image") if isinstance(j, dict) else None
+    if r.status_code == 200 and j.get("success") and img:
+        return img, None
+    print(f"[imagegen] HTTP {r.status_code}: {str(j.get('errors'))[:200]}", flush=True)
+    return None, "the image service is out of free allowance or refused it"
+
+
 _CAMERA_RE = re.compile(
     r"\bwhat (do you see|can you see|are you seeing|do you look at)\b"
     r"|\b(look around|take a (photo|picture|snapshot|look)|snap a (photo|picture))\b"
@@ -13311,6 +13359,22 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                     append_message("assistant", joke)
                 else:
                     sse({"error": "No jokes loaded."})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
+            _img_subject = image_gen_subject(user_msg)
+            if _img_subject:
+                sse({"info": "[drawing...]"})
+                _img, _img_err = generate_image(_img_subject)
+                if _img:
+                    sse({"image": f"data:image/jpeg;base64,{_img}"})
+                    _img_reply = f"Here's what I drew: {_img_subject}."
+                else:
+                    _img_reply = f"I couldn't draw that: {_img_err}."
+                sse({"token": _img_reply})
+                append_message("user", user_msg)
+                append_message("assistant", _img_reply)
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
                 return

@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Zeev</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=JetBrains+Mono:wght@300;400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --gold:#c5a059; --gold-bright:#e6c887; --gold-glow:rgba(197,160,89,.35);
+  --amber-nixie:#ff9900; --cyan:rgba(0,220,240,.65); --cyan-solid:#22d3ee;
+  --bg-deep:#030406; --glass:rgba(12,16,22,.88); --glass-soft:rgba(255,255,255,.03);
+  --border-soft:rgba(197,160,89,.22); --border-faint:rgba(197,160,89,.15);
+  --ink:#e2e8f0; --ink-dim:#8492a6; --ink-faint:#5b6678; --crit:#ef5b52;
+  --f-display:'Cinzel',serif; --f-mono:'JetBrains Mono',monospace; --f-body:'Space Grotesk',sans-serif;
+  /* legacy names still used by inline styles further down the page */
+  --zd-void:var(--bg-deep); --zd-panel:rgba(12,16,22,.92); --zd-panel-raised:rgba(255,255,255,.05);
+  --zd-line:var(--border-soft); --zd-line-soft:rgba(197,160,89,.1);
+  --zd-ink:var(--ink); --zd-ink-dim:var(--ink-dim); --zd-ink-faint:var(--ink-faint);
+  --zd-amber:var(--gold-bright); --zd-cyan:var(--cyan-solid); --zd-crit:var(--crit);
+  --zd-font-display:var(--f-display); --zd-font-body:var(--f-body); --zd-font-mono:var(--f-mono);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--bg-deep); }
+body {
+  background-color: var(--bg-deep);
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(197,160,89,.07) 0%, transparent 45%),
+    radial-gradient(circle at 88% 75%, rgba(0,220,240,.05) 0%, transparent 50%),
+    linear-gradient(180deg, #020305 0%, #06090e 100%);
+  color: var(--ink); font-family: var(--f-body);
+  height: 100dvh; display: flex; justify-content: center; align-items: stretch;
+  -webkit-text-size-adjust: 100%; -webkit-font-smoothing: antialiased; overflow: hidden;
+}
+body.splash-active { overscroll-behavior: none; }
+#ambientCanvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+.noir-vignette {
+  position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background: radial-gradient(ellipse at 50% 50%, transparent 45%, rgba(0,0,0,.92) 100%);
+}
+
+/* ---- app frame ---- */
+.app {
+  position: relative; z-index: 10; width: 100%; max-width: 980px; height: 100dvh;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--glass); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
+  border-left: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft);
+  transition: opacity .6s ease .15s, transform .6s ease .15s;
+}
+body.splash-active .app { opacity: 0; transform: scale(.985); pointer-events: none; }
+@media (min-width: 900px) {
+  body { padding: 2.5dvh 0; }
+  .app {
+    height: 95dvh; border: 1px solid var(--border-soft); border-radius: 18px;
+    box-shadow: 0 30px 100px rgba(0,0,0,.95), 0 0 60px rgba(197,160,89,.08), inset 0 1px 2px rgba(255,255,255,.08);
+  }
+}
+.corner-notch { position: absolute; width: 12px; height: 12px; border: 1px solid var(--gold); opacity: .4; pointer-events: none; z-index: 2; }
+.corner-tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.corner-tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.corner-bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+.corner-br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+
+/* ---- header ---- */
+header {
+  padding: 14px 22px 12px; border-bottom: 1px solid rgba(197,160,89,.15);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  flex-shrink: 0; font-family: var(--f-mono); font-size: .72rem; letter-spacing: 2px; color: var(--ink-dim);
+}
+.brand-group { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-mark { width: 26px; height: 26px; position: relative; flex: none; }
+.brand-mark svg { position: absolute; inset: 0; }
+.brand-mark .zd-spoke { stroke: var(--gold); stroke-width: 1.3; opacity: .6; transform-origin: 13px 13px; }
+.brand-mark .zd-core {
+  position: absolute; inset: 0; margin: auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--gold-bright); box-shadow: 0 0 8px 2px var(--gold-glow);
+  animation: zd-breathe 3.4s ease-in-out infinite;
+}
+@keyframes zd-breathe { 0%,100%{transform:scale(1);opacity:.85} 50%{transform:scale(1.3);opacity:1} }
+.brand {
+  background: rgba(197,160,89,.15); color: var(--gold-bright); border: 1px solid rgba(197,160,89,.4);
+  padding: 2px 9px; border-radius: 3px; font-family: var(--f-mono); font-size: .72rem; letter-spacing: 3px; font-weight: 700;
+}
+.brand-sub { color: var(--ink-faint); font-size: .66rem; letter-spacing: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+select {
+  background: rgba(255,255,255,.04); color: var(--gold-bright); border: 1px solid var(--border-soft);
+  font-family: var(--f-mono); letter-spacing: .5px;
+  padding: 5px 8px; border-radius: 4px; font-size: .72rem; cursor: pointer; max-width: 150px;
+}
+select:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 10px var(--gold-glow); }
+select option { background: #0c1016; color: var(--ink); }
+.icon-btn {
+  background: none; border: none; cursor: pointer; font-size: 1.05rem; color: var(--gold);
+  padding: 4px; line-height: 1; filter: grayscale(.55) sepia(.35); transition: filter .2s, transform .2s;
+}
+.icon-btn:hover { filter: none; transform: translateY(-1px); }
+#battPct { font-family: var(--f-mono); font-size: .74rem; font-weight: 600; padding: 2px 4px; letter-spacing: .02em; }
+#volDisplay { color: var(--gold-bright) !important; }
+
+/* ---- chat ---- */
+#chat {
+  flex: 1; overflow-y: auto; padding: 22px 22px 14px; min-height: 0;
+  display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
+#chat::-webkit-scrollbar { width: 4px; }
+#chat::-webkit-scrollbar-thumb { background: rgba(197,160,89,.25); border-radius: 2px; }
+.bubble {
+  max-width: 82%; padding: 11px 15px; border-radius: 14px;
+  line-height: 1.6; font-size: .95rem; word-break: break-word; white-space: pre-wrap;
+  animation: bubble-in .28s cubic-bezier(.16,1,.3,1);
+}
+@keyframes bubble-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.user-bubble {
+  align-self: flex-end; color: #1a1200; font-weight: 500;
+  background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+  border-bottom-right-radius: 4px; box-shadow: 0 4px 18px rgba(197,160,89,.18);
+}
+.zeev-bubble {
+  align-self: flex-start; color: var(--ink);
+  background: var(--glass-soft); border: 1px solid var(--border-faint);
+  border-bottom-left-radius: 4px; box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+}
+.zeev-bubble.pending::before { content: "\22EF"; }
+.zeev-bubble.pending { color: var(--gold); font-family: var(--f-mono); letter-spacing: 3px; animation: bubble-in .28s ease, shimmer 1.4s ease-in-out infinite .3s; }
+@keyframes shimmer { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+.zeev-bubble img { border: 1px solid var(--border-faint); }
+.thermal-canvas { display: block; border-radius: 6px; margin-bottom: 6px; image-rendering: pixelated; border: 1px solid var(--border-faint); }
+.model-tag {
+  display: block; margin-top: 6px; font-family: var(--f-mono); text-transform: uppercase;
+  font-size: .62rem; color: var(--ink-faint); letter-spacing: 2px;
+}
+
+/* ---- input row ---- */
+footer {
+  padding: 12px 16px; border-top: 1px solid rgba(197,160,89,.15);
+  display: flex; gap: 8px; flex-shrink: 0; align-items: center;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+#inp {
+  flex: 1; min-width: 0; background: rgba(255,255,255,.04); color: var(--ink);
+  font-family: var(--f-body); border: 1px solid var(--border-faint); border-radius: 22px;
+  padding: 11px 18px; font-size: 1rem; outline: none; transition: border-color .2s, box-shadow .2s;
+}
+#inp::placeholder { color: var(--ink-faint); }
+#inp:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(197,160,89,.12), 0 0 18px var(--gold-glow); }
+.btn {
+  border: 1px solid var(--border-faint); border-radius: 50%; width: 42px; height: 42px;
+  cursor: pointer; font-size: 1.05rem; flex-shrink: 0; color: var(--gold-bright);
+  background: rgba(255,255,255,.04);
+  display: flex; align-items: center; justify-content: center; transition: background .2s, border-color .2s, box-shadow .2s;
+}
+.btn:hover:not(:disabled) { background: rgba(197,160,89,.12); border-color: var(--gold); box-shadow: 0 0 12px var(--gold-glow); }
+#sendBtn { background: linear-gradient(135deg, var(--gold-bright), var(--gold)); color: #1a1200; border-color: transparent; }
+#sendBtn:hover:not(:disabled) { background: linear-gradient(135deg, #f1d79e, var(--gold-bright)); }
+#sendBtn:disabled { background: rgba(255,255,255,.04); color: var(--ink-faint); border-color: var(--border-faint); cursor: not-allowed; }
+#micBtn.active { background: var(--crit); border-color: var(--crit); color: #fff; }
+#recBtn.active { background: var(--crit); border-color: var(--crit); color: #fff; animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+#snapBtn:disabled, #thermalBtn:disabled { opacity: .4; cursor: not-allowed; }
+#flipBtn.active { background: rgba(45,106,79,.35); border-color: #2d6a4f; color: #6fcf7a; }
+
+/* ---- overlays ---- */
+#memOverlay, #noteOverlay {
+  display: none; position: fixed; inset: 0; z-index: 100; padding: 20px; overflow-y: auto;
+  background: rgba(3,4,6,.9); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+#memPanel, #notePanel {
+  position: relative; background: var(--glass); border: 1px solid var(--border-soft); border-radius: 14px;
+  padding: 22px; max-width: 480px; margin: 6vh auto 0;
+  box-shadow: 0 30px 100px rgba(0,0,0,.9), 0 0 60px rgba(197,160,89,.08);
+}
+#memPanel h2, #notePanel h2 {
+  font-family: var(--f-display); color: var(--gold-bright); font-size: 1.05rem; letter-spacing: 3px;
+  margin-bottom: 14px; text-transform: uppercase; font-weight: 700;
+}
+#memList, #noteList { font-size: .88rem; line-height: 1.9; color: var(--ink-dim); min-height: 40px; }
+#memList em, #noteList em { color: var(--ink-faint); }
+.mem-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.mem-btn {
+  font-family: var(--f-mono); padding: 7px 14px; border: 1px solid var(--border-faint); border-radius: 4px;
+  font-size: .74rem; letter-spacing: 1px; cursor: pointer; background: rgba(255,255,255,.04); color: var(--ink-dim);
+  transition: background .2s, border-color .2s;
+}
+.mem-btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold-bright); }
+#memorizeBtn, #noteAddBtn { background: rgba(197,160,89,.18); color: var(--gold-bright); border-color: rgba(197,160,89,.5); }
+#memorizeBtn:disabled { color: var(--ink-faint); cursor: not-allowed; }
+.note-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+.note-row span { flex: 1; }
+.note-del { background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: .9rem; padding: 0 2px; line-height: 1.9; flex-shrink: 0; }
+.note-del:hover { color: var(--crit); }
+.note-add-row { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
+#noteInp {
+  flex: 1; min-width: 140px; background: rgba(255,255,255,.04); color: var(--ink); font-family: var(--f-body);
+  border: 1px solid var(--border-faint); border-radius: 8px; padding: 8px 12px; font-size: .9rem; outline: none;
+}
+#noteInp:focus { border-color: var(--gold); }
+#noteMicBtn {
+  background: rgba(255,255,255,.04); border: 1px solid var(--border-faint); border-radius: 50%;
+  width: 36px; height: 36px; cursor: pointer; font-size: 1rem; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+#noteMicBtn.active { background: var(--crit); border-color: var(--crit); }
+
+/* ---- splash ---- */
+#splash {
+  position: fixed; inset: 0; z-index: 9999; display: flex; justify-content: center; align-items: center;
+  padding: 16px; overflow-y: auto; overscroll-behavior: contain;
+  transition: opacity .55s cubic-bezier(.16,1,.3,1), filter .55s ease, transform .55s ease;
+}
+#splash.out { opacity: 0; filter: blur(10px) brightness(2.5); transform: scale(1.08); pointer-events: none; }
+.splash-frame {
+  position: relative; width: 100%; max-width: 640px; text-align: center;
+  background: var(--glass); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
+  border: 1px solid var(--border-soft); border-radius: 18px; padding: 44px 32px 36px;
+  box-shadow: 0 30px 100px rgba(0,0,0,.95), 0 0 60px rgba(197,160,89,.08), inset 0 1px 2px rgba(255,255,255,.08);
+  display: flex; flex-direction: column; align-items: center; gap: 18px;
+}
+.dymo-badge {
+  background: rgba(197,160,89,.15); color: var(--gold-bright); border: 1px solid rgba(197,160,89,.4);
+  padding: 3px 10px; border-radius: 3px; font-family: var(--f-mono); font-size: .68rem; letter-spacing: 2px; font-weight: 700;
+}
+.section-tag { font-family: var(--f-mono); font-size: .68rem; letter-spacing: 3px; color: var(--gold); text-transform: uppercase; }
+.main-headline {
+  font-family: var(--f-display); font-size: clamp(2.4rem, 9vw, 3.6rem); font-weight: 900; letter-spacing: 4px;
+  color: #fff; line-height: 1.1; text-shadow: 0 2px 12px rgba(0,0,0,.9);
+}
+.main-headline span { display: block; font-size: .42em; letter-spacing: 6px; margin-top: 10px; color: var(--gold-bright); text-shadow: 0 0 22px var(--gold-glow); }
+.splash-rule { width: 60%; height: 1px; background: linear-gradient(90deg, transparent, var(--gold), transparent); opacity: .55; }
+.main-summary { font-size: .92rem; color: #94a3b8; line-height: 1.6; max-width: 440px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chip {
+  font-family: var(--f-mono); font-size: .66rem; letter-spacing: 1.5px; color: var(--ink-dim);
+  border: 1px solid rgba(197,160,89,.18); border-radius: 4px; padding: 4px 9px; background: rgba(255,255,255,.02);
+}
+.status-line { display: flex; align-items: center; gap: 9px; font-family: var(--f-mono); font-size: .68rem; letter-spacing: 1.5px; color: var(--ink-dim); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 6px var(--gold); animation: zd-breathe 2.6s ease-in-out infinite; }
+.enter-btn {
+  margin-top: 6px; font-family: var(--f-mono); font-size: .8rem; letter-spacing: 6px; text-indent: 6px;
+  color: var(--gold-bright); background: rgba(197,160,89,.08); border: 1px solid var(--gold);
+  padding: 12px 34px; border-radius: 4px; cursor: pointer; transition: background .25s, box-shadow .25s, transform .25s;
+  animation: enter-glow 2.8s ease-in-out infinite;
+}
+.enter-btn:hover, .enter-btn:focus-visible { background: rgba(197,160,89,.2); box-shadow: 0 0 24px var(--gold-glow); transform: translateY(-1px); outline: none; }
+@keyframes enter-glow { 0%,100% { box-shadow: 0 0 0 rgba(197,160,89,0); } 50% { box-shadow: 0 0 20px rgba(197,160,89,.28); } }
+
+@media (max-width: 640px) {
+  header { padding: 10px 12px; flex-wrap: wrap; row-gap: 8px; }
+  .brand-sub { display: none; }
+  .brand-group { flex: 1 0 100%; }
+  .controls { flex: 1 0 100%; gap: 6px; justify-content: space-between; flex-wrap: nowrap; }
+  .icon-btn { padding: 4px 1px; }
+  #volDisplay { min-width: 2rem !important; }
+  select { flex: 1 1 0; width: 0; min-width: 64px; max-width: none; margin-left: 4px; }
+  #chat { padding: 14px 12px 10px; }
+  .bubble { max-width: 90%; }
+  footer { padding: 10px 10px; gap: 6px; }
+  .btn { width: 38px; height: 38px; }
+  .splash-frame { padding: 34px 20px 28px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+</style>
+</head>
+<body class="splash-active">
+<canvas id="ambientCanvas" aria-hidden="true"></canvas>
+<div class="noir-vignette" aria-hidden="true"></div>
+
+<!-- Noir splash: shown once per browser session -->
+<div id="splash" role="dialog" aria-label="Welcome to Zeev">
+  <div class="splash-frame">
+    <div class="corner-notch corner-tl"></div><div class="corner-notch corner-tr"></div>
+    <div class="corner-notch corner-bl"></div><div class="corner-notch corner-br"></div>
+    <span class="dymo-badge">ZEEV // AI COMPANION</span>
+    <div class="section-tag">&#10022; Voice &bull; Vision &bull; Memory &bull; Workspace files</div>
+    <h1 class="main-headline">ZEEV<span>ALEX'S COMPANION</span></h1>
+    <div class="splash-rule"></div>
+    <p class="main-summary">Ask anything, dictate a note, look through a camera, or point me at a file in your workspace folder.</p>
+    <div class="chip-row">
+      <span class="chip">CHAT</span><span class="chip">SPEECH</span><span class="chip">CAMERA</span><span class="chip">NOTES</span><span class="chip">FILES</span>
+    </div>
+    <div class="status-line"><span class="status-dot"></span><span>READY</span></div>
+    <button class="enter-btn" id="enterBtn" type="button">ENTER</button>
+  </div>
+</div>
+
+
+<!-- Memory overlay -->
+<div id="memOverlay">
+  <div id="memPanel">
+    <h2>&#129504; Memory</h2>
+    <div id="memList"><em>Loading...</em></div>
+    <div class="mem-actions">
+      <button class="mem-btn" id="memorizeBtn">Memorize this session</button>
+      <button class="mem-btn" id="memCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Notes overlay -->
+<div id="noteOverlay">
+  <div id="notePanel">
+    <h2>&#128221; Notes</h2>
+    <div id="noteList"><em>Loading...</em></div>
+    <div class="note-add-row">
+      <input id="noteInp" type="text" placeholder="New note…" dir="auto" />
+      <button id="noteMicBtn" title="Dictate note">&#127908;</button>
+      <button class="mem-btn" id="noteAddBtn">Add</button>
+      <button class="mem-btn" id="noteCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="healthToast" style="display:none;position:fixed;top:0;left:0;right:0;z-index:999;background:#402425;color:#ef5b52;font-size:0.82rem;text-align:center;padding:6px 12px;cursor:pointer" title="Tap to dismiss">&#9888; <span id="healthMsg"></span></div>
+<div class="app" id="app">
+<div class="corner-notch corner-tl"></div><div class="corner-notch corner-tr"></div><div class="corner-notch corner-bl"></div><div class="corner-notch corner-br"></div>
+<header>
+  <div class="brand-group">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 26 26">
+        <line class="zd-spoke" x1="13" y1="13" x2="13" y2="3"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="21" y2="8"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="21" y2="18"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="13" y2="23"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="5" y2="18"/>
+        <line class="zd-spoke" x1="13" y1="13" x2="5" y2="8"/>
+      </svg>
+      <div class="zd-core"></div>
+    </div>
+    <span class="brand">ZEEV</span>
+    <span class="brand-sub">AI COMPANION</span>
+  </div>
+  <div class="controls">
+    <span id="battPct" style="display:none"></span>
+    <button class="icon-btn" id="noteBtn" title="Notes">&#128221;</button>
+    <button class="icon-btn" id="memBtn" title="Memory">&#129504;</button>
+    <button class="icon-btn" id="ttsBtn" title="Toggle speech">&#128266;</button>
+    <button class="icon-btn" id="volDownBtn" title="Volume down">&#128265;</button>
+    <span id="volDisplay" style="font-family:var(--zd-font-mono);font-size:0.75rem;color:var(--zd-ink-dim);min-width:2.5rem;text-align:center">75%</span>
+    <button class="icon-btn" id="volUpBtn" title="Volume up">&#128266;</button>
+    <button class="icon-btn" id="clearBtn" title="Clear session">&#128465;</button>
+    <select id="modelSel">
+      <option value="auto" selected>Auto</option>
+      <option value="openai/gpt-oss-20b">GPT-OSS 20B Fast</option>
+      <option value="qwen/qwen3.8-27b">Qwen3.8 27B Smart</option>
+      <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
+    </select>
+  </div>
+</header>
+<div id="chat"></div>
+<footer>
+  <button class="btn" id="micBtn" title="Voice input">&#127908;</button>
+  <button class="btn" id="recBtn" title="Hold to record, tap stop to send">&#9210;</button>
+  <button class="btn" id="snapBtn" title="Take photo">&#128247;</button>
+  <button class="btn" id="flipBtn" title="Toggle camera flip" style="display:none">&#8597;</button>
+  <button class="btn" id="thermalBtn" title="Thermal camera" style="display:none">&#127777;</button>
+  <input id="inp" type="text" placeholder="Message Zeev…" autocomplete="off" enterkeyhint="send" dir="auto" />
+  <button class="btn" id="sendBtn" title="Send">&#10148;</button>
+</footer>
+</div><!-- /.app -->
+<script>
+"use strict";
+
+const chat = document.getElementById("chat");
+const inp = document.getElementById("inp");
+const sendBtn = document.getElementById("sendBtn");
+const micBtn = document.getElementById("micBtn");
+const snapBtn = document.getElementById("snapBtn");
+const ttsBtn = document.getElementById("ttsBtn");
+const volDownBtn = document.getElementById("volDownBtn");
+const volUpBtn = document.getElementById("volUpBtn");
+const volDisplay = document.getElementById("volDisplay");
+const clearBtn = document.getElementById("clearBtn");
+const modelSel = document.getElementById("modelSel");
+const memBtn = document.getElementById("memBtn");
+const memOverlay = document.getElementById("memOverlay");
+const memList = document.getElementById("memList");
+const memorizeBtn = document.getElementById("memorizeBtn");
+const memCloseBtn = document.getElementById("memCloseBtn");
+const thermalBtn = document.getElementById("thermalBtn");
+const flipBtn = document.getElementById("flipBtn");
+
+fetch("/camera").then(r=>r.json()).then(d=>{
+  if(!d.available) { snapBtn.style.display="none"; }
+  else { flipBtn.style.display=""; }
+}).catch(()=>{snapBtn.style.display="none";});
+fetch("/thermal-status").then(r=>r.json()).then(d=>{if(d.available)thermalBtn.style.display="";}).catch(()=>{});
+fetch("/camera-flip").then(r=>r.json()).then(d=>{if(d.flip)flipBtn.classList.add("active");}).catch(()=>{});
+
+let ttsOn = true;
+let busy = false;
+let pendingModel = null;
+let currentAudio = null;
+
+const LANG_BCP47 = {en: "en-US", es: "es-MX", he: "he-IL", ru: "ru-RU"};
+
+function cancelSpeech() {
+  if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; }
+  speechSynthesis.cancel();
+}
+
+function _speakBrowser(text, lang) {
+  const u = new SpeechSynthesisUtterance(text.trim());
+  u.lang = LANG_BCP47[lang] || "en-US";
+  u.rate = 1.05;
+  speechSynthesis.speak(u);
+}
+
+async function speak(text) {
+  if (!ttsOn || !text.trim()) return;
+  cancelSpeech();
+  try {
+    const res = await fetch("/tts", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text}),
+    });
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+      currentAudio.play();
+    } else {
+      // Groq TTS unavailable (non-English) — fall back to browser speechSynthesis
+      const data = await res.json().catch(() => ({}));
+      _speakBrowser(text, data.lang || "en");
+    }
+  } catch (_) { _speakBrowser(text, "en"); }
+}
+
+ttsBtn.onclick = () => {
+  ttsOn = !ttsOn;
+  ttsBtn.innerHTML = ttsOn ? "&#128266;" : "&#128263;";
+  if (!ttsOn) cancelSpeech();
+};
+
+// --- Volume ---
+async function fetchVolume() {
+  try {
+    const r = await fetch("/volume");
+    const d = await r.json();
+    volDisplay.textContent = d.volume + "%";
+  } catch (_) {}
+}
+async function adjustVolume(delta) {
+  try {
+    const r = await fetch("/volume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({delta}),
+    });
+    const d = await r.json();
+    volDisplay.textContent = d.volume + "%";
+  } catch (_) {}
+}
+volDownBtn.onclick = () => adjustVolume(-10);
+volUpBtn.onclick   = () => adjustVolume(10);
+fetchVolume();
+
+// --- UI helpers ---
+function addBubble(role, text) {
+  const d = document.createElement("div");
+  d.className = "bubble " + (role === "user" ? "user-bubble" : "zeev-bubble");
+  d.dir = "auto";
+  if (!text) d.classList.add("pending");
+  d.textContent = text;   // placeholder dots come from .pending::before, so they vanish when the reply lands
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+
+// --- Send ---
+async function send(msg) {
+  msg = msg.trim();
+  if (!msg || busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  inp.value = "";
+
+  addBubble("user", msg);
+  const zd = addBubble("zeev", "");
+
+  cancelSpeech();
+  pendingModel = null;
+
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: msg, model: modelSel.value}),
+    });
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let full = "";
+    let hasImage = false;
+    let textSpan = null;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const d = line.slice(6);
+        if (d === "[DONE]") continue;
+        try {
+          const p = JSON.parse(d);
+          if (p.image) {
+            zd.classList.remove("pending");
+            const img = document.createElement("img");
+            img.src = p.image;
+            img.style.cssText = "max-width:100%;border-radius:8px;margin-bottom:6px;display:block;";
+            zd.insertBefore(img, zd.firstChild);
+            hasImage = true;
+          } else if (p.token) {
+            zd.classList.remove("pending");
+            full += p.token;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
+            chat.scrollTop = chat.scrollHeight;
+          } else if (p.error) {
+            zd.classList.remove("pending");
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = "Error: " + p.error;
+          } else if (p.info && !hasImage) {
+            zd.classList.remove("pending");
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = p.info;
+          } else if (p.model) {
+            pendingModel = p.model;
+          }
+        } catch (_) {}
+      }
+    }
+    speak(full);
+    if (!full && !hasImage && !zd.textContent) zd.textContent = "(no response)";
+    if (pendingModel && full) {
+      const tag = document.createElement("span");
+      tag.className = "model-tag";
+      tag.textContent = pendingModel;
+      zd.appendChild(tag);
+    }
+  } catch (e) {
+    zd.classList.remove("pending");
+    zd.textContent = "Connection error.";
+  }
+
+  busy = false;
+  sendBtn.disabled = false;
+  inp.focus();
+}
+
+sendBtn.onclick = () => send(inp.value);
+inp.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(inp.value); }
+});
+
+// --- Camera / snap ---
+async function snap() {
+  if (busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  snapBtn.disabled = true;
+
+  const question = inp.value.trim();
+  inp.value = "";
+
+  addBubble("user", question || "📷 What do you see?");
+  const zd = addBubble("zeev", "");
+  cancelSpeech();
+  pendingModel = null;
+
+  let full = "";
+  let hasImage = false;
+  let textSpan = null;
+
+  try {
+    const res = await fetch("/snap", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question}),
+    });
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const d = line.slice(6);
+        if (d === "[DONE]") continue;
+        try {
+          const p = JSON.parse(d);
+          if (p.image) {
+            zd.classList.remove("pending");
+            const img = document.createElement("img");
+            img.src = p.image;
+            img.style.cssText = "max-width:100%;border-radius:8px;margin-bottom:6px;display:block;";
+            zd.insertBefore(img, zd.firstChild);
+            hasImage = true;
+          } else if (p.token) {
+            zd.classList.remove("pending");
+            full += p.token;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
+            chat.scrollTop = chat.scrollHeight;
+          } else if (p.error) {
+            zd.classList.remove("pending");
+            zd.textContent = "Error: " + p.error;
+          } else if (p.info && !hasImage) {
+            zd.classList.remove("pending");
+            zd.textContent = p.info;
+          } else if (p.model) {
+            pendingModel = p.model;
+          }
+        } catch (_) {}
+      }
+    }
+    speak(full);
+    if (pendingModel && full) {
+      const tag = document.createElement("span");
+      tag.className = "model-tag";
+      tag.textContent = pendingModel;
+      zd.appendChild(tag);
+    }
+  } catch (e) {
+    zd.classList.remove("pending");
+    zd.textContent = "Connection error.";
+  }
+
+  busy = false;
+  sendBtn.disabled = false;
+  snapBtn.disabled = false;
+  inp.focus();
+}
+
+snapBtn.onclick = snap;
+
+flipBtn.onclick = async () => {
+  const res = await fetch("/flip", {method: "POST"});
+  const d = await res.json();
+  flipBtn.classList.toggle("active", d.flip);
+  flipBtn.title = d.flip ? "Camera flip ON (click to disable)" : "Toggle camera flip";
+};
+
+// --- Thermal camera ---
+const _THERMAL_PALETTE = [
+  [0,0,200],[0,180,220],[0,200,80],[220,200,0],[230,80,0],[230,0,0]
+];
+function _thermalColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  const seg = t * (_THERMAL_PALETTE.length - 1);
+  const lo = Math.floor(seg), hi = Math.min(lo+1, _THERMAL_PALETTE.length-1);
+  const f = seg - lo;
+  const [r0,g0,b0] = _THERMAL_PALETTE[lo], [r1,g1,b1] = _THERMAL_PALETTE[hi];
+  return [r0+f*(r1-r0), g0+f*(g1-g0), b0+f*(b1-b0)];
+}
+function renderThermalCanvas(frame, summary) {
+  const SCALE = 8, W = 32, H = 24;
+  const canvas = document.createElement("canvas");
+  canvas.width = W * SCALE; canvas.height = H * SCALE;
+  canvas.className = "thermal-canvas";
+  const ctx2 = canvas.getContext("2d");
+  const img = ctx2.createImageData(W * SCALE, H * SCALE);
+  const span = summary.max - summary.min || 1;
+  for (let row = 0; row < H; row++) {
+    for (let col = 0; col < W; col++) {
+      const t = (frame[row*W+col] - summary.min) / span;
+      const [r,g,b] = _thermalColor(t);
+      for (let dy = 0; dy < SCALE; dy++) {
+        for (let dx = 0; dx < SCALE; dx++) {
+          const i = ((row*SCALE+dy)*W*SCALE + col*SCALE+dx) * 4;
+          img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+        }
+      }
+    }
+  }
+  ctx2.putImageData(img, 0, 0);
+  // hotspot crosshair
+  ctx2.strokeStyle = "white"; ctx2.lineWidth = 1.5;
+  const hx = (summary.hotspot_col + 0.5) * SCALE, hy = (summary.hotspot_row + 0.5) * SCALE;
+  ctx2.beginPath(); ctx2.moveTo(hx-6,hy); ctx2.lineTo(hx+6,hy); ctx2.moveTo(hx,hy-6); ctx2.lineTo(hx,hy+6); ctx2.stroke();
+  return canvas;
+}
+
+async function thermal() {
+  if (busy) return;
+  busy = true;
+  sendBtn.disabled = true;
+  thermalBtn.disabled = true;
+
+  const question = inp.value.trim();
+  inp.value = "";
+
+  addBubble("user", question || "🌡 Thermal scan");
+  const zd = addBubble("zeev", "");
+  cancelSpeech();
+  pendingModel = null;
+
+  let full = "", textSpan = null;
+  try {
+    const res = await fetch("/thermal", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question}),
+    });
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const d = line.slice(6); if (d === "[DONE]") continue;
+        try {
+          const p = JSON.parse(d);
+          if (p.thermal) {
+            zd.classList.remove("pending");
+            const canvas = renderThermalCanvas(p.thermal.frame, p.thermal);
+            zd.insertBefore(canvas, zd.firstChild);
+            const statsEl = document.createElement("div");
+            statsEl.style.cssText = "font-size:0.75rem;color:#888;margin-bottom:4px;";
+            statsEl.textContent = `Min ${p.thermal.min}°C  Max ${p.thermal.max}°C  Center ${p.thermal.center}°C`;
+            zd.insertBefore(statsEl, canvas.nextSibling);
+          } else if (p.token) {
+            zd.classList.remove("pending");
+            full += p.token;
+            if (!textSpan) { textSpan = document.createElement("span"); zd.appendChild(textSpan); }
+            textSpan.textContent = full;
+            chat.scrollTop = chat.scrollHeight;
+          } else if (p.error) {
+            zd.classList.remove("pending"); zd.textContent = "Error: " + p.error;
+          } else if (p.info) {
+            if (!full) { zd.classList.remove("pending"); zd.textContent = p.info; }
+          } else if (p.model) { pendingModel = p.model; }
+        } catch (_) {}
+      }
+    }
+    if (full) speak(full);
+    if (pendingModel && full) {
+      const tag = document.createElement("span"); tag.className = "model-tag"; tag.textContent = pendingModel; zd.appendChild(tag);
+    }
+  } catch(e) { zd.classList.remove("pending"); zd.textContent = "Connection error."; }
+
+  busy = false; sendBtn.disabled = false; thermalBtn.disabled = false; inp.focus();
+}
+thermalBtn.onclick = thermal;
+
+clearBtn.onclick = async () => {
+  await fetch("/clear", {method: "POST"});
+  chat.innerHTML = "";
+  cancelSpeech();
+};
+
+// --- Memory UI ---
+function renderFacts(facts) {
+  if (!facts || facts.length === 0) {
+    memList.innerHTML = "<em>No facts stored yet. Chat a while, then tap 'Memorize'.</em>";
+  } else {
+    memList.innerHTML = facts.map((f, i) =>
+      `<div><span style="color:#444">${i+1}.</span> ${f}</div>`
+    ).join("");
+  }
+}
+
+memBtn.onclick = async () => {
+  memOverlay.style.display = "block";
+  memList.innerHTML = "<em>Loading...</em>";
+  try {
+    const res = await fetch("/memory");
+    const data = await res.json();
+    renderFacts(data.facts);
+  } catch (_) {
+    memList.innerHTML = "<em style='color:#c00'>Failed to load memory.</em>";
+  }
+};
+
+memCloseBtn.onclick = () => { memOverlay.style.display = "none"; };
+memOverlay.addEventListener("click", e => {
+  if (e.target === memOverlay) memOverlay.style.display = "none";
+});
+
+memorizeBtn.onclick = async () => {
+  memorizeBtn.textContent = "Memorizing…";
+  memorizeBtn.disabled = true;
+  try {
+    const res = await fetch("/memorize", {method: "POST"});
+    const data = await res.json();
+    renderFacts(data.facts);
+  } catch (_) {
+    memList.innerHTML = "<em style='color:#c00'>Memorization failed.</em>";
+  }
+  memorizeBtn.textContent = "Memorize this session";
+  memorizeBtn.disabled = false;
+};
+
+// --- Speech recognition (shared) ---
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// --- Notes UI ---
+const noteBtn = document.getElementById("noteBtn");
+const noteOverlay = document.getElementById("noteOverlay");
+const noteList = document.getElementById("noteList");
+const noteInp = document.getElementById("noteInp");
+const noteAddBtn = document.getElementById("noteAddBtn");
+const noteCloseBtn = document.getElementById("noteCloseBtn");
+const noteMicBtn = document.getElementById("noteMicBtn");
+
+function renderNotes(notes) {
+  if (!notes || notes.length === 0) {
+    noteList.innerHTML = "<em>No notes yet. Type one below or tap the mic.</em>";
+    return;
+  }
+  noteList.innerHTML = notes.map((n, i) => {
+    const ts = (n.ts || "").slice(0, 10);
+    const safe = n.text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    return `<div class="note-row"><span><span style="color:#444">${i+1}.</span> <span style="color:#555;font-size:0.78rem">${ts}</span> ${safe}</span><button class="note-del" data-idx="${i}" title="Delete">&#10005;</button></div>`;
+  }).join("");
+  noteList.querySelectorAll(".note-del").forEach(btn => {
+    btn.onclick = async () => {
+      const idx = parseInt(btn.dataset.idx);
+      const res = await fetch("/delete-note", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({idx})});
+      const d = await res.json();
+      renderNotes(d.notes);
+    };
+  });
+}
+
+noteBtn.onclick = async () => {
+  noteOverlay.style.display = "block";
+  noteList.innerHTML = "<em>Loading...</em>";
+  try {
+    const res = await fetch("/notes");
+    const d = await res.json();
+    renderNotes(d.notes);
+  } catch (_) {
+    noteList.innerHTML = "<em style='color:#c00'>Failed to load notes.</em>";
+  }
+  noteInp.focus();
+};
+
+noteCloseBtn.onclick = () => { noteOverlay.style.display = "none"; };
+noteOverlay.addEventListener("click", e => {
+  if (e.target === noteOverlay) noteOverlay.style.display = "none";
+});
+
+async function submitNote() {
+  const text = noteInp.value.trim();
+  if (!text) return;
+  noteInp.value = "";
+  try {
+    const res = await fetch("/note", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    const d = await res.json();
+    renderNotes(d.notes);
+  } catch (_) {}
+}
+
+noteAddBtn.onclick = submitNote;
+noteInp.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); submitNote(); }
+});
+
+if (SR) {
+  const noteRec = new SR();
+  noteRec.continuous = false;
+  noteRec.interimResults = false;
+  noteRec.lang = "en-US";
+  noteRec.onresult = e => {
+    noteInp.value = e.results[0][0].transcript;
+    noteMicBtn.classList.remove("active");
+  };
+  noteRec.onend = () => noteMicBtn.classList.remove("active");
+  noteRec.onerror = () => noteMicBtn.classList.remove("active");
+  noteMicBtn.onclick = () => {
+    if (noteMicBtn.classList.contains("active")) { noteRec.stop(); }
+    else { noteMicBtn.classList.add("active"); noteRec.start(); }
+  };
+} else {
+  noteMicBtn.style.display = "none";
+}
+
+// --- Battery ---
+const battPct = document.getElementById("battPct");
+async function updateBattery() {
+  try {
+    const res = await fetch("/battery");
+    const d = await res.json();
+    if (d.level === null) { battPct.style.display = "none"; return; }
+    const pct = Math.round(d.level);
+    battPct.textContent = (d.charging ? "⚡" : "🔋") + " " + pct + "%";
+    battPct.style.color = pct < 20 ? "#ef4444" : pct < 50 ? "#eab308" : "#4ade80";
+    battPct.style.display = "";
+  } catch (_) { battPct.style.display = "none"; }
+}
+updateBattery();
+setInterval(updateBattery, 30000);
+
+// --- System health polling ---
+const healthToast = document.getElementById("healthToast");
+const healthMsg   = document.getElementById("healthMsg");
+healthToast.onclick = () => { healthToast.style.display = "none"; };
+async function checkHealth() {
+  try {
+    const res = await fetch("/health");
+    const h = await res.json();
+    if (h.warnings && h.warnings.length > 0) {
+      healthMsg.textContent = h.warnings.join(" | ");
+      healthToast.style.display = "";
+    } else {
+      healthToast.style.display = "none";
+    }
+  } catch (_) {}
+}
+checkHealth();
+setInterval(checkHealth, 60000);
+
+// --- Chat speech recognition (tap-to-speak, auto-send on silence) ---
+if (SR) {
+  const rec = new SR();
+  rec.continuous = false;
+  rec.interimResults = false;
+  rec.lang = "en-US";
+  rec.onresult = e => { send(e.results[0][0].transcript); };
+  rec.onend = () => micBtn.classList.remove("active");
+  rec.onerror = () => micBtn.classList.remove("active");
+  micBtn.onclick = () => {
+    if (micBtn.classList.contains("active")) { rec.stop(); }
+    else { micBtn.classList.add("active"); rec.start(); }
+  };
+} else {
+  micBtn.style.display = "none";
+}
+
+// --- Continuous recording (tap start → record until tap stop → transcribe & send) ---
+const recBtn = document.getElementById("recBtn");
+let mediaRec = null;
+let recChunks = [];
+
+recBtn.onclick = async () => {
+  if (mediaRec && mediaRec.state === "recording") {
+    mediaRec.stop();
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    addBubble("assistant", "Microphone access denied.");
+    return;
+  }
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")
+      ? "audio/ogg;codecs=opus"
+      : "";
+  mediaRec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  recChunks = [];
+  mediaRec.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
+  mediaRec.onstop = async () => {
+    recBtn.classList.remove("active");
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(recChunks, { type: mediaRec.mimeType || "audio/webm" });
+    recChunks = [];
+    const statusDiv = addBubble("assistant", "Transcribing…");
+    try {
+      const resp = await fetch("/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": blob.type },
+        body: blob,
+      });
+      const data = await resp.json();
+      statusDiv.remove();
+      if (data.transcript) { send(data.transcript); }
+      else { addBubble("assistant", "Could not transcribe: " + (data.error || "unknown error")); }
+    } catch (err) {
+      statusDiv.remove();
+      addBubble("assistant", "Transcription request failed.");
+    }
+  };
+  mediaRec.start();
+  recBtn.classList.add("active");
+};
+</script>
+<script>
+"use strict";
+// ---- splash: once per browser session; ?nosplash skips it ----
+(function () {
+  const splash = document.getElementById("splash");
+  const enter = document.getElementById("enterBtn");
+  let seen = false;
+  try { seen = sessionStorage.getItem("zeevSplashSeen") === "1"; } catch (_) {}
+  if (/[?&]nosplash\b/.test(location.search)) seen = true;
+  function dismiss() {
+    if (!splash || splash.dataset.done) return;
+    splash.dataset.done = "1";
+    try { sessionStorage.setItem("zeevSplashSeen", "1"); } catch (_) {}
+    document.body.classList.remove("splash-active");
+    splash.classList.add("out");
+    setTimeout(() => { splash.style.display = "none"; const i = document.getElementById("inp"); if (i) i.focus(); }, 560);
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e) { if (e.key === "Enter" || e.key === " " || e.key === "Escape") { e.preventDefault(); dismiss(); } }
+  if (seen) { splash.style.display = "none"; document.body.classList.remove("splash-active"); }
+  else { enter.addEventListener("click", dismiss); splash.addEventListener("click", e => { if (e.target === splash) dismiss(); });
+         document.addEventListener("keydown", onKey); enter.focus({preventScroll: true}); }
+})();
+
+// ---- ambient drifting motes (gold + cyan); paused when hidden, static under reduced-motion ----
+(function () {
+  const c = document.getElementById("ambientCanvas");
+  const ctx = c.getContext("2d");
+  const still = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let w = 0, h = 0, dpr = 1, motes = [], raf = 0;
+  function size() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = innerWidth; h = innerHeight;
+    c.width = w * dpr; c.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(90, Math.max(30, w * h / 16000)));
+    motes = Array.from({length: n}, () => ({
+      x: Math.random() * w, y: Math.random() * h, r: Math.random() * 1.4 + .3,
+      vx: (Math.random() - .5) * .12, vy: -Math.random() * .16 - .02,
+      a: Math.random() * .5 + .12, ph: Math.random() * 6.28,
+      col: Math.random() < .78 ? "230,200,135" : "0,220,240",
+    }));
+  }
+  function draw(t) {
+    ctx.clearRect(0, 0, w, h);
+    for (const m of motes) {
+      if (!still) { m.x += m.vx; m.y += m.vy; if (m.y < -4) { m.y = h + 4; m.x = Math.random() * w; } if (m.x < -4) m.x = w + 4; if (m.x > w + 4) m.x = -4; }
+      const tw = still ? 1 : .6 + .4 * Math.sin(t / 1400 + m.ph);
+      ctx.beginPath(); ctx.arc(m.x, m.y, m.r, 0, 6.283);
+      ctx.fillStyle = "rgba(" + m.col + "," + (m.a * tw).toFixed(3) + ")"; ctx.fill();
+    }
+    if (!still) raf = requestAnimationFrame(draw);
+  }
+  addEventListener("resize", () => { size(); if (still) draw(0); });
+  document.addEventListener("visibilitychange", () => {
+    if (still) return;
+    if (document.hidden) cancelAnimationFrame(raf); else raf = requestAnimationFrame(draw);
+  });
+  size(); raf = requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

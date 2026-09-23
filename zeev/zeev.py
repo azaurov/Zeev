@@ -78,7 +78,12 @@ BOSGAME_KEY        = os.environ.get("BOSGAME_KEY",        "")
 FEIERGENTE_URL     = os.environ.get("FEIERGENTE_URL",     "")   # e.g. http://10.0.0.208:11434
 FEIERGENTE_MODEL   = os.environ.get("FEIERGENTE_MODEL",   "qwen2.5:7b-instruct-q4_K_M")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-ZEEV_WATCH_KEY     = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
+# Requesty (router.requesty.ai) -- OpenAI-compatible gateway whose free models
+# draw on their own 200 req/day allowance, separate from OpenRouter's 50/day
+# (which the dog detector's Leo check also spends). See _REQUESTY_FREE_CANDIDATES.
+REQUESTY_API_KEY   = os.environ.get("REQUESTY_API_KEY",   "")
+REQUESTY_URL       = "https://router.requesty.ai/v1/chat/completions"
+ZEEV_WATCH_KEY    = os.environ.get("ZEEV_WATCH_KEY",     "")   # shared secret for zeev/watch_server.py
 # Same host the nginx /watch location already proxies to for the Zepp watch
 # app -- reachable over Tailscale from any box on the tailnet, not just the
 # home LAN. Lets a Zeev instance running off-Pi (e.g. serve_web.py on the
@@ -1711,9 +1716,20 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # $0.07/$0.34 per 1M input/output tokens -- well under a cent per call), and
 # it's a strict last resort: only reached, and only billed, when both free
 # models above have already failed.
+#
+# A "requesty:" prefix routes that entry to Requesty instead of OpenRouter
+# (skipped when REQUESTY_API_KEY is unset). The Requesty entry is the same
+# nemotron-omni model as the first line, on a separate free quota -- placed
+# before the paid gemma so an OpenRouter-wide 429 spends free quota first.
+# Benchmarked 2026-09-23 with _VISION_HONESTY: 5.5s on a scene, 34s on a
+# text-dense flyer (mostly right, garbled one line of names -- same behaviour
+# as on OpenRouter). Requesty's gemma-4-31b-it and muse-glimmer-30b returned
+# EMPTY content (finish=length, all reasoning) on that flyer at 600 tokens;
+# don't add them without re-testing a text-heavy image.
 VISION_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
+    "requesty:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     "google/gemma-4-26b-a4b-it",
 ]
 VISION_TIMEOUT = float(os.environ.get("VISION_TIMEOUT", "60"))
@@ -8745,13 +8761,40 @@ _OPENROUTER_FREE_CANDIDATES = [
 ]
 
 
+# Requesty free chat models, tried BEFORE OpenRouter's: a separate 200 req/day
+# allowance, so a Groq outage no longer drains the 50/day OpenRouter quota the
+# dog detector depends on. Benchmarked 2026-09-23 by raw streaming request
+# against a real ~5.7KB _build_system_prompt payload at max_tokens=350:
+# leanstral-1-5 is not a reasoning model -- 0.8-2.3s, real reply text in
+# delta.content on 6/6 turns. Rejected, same payload: gemma-4-31b-it,
+# muse-glimmer-30b and nemotron-3-ultra-550b spent the whole budget on
+# reasoning for "tell me about Ezekiel" (empty / 73-char reply);
+# nemotron-3.5-lightning streamed its "Here's a thinking process:" monologue
+# AS content after 47-95s; nemotron-3-nano-30b-a3b 410 and laguna-m.1 404 even
+# though both are in the catalog. Re-verify with a raw streaming request
+# before adding anything here -- same rule as _OPENROUTER_FREE_CANDIDATES.
+_REQUESTY_FREE_CANDIDATES = [
+    "mistral/leanstral-1-5",
+]
+
+
 def _groq_post_with_fallback(msgs, model, stream=True, max_tokens=400, reasoning_effort=None):
-    """Like _groq_post, but on a 429/cooldown falls through to OpenRouter's
-    free tier so a Groq rate limit doesn't stall the whole reply."""
+    """Like _groq_post, but on a 429/cooldown falls through to Requesty's and
+    then OpenRouter's free tiers so a Groq rate limit doesn't stall the reply."""
     msgs = _apply_language_suffix(msgs)
     resp, err = _groq_post(msgs, model, stream=stream, max_tokens=max_tokens,
                             reasoning_effort=reasoning_effort)
     rate_limited = err == "rate-limited" or (resp is not None and resp.status_code == 429)
+    if rate_limited and REQUESTY_API_KEY:
+        for rq_model in _REQUESTY_FREE_CANDIDATES:
+            print(f"[llm] Groq 429 on {model} — falling back to Requesty ({rq_model})", flush=True)
+            rq_resp, rq_err = _openai_compat_post(
+                REQUESTY_URL, REQUESTY_API_KEY, msgs, rq_model, stream, max_tokens,
+            )
+            if not rq_err and rq_resp is not None and rq_resp.status_code == 200:
+                return rq_resp, rq_err
+            status = rq_resp.status_code if rq_resp is not None else rq_err
+            print(f"[llm] Requesty {rq_model} failed ({status}) — trying next candidate", flush=True)
     if rate_limited and OPENROUTER_API_KEY:
         for or_model in _OPENROUTER_FREE_CANDIDATES:
             print(f"[llm] Groq 429 on {model} — falling back to OpenRouter ({or_model})", flush=True)
@@ -10242,16 +10285,22 @@ def vision_complete(image_b64, question="", models=None, timeout=None):
     list is retried up to `VISION_RETRIES` more times after a short delay --
     see the module-level comment above for why that's worth doing here.
     """
-    if not OPENROUTER_API_KEY:
-        return None, "no OPENROUTER_API_KEY (Groq no longer serves vision models)"
+    if not (OPENROUTER_API_KEY or REQUESTY_API_KEY):
+        return None, "no OPENROUTER_API_KEY or REQUESTY_API_KEY (Groq no longer serves vision models)"
     msgs = _build_vision_msgs(image_b64, question)
     last = "no models tried"
     for attempt in range(VISION_RETRIES + 1):
-        for m in (models or VISION_MODELS):
+        for entry in (models or VISION_MODELS):
+            if entry.startswith("requesty:"):
+                m, url, key = entry[len("requesty:"):], REQUESTY_URL, REQUESTY_API_KEY
+            else:
+                m, url, key = entry, "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
+            if not key:
+                continue
             try:
                 r = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    url,
+                    headers={"Authorization": f"Bearer {key}",
                              "Content-Type": "application/json"},
                     json={"model": m, "messages": msgs, "max_tokens": 600},
                     timeout=timeout or VISION_TIMEOUT,

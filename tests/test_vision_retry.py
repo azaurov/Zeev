@@ -11,6 +11,14 @@ instead of giving up after one pass.
 """
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_requesty(zeev, monkeypatch):
+    # The real .env is loaded at import; these tests are about OpenRouter only.
+    monkeypatch.setattr(zeev, "REQUESTY_API_KEY", "")
+
 
 def test_retries_the_whole_model_list_after_a_full_failure(zeev):
     calls = []

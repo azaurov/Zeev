@@ -21,6 +21,14 @@ Two bugs, both in this function:
 """
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_requesty(zeev, monkeypatch):
+    # The real .env is loaded at import; these tests are about OpenRouter only.
+    monkeypatch.setattr(zeev, "REQUESTY_API_KEY", "")
+
 
 def _groq_429_then_none(*a, **kw):
     resp = MagicMock()

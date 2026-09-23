@@ -51,6 +51,16 @@ def _resolve(rel):
     rel = (rel or ".").strip() or "."
     if "\x00" in rel:
         raise _Refused("invalid path")
+    # People (and models) name the folder by its own name: "zeev-workspace",
+    # "~/zeev-workspace/". Every such call used to fail as "not a directory"
+    # (found live 2026-09-23). Drop that leading name; containment is still
+    # checked on the resolved result below, so this widens nothing.
+    if rel == "~" or rel.startswith("~/"):
+        rel = rel[2:] or "."
+    parts = Path(rel).parts
+    if parts and not Path(rel).is_absolute() and parts[0] == root.name \
+            and not (root / parts[0]).exists():
+        rel = str(Path(*parts[1:])) if len(parts) > 1 else "."
     target = (root / rel).resolve()          # absolute `rel` replaces root; caught below
     if not target.is_relative_to(root):
         raise _Refused("path is outside the workspace")

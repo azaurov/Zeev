@@ -180,3 +180,8 @@ def test_compat_post_forwards_tools(zeev, monkeypatch):
     captured.clear()
     zeev._openai_compat_post("u", "k", [], "m", False, 10)
     assert "tools" not in captured        # existing chat callers are unchanged
+
+
+def test_prompt_tells_the_model_to_read_not_just_list(zeev):
+    # 12:02 2026-09-23: "read me that file" re-listed the folder and asked permission.
+    assert "call read_file" in zeev._AGENT_SYSTEM and "do not just list" in zeev._AGENT_SYSTEM

@@ -106,3 +106,32 @@ def test_tools_are_read_only():
     src = Path(agent_fs.__file__).read_text()
     for banned in ("open(target, \"w", "write_text", "unlink", "os.remove", "shutil", "subprocess"):
         assert banned not in src
+
+
+# -- the folder named by its own name (found live 2026-09-23) -------------------
+
+@pytest.mark.parametrize("p", ["ws", "ws/", "~/ws", "~/ws/", "~", "ws/.", "."])
+def test_folder_named_by_its_own_name_lists_the_root(ws, p):
+    out = agent_fs.list_dir(p)
+    assert "notes.txt" in out and not out.startswith("Error:"), (p, out)
+
+
+def test_root_name_prefix_works_for_files_and_search(ws):
+    assert "tacos" in agent_fs.read_file("ws/notes.txt")
+    assert "tacos" in agent_fs.read_file("~/ws/notes.txt")
+    assert "sub/deep.txt" in agent_fs.search_files("needle", "ws")
+
+
+def test_a_real_subfolder_with_the_root_name_is_not_swallowed(ws):
+    (ws / "ws").mkdir()
+    (ws / "ws" / "inner.txt").write_text("inner\n")
+    assert "inner.txt" in agent_fs.list_dir("ws") and "notes.txt" not in agent_fs.list_dir("ws")
+
+
+@pytest.mark.parametrize("p", ["~/..", "ws/..", "ws/../..", "~/../outside.txt", "ws/../outside.txt",
+                               "~/ws/../../outside.txt", "ws/.env", "~/ws/zeev.db"])
+def test_root_name_shortcut_does_not_widen_access(ws, p):
+    for out in (agent_fs.list_dir(p), agent_fs.read_file(p)):
+        assert out.startswith("Error:") or "notes.txt" not in out, (p, out)
+        assert "LEAKME" not in out
+    assert agent_fs.read_file(p).startswith("Error:") or "OUTSIDE" not in agent_fs.read_file(p)

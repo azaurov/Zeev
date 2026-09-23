@@ -252,6 +252,34 @@ def oww_threshold(name):
     return OWW_THRESHOLDS.get(name, OWW_THRESHOLD)
 
 
+_OWW_VERIFIER_MOD = "openwakeword.custom_verifier_model"
+
+
+def stub_oww_verifier():
+    """Keep openwakeword from importing scikit-learn and scipy.
+
+    openwakeword/__init__.py unconditionally imports custom_verifier_model,
+    which pulls in sklearn + scipy for a training feature Zeev never uses
+    (we pass no custom_verifier_models). Measured on the Pi 2026-09-23: the
+    import cost 100+ MB RSS and ~12.7s, vs 42 MB and 1.3s stubbed; with both
+    wake models running it was 147-195 MB vs 123 MB, on a 463 MB board.
+    Wake scores on real captures were identical either way.
+
+    Must run before the first ``import openwakeword``. A no-op if the real
+    module is already loaded, so it never replaces working code.
+    """
+    if _OWW_VERIFIER_MOD in sys.modules:
+        return
+    import types
+    stub = types.ModuleType(_OWW_VERIFIER_MOD)
+
+    def train_custom_verifier(*_a, **_k):
+        raise RuntimeError("openwakeword custom verifier is stubbed out in "
+                           "zeev.py (stub_oww_verifier) to save memory")
+    stub.train_custom_verifier = train_custom_verifier
+    sys.modules[_OWW_VERIFIER_MOD] = stub
+
+
 def oww_best(scores):
     """Pick the model that fired, as ``(name, score)``; ``("", 0.0)`` if none.
 
@@ -16825,6 +16853,7 @@ def run_device_mode():
                     # One ORT thread: the default spawns one per core and just
                     # contends with the face loop and TTS for no throughput gain.
                     os.environ.setdefault("OMP_NUM_THREADS", "1")
+                    stub_oww_verifier()
                     from openwakeword.model import Model as _OwwModel
                     t0 = time.time()
                     model = _OwwModel(wakeword_model_paths=paths)

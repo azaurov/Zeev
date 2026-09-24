@@ -6548,11 +6548,13 @@ def _compose_dream_structured(persona, material, llm=None, qllm=None):
         msgs = [{"role": "user", "content": prompt}]
         if llm is not None:
             return llm(msgs)
-        text = None
-        try:
-            text, _ = _bosgame_complete(msgs, max_tokens=max_tokens)
-        except Exception as e:
-            print(f"[dream] bosgame failed: {e}", flush=True)
+        text, err = _openrouter_free_complete(msgs, max_tokens=max_tokens)
+        if not text:
+            print(f"[dream] openrouter free failed: {err}", flush=True)
+            try:
+                text, _ = _bosgame_complete(msgs, max_tokens=max_tokens)
+            except Exception as e:
+                print(f"[dream] bosgame failed: {e}", flush=True)
         if not text:
             try:
                 text, _ = _llm_complete(msgs, MODELS["2"][0], max_tokens=max_tokens)
@@ -9919,6 +9921,38 @@ def _refusal_fallback_reply(user_text, system_prompt, max_tokens=350):
     if err or not text or _looks_like_refusal(text):
         return None
     return text
+
+
+def _openrouter_free_complete(msgs, max_tokens=300):
+    """Non-streaming completion via OpenRouter's free models. Returns (text, err).
+
+    Walks _OPENROUTER_FREE_CANDIDATES until one returns real content. Used by
+    the dream job so it does not load bosgame's CPU; a candidate that 404s,
+    429s or answers with empty content just falls through to the next.
+    """
+    if not OPENROUTER_API_KEY:
+        return None, "OPENROUTER_API_KEY not set"
+    last_err = "no candidates"
+    for model in _OPENROUTER_FREE_CANDIDATES:
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json={"model": model, "messages": msgs,
+                      "temperature": 0.9, "max_tokens": max_tokens, "stream": False},
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                         "Content-Type": "application/json"},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                last_err = f"{model}: HTTP {r.status_code}"
+                continue
+            text = _strip_think_text(r.json()["choices"][0]["message"].get("content") or "")
+            if text and text.strip():
+                return text.strip(), None
+            last_err = f"{model}: empty content"
+        except Exception as e:
+            last_err = f"{model}: {e}"
+    return None, last_err
 
 
 def _bosgame_complete(msgs, max_tokens=300, json_mode=False):

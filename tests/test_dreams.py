@@ -64,12 +64,22 @@ def test_vivid_dreams_are_rare(zeev):
 @pytest.mark.parametrize("hour,expected", [
     (2, "2026-08-02"),    # 2am belongs to the night before
     (4, "2026-08-02"),
-    (6, "2026-08-03"),    # morning is its own day again
+    (7, "2026-08-02"),    # the whole 01-08 dream window is one night
+    (8, "2026-08-02"),
+    (9, "2026-08-03"),    # morning is its own day again
     (23, "2026-08-03"),
 ])
+
 def test_night_straddles_midnight(zeev, hour, expected):
     """"Last night" at breakfast means the small hours that just passed."""
     assert zeev.dream_night_date(dt.datetime(2026, 8, 3, hour)) == expected
+
+
+@pytest.mark.parametrize("hour,expected", [
+    (0, False), (1, True), (4, True), (7, True), (8, False), (22, False),
+])
+def test_dream_window(zeev, hour, expected):
+    assert zeev._in_dream_window(hour) is expected
 
 
 # --- storage ---------------------------------------------------------------

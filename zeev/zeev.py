@@ -6415,6 +6415,17 @@ _DREAM_FRAGMENT_AT = 0.30
 # Dreams fade. A couple weeks on, even a vivid one is gone.
 _DREAM_DECAY_PER_DAY = 0.12
 _DREAM_IDLE_SEC = int(os.environ.get("ZEEV_DREAM_IDLE_SEC", "900"))   # 15 min
+# Dreams are generated only inside this local-hour window (start inclusive,
+# end exclusive). Set 2026-09-23 to keep the LLM load off bosgame's CPU during
+# the evening. dream_night_date()'s day boundary must stay OUTSIDE this window,
+# or one window straddles two night dates and each persona dreams twice.
+_DREAM_START_HOUR = 1
+_DREAM_END_HOUR   = 8
+
+
+def _in_dream_window(hour=None):
+    h = time.localtime().tm_hour if hour is None else hour
+    return _DREAM_START_HOUR <= h < _DREAM_END_HOUR
 
 
 def dream_night_date(now=None):
@@ -6422,9 +6433,11 @@ def dream_night_date(now=None):
 
     Nights straddle midnight, so 02:00 on the 3rd belongs to the night of the
     2nd -- which is also what "last night" means to someone asking at breakfast.
+    The boundary is 09:00, just after _DREAM_END_HOUR, so the whole dream
+    window falls inside one night date.
     """
     now = now or datetime.now()
-    return (now - timedelta(hours=5)).strftime("%Y-%m-%d")
+    return (now - timedelta(hours=9)).strftime("%Y-%m-%d")
 
 
 def dream_recall(vividness, age_days):
@@ -6747,7 +6760,7 @@ def _dream_loop(idle_secs_fn):
     while True:
         time.sleep(300)
         try:
-            if _time_of_day() != "night":
+            if not _in_dream_window():
                 continue
             if idle_secs_fn() < _DREAM_IDLE_SEC:
                 continue        # someone is still up

@@ -69,7 +69,6 @@ def test_vivid_dreams_are_rare(zeev):
     (9, "2026-08-03"),    # morning is its own day again
     (23, "2026-08-03"),
 ])
-
 def test_night_straddles_midnight(zeev, hour, expected):
     """"Last night" at breakfast means the small hours that just passed."""
     assert zeev.dream_night_date(dt.datetime(2026, 8, 3, hour)) == expected

@@ -482,6 +482,18 @@ function addBubble(role, text) {
 }
 
 // --- Send ---
+// Only weather questions ask the browser for a position, so ordinary chat never
+// triggers a permission prompt. Denial/failure just means no loc (server falls back).
+function weatherLoc(msg) {
+  if (!/\b(weather|forecast|temperature outside|how (hot|cold) is it)\b/i.test(msg) || !navigator.geolocation)
+    return Promise.resolve(null);
+  return new Promise(function(res) {
+    navigator.geolocation.getCurrentPosition(
+      function(p) { res({lat: p.coords.latitude, lon: p.coords.longitude}); },
+      function() { res(null); },
+      {maximumAge: 600000, timeout: 5000});
+  });
+}
 async function send(msg) {
   msg = msg.trim();
   if (!msg || busy) return;
@@ -495,11 +507,12 @@ async function send(msg) {
   cancelSpeech();
   pendingModel = null;
 
+  const loc = await weatherLoc(msg);
   try {
     const res = await fetch("/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: msg, model: modelSel.value}),
+      body: JSON.stringify({message: msg, model: modelSel.value, loc}),
     });
 
     const reader = res.body.getReader();

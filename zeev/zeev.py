@@ -8392,6 +8392,32 @@ def gps_cached() -> dict | None:
     return r
 
 
+_CLIENT_PLACE_CACHE = {}
+
+def client_place(loc) -> str:
+    """'City, Region' for a browser-supplied {lat, lon}, or ''.
+
+    The installed web app is the only thing that knows where the *user* is; the
+    server's own fix is an IP guess naming a whole state. Coordinates are
+    rounded to 2 decimals (~1 km) before anything leaves this function, only the
+    place NAME reaches the LLM/Tavily, and a malformed value yields '' (fall
+    back to the ambient place) rather than raising into a live turn.
+    """
+    try:
+        lat = round(float(loc["lat"]), 2)
+        lon = round(float(loc["lon"]), 2)
+    except (TypeError, KeyError, ValueError):
+        return ""
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return ""
+    key = (lat, lon)
+    if key not in _CLIENT_PLACE_CACHE:
+        g = _reverse_geocode(lat, lon)
+        _CLIENT_PLACE_CACHE[key] = ", ".join(
+            str(g[f]) for f in ("city", "regionName") if g.get(f))
+    return _CLIENT_PLACE_CACHE[key]
+
+
 def ambient_place(loc: dict | None = None) -> str:
     """Coarse 'City, Region, Country' for the always-on prompt block, or ''.
 
@@ -10244,7 +10270,7 @@ def detect_active_speaker(user_text, session=None):
 _USER_BLURBS = {"maria": "Alex's wife"}   # relationship text per non-default user
 
 
-def _build_system_prompt(user_text, on_search=None, session=None):
+def _build_system_prompt(user_text, on_search=None, session=None, client_loc=None):
     """Assemble system prompt: base + memory facts + RAG hits + optional web search."""
     # Who is speaking comes from the ACTIVE USER (web login / device sign-in),
     # not from scanning the words for "this is Maria" -- that scan only ever
@@ -10633,8 +10659,11 @@ def _build_system_prompt(user_text, on_search=None, session=None):
         # the search results were for "Bahamas, Kauai, Maui" while sitting in
         # Canton, Massachusetts. Anchor the query to the same ambient place
         # string already computed above, when one is available.
-        if needs_weather(user_text) and ambient_place_str:
-            search_query = f"{user_text} in {ambient_place_str}"
+        # A browser-supplied position (the installed web app) beats the
+        # server's own fix, which is usually an IP guess naming a whole state.
+        weather_place = (client_place(client_loc) if client_loc else "") or ambient_place_str
+        if needs_weather(user_text) and weather_place:
+            search_query = f"{user_text} in {weather_place}"
         note_capability("weather" if needs_weather(user_text) else "search")
         results = tavily_search(search_query)
         parts.append(f"\n\n[Web search results for '{search_query}']\n{results}")
@@ -14106,7 +14135,8 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
             def on_search(q):
                 sse({"info": f"[searching: {q}]"})
 
-            sys_prompt = _build_system_prompt(user_msg, on_search, session)
+            sys_prompt = _build_system_prompt(user_msg, on_search, session,
+                                              client_loc=data.get("loc"))
             payload_msgs = [{"role": "system", "content": sys_prompt}] + snapshot
 
             # ── Tool use ─────────────────────────────────────────────────

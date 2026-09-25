@@ -12889,6 +12889,17 @@ def _ensure_cert(cert_path, key_path, ip):
     )
 
 
+# Installable-app (PWA) files served from zeev/pwa/. Fixed allow-list, never a path join.
+_PWA_FILES = {
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
+    "/icons/icon-192.png": ("icon-192.png", "image/png"),
+    "/icons/icon-512.png": ("icon-512.png", "image/png"),
+    "/icons/icon-maskable-512.png": ("icon-maskable-512.png", "image/png"),
+    "/icons/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+}
+
+
 def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -12927,6 +12938,20 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path.split("?")[0] in _PWA_FILES:
+                fname, ctype = _PWA_FILES[self.path.split("?")[0]]
+                try:
+                    body = (Path(__file__).parent / "pwa" / fname).read_bytes()
+                except OSError:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                # sw.js must never be cached long or updates to it stall
+                self.send_header("Cache-Control", "no-cache" if fname == "sw.js" else "public, max-age=86400")
                 self.end_headers()
                 self.wfile.write(body)
             elif self.path == "/battery":

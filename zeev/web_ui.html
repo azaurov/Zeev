@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Zeev</title>
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#030406">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Zeev">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=JetBrains+Mono:wght@300;400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1058,5 +1065,61 @@ recBtn.onclick = async () => {
   size(); raf = requestAnimationFrame(draw);
 })();
 </script>
+<div id="applock" hidden style="position:fixed;inset:0;z-index:99999;background:#030406;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;font-family:'Cinzel',serif;color:#e6c887;text-align:center;padding:24px">
+  <div style="font-size:28px;letter-spacing:.2em">ZEEV</div>
+  <div id="applock-msg" style="font-family:'Space Grotesk',sans-serif;color:#8492a6;font-size:14px">Locked</div>
+  <button id="applock-btn" style="background:none;border:1px solid #c5a059;color:#e6c887;padding:12px 26px;font-family:inherit;letter-spacing:.15em;cursor:pointer">UNLOCK</button>
+</div>
+<script>
+/* Fingerprint app lock (installed app only). The site login (cookie) is unchanged; this is
+   an on-device gate: a WebAuthn platform credential with user verification required, so the
+   OS demands fingerprint/face/PIN. It is NOT verified server-side -- it stops someone who
+   picks up an already-logged-in phone, not someone who has the account password. */
+(function(){
+  var standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if(!standalone || !window.PublicKeyCredential || !navigator.credentials) return;
+  var KEY='zeev_lock_cred', lock=document.getElementById('applock'),
+      msg=document.getElementById('applock-msg'), btn=document.getElementById('applock-btn'), hiddenAt=0;
+  function b64(buf){return btoa(String.fromCharCode.apply(null,new Uint8Array(buf)));}
+  function unb64(s){return Uint8Array.from(atob(s),function(c){return c.charCodeAt(0);});}
+  function rnd(){return crypto.getRandomValues(new Uint8Array(32));}
+  function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+  function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+  function show(text,label){msg.textContent=text;btn.textContent=label;lock.hidden=false;}
+  function unlocked(){lock.hidden=true;}
+  async function enroll(){
+    var c=await navigator.credentials.create({publicKey:{
+      challenge:rnd(), rp:{name:'Zeev',id:location.hostname},
+      user:{id:rnd(),name:'zeev',displayName:'Zeev'},
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+      authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required',residentKey:'discouraged'},
+      timeout:60000}});
+    set(KEY,b64(c.rawId)); unlocked();
+  }
+  async function verify(){
+    await navigator.credentials.get({publicKey:{
+      challenge:rnd(), rpId:location.hostname, userVerification:'required', timeout:60000,
+      allowCredentials:[{type:'public-key',id:unb64(get(KEY))}]}});
+    unlocked();
+  }
+  async function run(){
+    try{
+      if(!get(KEY)){ show('Set up fingerprint unlock for this app','ENABLE'); await enroll(); }
+      else { show('Locked','UNLOCK'); await verify(); }
+    }catch(e){ msg.textContent = get(KEY) ? 'Not verified — try again' : 'Fingerprint setup cancelled'; lock.hidden=false; }
+  }
+  btn.onclick=run;
+  lock.hidden=false;               /* cover the page immediately, before any await */
+  PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(ok){
+    if(!ok){ unlocked(); return; } /* no biometric hardware: nothing to lock with */
+    run();
+  }).catch(unlocked);
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden){hiddenAt=Date.now();}
+    else if(hiddenAt && Date.now()-hiddenAt>60000 && get(KEY)){ show('Locked','UNLOCK'); verify().catch(function(){msg.textContent='Not verified — try again';}); }
+  });
+})();
+</script>
+<script>if('serviceWorker' in navigator){addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));}</script>
 </body>
 </html>

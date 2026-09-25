@@ -8473,6 +8473,148 @@ def _weather_coords(client_loc):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Critical weather alerts (NWS) -- announced unprompted on the device
+# ---------------------------------------------------------------------------
+
+_WEATHER_ALERTS_ON = os.environ.get("ZEEV_WEATHER_ALERTS", "1") != "0"
+_WEATHER_ALERT_POLL_S = 300
+_WEATHER_ALERT_STATE = BASE_DIR / "data" / "weather_alerts_announced.json"
+
+# The events worth interrupting a household for. Deliberately an allowlist:
+# NWS issues dozens of advisory/statement types (frost, dense fog, beach
+# hazards) and speaking those unprompted would train everyone to ignore it.
+# A nor'easter is not an NWS product -- it arrives as Winter Storm / Blizzard /
+# High Wind / Coastal Flood warnings, so those are the catch, plus a text match
+# on the word itself (`_NOREASTER_RE`) for statements that name it.
+_CRITICAL_ALERT_EVENTS = {
+    "hurricane warning", "hurricane watch", "hurricane force wind warning",
+    "hurricane force wind watch", "tropical storm warning", "tropical storm watch",
+    "storm surge warning", "storm surge watch", "extreme wind warning",
+    "tornado warning", "tornado watch", "severe thunderstorm warning",
+    "flash flood warning", "flash flood emergency",
+    "blizzard warning", "winter storm warning", "winter storm watch", "ice storm warning",
+    "high wind warning", "coastal flood warning", "excessive heat warning",
+    "extreme cold warning",
+}
+_NOREASTER_RE = re.compile(r"\bnor.?easter\b", re.IGNORECASE)
+
+
+def nws_alerts(lat, lon):
+    """Active NWS alerts for a point, or None on any failure (never raises).
+
+    api.weather.gov is free and keyless but US-only, and asks for an identifying
+    User-Agent. Outside the US it answers 404, which reads as "no alerts" here
+    rather than an error -- alerts are an extra, not something to log-spam on.
+    """
+    try:
+        r = requests.get(
+            "https://api.weather.gov/alerts/active",
+            params={"point": f"{round(float(lat), 3)},{round(float(lon), 3)}"},
+            headers={"User-Agent": "Zeev-AI-Companion/1.0", "Accept": "application/geo+json"},
+            timeout=8,
+        )
+        if r.status_code == 404:
+            return []
+        if r.status_code != 200:
+            print(f"[weather-alert] NWS HTTP {r.status_code}", flush=True)
+            return None
+        return [f["properties"] | {"id": f.get("id") or f["properties"].get("id")}
+                for f in r.json().get("features", [])]
+    except Exception as e:
+        print(f"[weather-alert] NWS error: {e}", flush=True)
+        return None
+
+
+def _is_critical_alert(a):
+    if a.get("status") not in (None, "Actual") or a.get("messageType") == "Cancel":
+        return False          # exercises/tests and cancellations are never announced
+    ev = (a.get("event") or "").strip().lower()
+    if ev in _CRITICAL_ALERT_EVENTS or a.get("severity") == "Extreme":
+        return True
+    return bool(_NOREASTER_RE.search(f"{a.get('headline') or ''} {a.get('event') or ''}"))
+
+
+def _alert_expiry_epoch(a):
+    """Epoch the alert ends, or a 6h fallback so a bad timestamp can't make the
+    dedup record live forever (or expire instantly and repeat the alert)."""
+    for key in ("ends", "expires"):
+        v = a.get(key)
+        if v:
+            try:
+                return datetime.fromisoformat(v).timestamp()
+            except ValueError:
+                pass
+    return time.time() + 6 * 3600
+
+
+def _alert_speech(alerts):
+    """One spoken message for a batch of new alerts, in full words for TTS."""
+    parts = []
+    for a in alerts[:3]:
+        until = ""
+        exp = _alert_expiry_epoch(a)
+        if a.get("ends") or a.get("expires"):
+            until = " until " + datetime.fromtimestamp(exp).strftime("%-I:%M %p on %A")
+        area = "; ".join((a.get("areaDesc") or "").split("; ")[:2])
+        parts.append(f"{a.get('event', 'Weather alert')}{' for ' + area if area else ''}{until}")
+    more = f" Plus {len(alerts) - 3} more." if len(alerts) > 3 else ""
+    return "Weather alert. " + ". ".join(parts) + "." + more
+
+
+def new_critical_alerts(alerts, announced):
+    """Critical alerts not yet in `announced` ({id: expiry_epoch}). Mutates
+    `announced`: drops expired records, adds the returned ones."""
+    now = time.time()
+    for k in [k for k, exp in announced.items() if exp < now]:
+        del announced[k]
+    fresh = [a for a in alerts if _is_critical_alert(a) and a.get("id") and a["id"] not in announced]
+    for a in fresh:
+        announced[a["id"]] = _alert_expiry_epoch(a)
+    return fresh
+
+
+def _weather_alert_loop(notify):
+    """Poll NWS and speak new critical alerts via `notify` (device mode's
+    _announce_reminder: waits for a free device, never talks over a live turn).
+
+    Announced ids are persisted so a restart/deploy doesn't repeat an alert that
+    is still active; the record is written BEFORE speaking, since a repeat is
+    the lesser failure but a crash mid-announcement must not loop it either.
+    Not gated on quiet hours, like the battery plea: a tornado warning at 3am
+    is the case this exists for.
+    """
+    try:
+        announced = json.loads(_WEATHER_ALERT_STATE.read_text())
+    except (OSError, ValueError):
+        announced = {}
+    print(f"[weather-alert] watching NWS every {_WEATHER_ALERT_POLL_S}s "
+          f"({len(announced)} already announced)", flush=True)
+    while True:
+        try:
+            coords = None
+            loc = gps_cached()
+            if loc and "error" not in loc and loc.get("lat") is not None:
+                coords = (loc["lat"], loc["lon"])
+            elif _HOME_LAT is not None and _HOME_LON is not None:
+                coords = (_HOME_LAT, _HOME_LON)
+            alerts = nws_alerts(*coords) if coords else None
+            if alerts:
+                fresh = new_critical_alerts(alerts, announced)
+                if fresh:
+                    try:
+                        _WEATHER_ALERT_STATE.parent.mkdir(parents=True, exist_ok=True)
+                        _WEATHER_ALERT_STATE.write_text(json.dumps(announced))
+                    except OSError as e:
+                        print(f"[weather-alert] state write failed: {e}", flush=True)
+                    msg = _alert_speech(fresh)
+                    print(f"[weather-alert] {msg}", flush=True)
+                    notify(msg)
+        except Exception as e:
+            print(f"[weather-alert] loop error: {e}", flush=True)
+        time.sleep(_WEATHER_ALERT_POLL_S)
+
+
 _CLIENT_PLACE_CACHE = {}
 
 def client_place(loc) -> str:
@@ -17914,6 +18056,8 @@ def run_device_mode():
         _go_idle() if was_idle else _go_ready()
 
     _reminder_notify[0] = _announce_reminder
+    if _WEATHER_ALERTS_ON:
+        threading.Thread(target=_weather_alert_loop, args=(_announce_reminder,), daemon=True).start()
 
     threading.Thread(target=_wake_listener, daemon=True).start()
     start_health_monitor(lambda msg: _speak_device(f"Warning: {msg}."))

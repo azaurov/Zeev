@@ -35,7 +35,18 @@ if _ENV_FILE.exists():
                 _k, _, _v = _line.partition("=")
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+def _tavily_key(env=os.environ):
+    """The digest's own Tavily key if set, else the shared one.
+
+    The digest alone spends ~32 credits/day (8 queries x 4 runs) -- nearly the
+    whole 1000/month free plan -- so it gets its own account to stop it starving
+    chat search (and vice versa). `or`, not a default: an empty
+    TAVILY_DIGEST_KEY= line must fall back rather than send a blank key.
+    """
+    return env.get("TAVILY_DIGEST_KEY") or env.get("TAVILY_API_KEY", "")
+
+
+TAVILY_API_KEY = _tavily_key()
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 BOSGAME_URL    = os.environ.get("BOSGAME_URL", "")
 BOSGAME_KEY    = os.environ.get("BOSGAME_KEY", "")

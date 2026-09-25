@@ -55,3 +55,11 @@ def test_app_lock_requires_user_verification_and_only_in_installed_app():
     assert html.count("userVerification:'required'") == 2   # enroll AND verify
     assert "authenticatorAttachment:'platform'" in html
     assert 'id="applock"' in html
+
+
+def test_hidden_lock_overlay_really_hides():
+    """The overlay's inline display:flex beats the [hidden] attribute, so without this rule
+    the lock never went away (found live: 'Unlock' did nothing, and it showed in plain
+    browser tabs too)."""
+    html = (ROOT / "web_ui.html").read_text(encoding="utf-8")
+    assert re.search(r"#applock\[hidden\]\s*\{\s*display:\s*none\s*!important", html)

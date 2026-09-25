@@ -95,7 +95,7 @@ def test_creepy_style_is_kept_but_not_the_default(zeev):
 def test_gate_is_wired_into_the_turn_handler(zeev):
     """Structural: the branch must actually play the file, clean it up, and file
     the turn without re-speaking it (speak=False)."""
-    src = inspect.getsource(zeev.handle_transcript)
+    src = inspect.getsource(zeev._handle_transcript)
     i = src.index("howl_intent(transcript)")
     block = src[i:i + 1800]
     assert "render_howl()" in block

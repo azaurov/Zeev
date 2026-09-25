@@ -21,24 +21,40 @@ import tempfile
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
+import userctx  # noqa: E402
+
 LOCAL_DB = BASE_DIR / "data" / "zeev.db"
 PI_HOST = "ragnar@ragnarok"
 PI_DB_PATH = "/home/ragnar/Zeev/zeev/data/zeev.db"
+# Every other household member has their OWN file on both machines
+# (data/users/<slug>/zeev.db); syncing only Alex's would leave the web
+# instance with no history for them, silently.
+PI_USERS_DIR = "/home/ragnar/Zeev/zeev/data/users"
+
+
+def user_paths(slug):
+    """(pi_path, local_path) for one user's database."""
+    if slug == userctx.DEFAULT_USER:
+        return PI_DB_PATH, LOCAL_DB
+    return (f"{PI_USERS_DIR}/{slug}/zeev.db",
+            BASE_DIR / "data" / "users" / slug / "zeev.db")
 SYNC_MARK_KEY = "sync_pi_last_message_id"
 
 
-def fetch_pi_db(dest_path: Path) -> None:
+def fetch_pi_db(dest_path: Path, pi_path: str = PI_DB_PATH) -> None:
     result = subprocess.run(
-        ["scp", "-o", "ConnectTimeout=10", f"{PI_HOST}:{PI_DB_PATH}", str(dest_path)],
+        ["scp", "-o", "ConnectTimeout=10", f"{PI_HOST}:{pi_path}", str(dest_path)],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(f"scp from {PI_HOST} failed: {result.stderr.strip()}")
 
 
-def sync(pi_db_path: Path) -> tuple[int, int]:
-    LOCAL_DB.parent.mkdir(parents=True, exist_ok=True)
-    local = sqlite3.connect(str(LOCAL_DB))
+def sync(pi_db_path: Path, local_db: Path = None) -> tuple[int, int]:
+    local_db = local_db or LOCAL_DB
+    local_db.parent.mkdir(parents=True, exist_ok=True)
+    local = sqlite3.connect(str(local_db))
     local.execute("PRAGMA journal_mode=WAL")
     local.execute(
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -92,17 +108,33 @@ def sync(pi_db_path: Path) -> tuple[int, int]:
 
 
 def main() -> int:
+    total_facts = total_msgs = 0
+    failed = False
     with tempfile.TemporaryDirectory() as tmp:
-        pi_db_copy = Path(tmp) / "ragnarok_zeev.db"
-        try:
-            fetch_pi_db(pi_db_copy)
-            facts_added, messages_added = sync(pi_db_copy)
-        except Exception as e:
-            print(f"[sync_pi_history] failed: {e}", file=sys.stderr)
-            return 1
-
-    print(f"[sync_pi_history] synced {facts_added} new facts, {messages_added} new messages")
-    return 0
+        for slug in userctx.USERS:
+            pi_path, local_path = user_paths(slug)
+            pi_db_copy = Path(tmp) / f"ragnarok_{slug}.db"
+            try:
+                fetch_pi_db(pi_db_copy, pi_path)
+            except Exception as e:
+                if slug == userctx.DEFAULT_USER:
+                    print(f"[sync_pi_history] failed: {e}", file=sys.stderr)
+                    failed = True
+                else:
+                    # A user who has never used the device has no file there.
+                    print(f"[sync_pi_history] {slug}: nothing to sync ({e})")
+                continue
+            try:
+                facts_added, messages_added = sync(pi_db_copy, local_path)
+            except Exception as e:
+                print(f"[sync_pi_history] {slug} failed: {e}", file=sys.stderr)
+                failed = True
+                continue
+            total_facts += facts_added
+            total_msgs += messages_added
+            print(f"[sync_pi_history] {slug}: {facts_added} new facts, {messages_added} new messages")
+    print(f"[sync_pi_history] synced {total_facts} new facts, {total_msgs} new messages")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

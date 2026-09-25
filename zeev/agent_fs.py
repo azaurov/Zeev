@@ -13,6 +13,8 @@ are wrapped and labelled as untrusted data (prompt-injection guard).
 """
 import fnmatch
 import os
+
+import userctx
 from pathlib import Path
 
 MAX_READ_CHARS = 8000        # Groq/Cloudflare free tiers can't take more per step
@@ -30,7 +32,18 @@ DENY_PATTERNS = (
 
 
 def agent_root():
-    return Path(os.environ.get("ZEEV_AGENT_ROOT") or "~/zeev-workspace").expanduser()
+    """The active user's workspace folder.
+
+    Alex keeps ZEEV_AGENT_ROOT (default ~/zeev-workspace). Everyone else gets a
+    SIBLING folder (`~/zeev-workspace-maria`), deliberately not a subfolder of
+    Alex's: a subfolder would be inside his root, so his agent's search_files
+    would walk her files and her reach would not be the only thing protected.
+    """
+    root = Path(os.environ.get("ZEEV_AGENT_ROOT") or "~/zeev-workspace").expanduser()
+    user = userctx.current()
+    if user == userctx.DEFAULT_USER:
+        return root
+    return root.with_name(f"{root.name}-{user}")
 
 
 def _denied_name(name):

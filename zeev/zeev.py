@@ -2,6 +2,7 @@
 """Zeev — AI Companion"""
 
 import base64
+import collections.abc
 import hashlib
 import io
 import json
@@ -42,6 +43,9 @@ if _ENV_FILE.exists():
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _, _v = _line.partition("=")
                 os.environ.setdefault(_k.strip(), _v.strip())
+
+# After the .env load: ZEEV_USERS / ZEEV_USER_ALIASES are read at import time.
+import userctx  # noqa: E402
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
@@ -531,12 +535,11 @@ def _init_audio():
         pass  # audio_client.py not yet on PYTHONPATH; pure Python mode
 
 # Learning state — populated by init_learning() at startup
-USER_FACTS          = []   # persistent facts about the user
-USER_NOTES          = []   # persistent notes saved by the user
-_WEEKLY_REFLECTION  = ""   # latest weekly reflection, loaded at startup
+# USER_FACTS / USER_NOTES / _HISTORY_ENTRIES / _HISTORY_INDEX are per-user
+# views (see _UserList/_UserDict beside _udb): same names, same list/dict
+# behaviour, but they read and write the ACTIVE user's data. They are
+# (re)bound below _udb, once the proxy classes exist.
 _DAILY_SUGGESTIONS  = ""   # today's suggestions (daily_suggestions.py), empty if none for today
-_HISTORY_ENTRIES = []   # raw parsed entries from history.jsonl for RAG
-_HISTORY_INDEX   = {}   # word → [entry indices] inverted index
 _notes_lock      = threading.Lock()
 
 _STOP_WORDS = frozenset([
@@ -5491,216 +5494,334 @@ _db_lock = threading.Lock()
 _db_con: sqlite3.Connection | None = None
 
 
+def _open_db(path: Path) -> sqlite3.Connection:
+    """Open `path` as a Zeev database: WAL, Row factory, full schema, migrations.
+
+    Every per-user file gets the *whole* schema, not just its personal tables
+    -- unused tables cost nothing and it keeps one code path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _db_con = sqlite3.connect(str(path), check_same_thread=False)
+    _db_con.execute("PRAGMA journal_mode=WAL")
+    _db_con.row_factory = sqlite3.Row
+    _db_con.executescript("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            role    TEXT    NOT NULL,
+            content TEXT    NOT NULL,
+            ts      TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS facts (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact TEXT    NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS notes (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT    NOT NULL,
+            ts   TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS quantum_insights (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            idea           TEXT    NOT NULL,
+            spec_json      TEXT    NOT NULL,
+            result_json    TEXT    NOT NULL,
+            interpretation TEXT    NOT NULL,
+            ts             TEXT    NOT NULL
+        );
+        -- Dreams. Zeev and Sarina each dream on their own overnight; most
+        -- are dim and forgotten, a few are vivid and fully recalled.
+        --
+        -- Its OWN table, deliberately never `messages`: this is content an
+        -- LLM invented, and the camera-hallucination notes in CLAUDE.md
+        -- record what happens when fabricated text lands in `messages` --
+        -- _memory_maintenance_loop embeds it within 30 minutes and
+        -- retrieve_semantic serves it back under "Relevant past exchanges"
+        -- as though it happened.
+        --
+        -- UNIQUE(persona, night_date) because zeev-device restarts
+        -- overnight; without it a 2am restart gives the same night a
+        -- second dream. `vividness` is rolled ONCE, at dream time, and
+        -- recall is a pure function of it -- roll at question time and the
+        -- same dream flickers between remembered and forgotten.
+        CREATE TABLE IF NOT EXISTS dreams (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            persona    TEXT    NOT NULL,
+            night_date TEXT    NOT NULL,
+            content    TEXT    NOT NULL,
+            fragment   TEXT    NOT NULL,
+            vividness  REAL    NOT NULL,
+            ts         TEXT    NOT NULL,
+            UNIQUE(persona, night_date)
+        );
+        -- Structured breakdown of a dream: its opening/choice/closing
+        -- beats. A separate table rather than a new column on `dreams` --
+        -- no ALTER TABLE needed against the live Pi's existing rows, same
+        -- reasoning as `dreams` itself getting its own table instead of a
+        -- column on `messages`. `dreams.content` (the concatenated beats)
+        -- stays the source of truth for dream_reply(); this is debugging
+        -- detail and the seed for a future lucid/interactive mode, so a
+        -- write failure here must never take down dream saving above it.
+        CREATE TABLE IF NOT EXISTS dream_beats (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            dream_id     INTEGER NOT NULL,
+            seq          INTEGER NOT NULL,
+            kind         TEXT    NOT NULL,
+            text         TEXT    NOT NULL,
+            options_json TEXT,
+            chosen       TEXT,
+            ts           TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dream_beats_dream
+            ON dream_beats (dream_id);
+        CREATE TABLE IF NOT EXISTS reflections (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_start TEXT    NOT NULL,
+            period_end   TEXT    NOT NULL,
+            content      TEXT    NOT NULL,
+            ts           TEXT    NOT NULL
+        );
+        -- Daily suggestions (zeev/daily_suggestions.py, 9am timer): a
+        -- short personalized morning message synthesized from that day's
+        -- Google Calendar events and USER_FACTS. `date` (local YYYY-MM-DD)
+        -- is stored so load_latest_daily_suggestions() can refuse to
+        -- inject a stale one -- unlike the weekly reflection, a leftover
+        -- "today's suggestions" from a day the job didn't run would be
+        -- actively misleading, not just mildly stale.
+        CREATE TABLE IF NOT EXISTS daily_suggestions (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            date    TEXT    NOT NULL,
+            content TEXT    NOT NULL,
+            ts      REAL    NOT NULL
+        );
+        -- Reminders and timers. due_ts is epoch seconds (UTC); fired is 0
+        -- until the reminder has been announced, so a restart mid-window
+        -- still delivers it rather than dropping it.
+        CREATE TABLE IF NOT EXISTS reminders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            text       TEXT    NOT NULL,
+            due_ts     REAL    NOT NULL,
+            created_ts REAL    NOT NULL,
+            fired      INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_reminders_due
+            ON reminders (fired, due_ts);
+        -- Calendar-derived reminders. Keyed by "<event id>:<lead minutes>"
+        -- so one event can carry several (a day before AND an hour before)
+        -- without either being mistaken for the other. start_ts is kept so a
+        -- rescheduled event is detectable: the key survives, the start moves,
+        -- and the stale pending reminder is cancelled rather than left to
+        -- announce the old time. reminder_id is the row in `reminders`.
+        CREATE TABLE IF NOT EXISTS gcal_reminders (
+            event_key   TEXT    PRIMARY KEY,
+            start_ts    REAL    NOT NULL,
+            reminder_id INTEGER,
+            created_ts  REAL    NOT NULL
+        );
+        -- Outcome of each outbound HFP call bt_call_loop runs. Its OWN
+        -- table, deliberately never `messages` -- same reasoning as
+        -- `dreams` above: bt_call_loop's actual result (voicemail/live/
+        -- hung up/no answer) never reached any later chat turn at all,
+        -- so a follow-up "did you get to make the call?" had nothing
+        -- true to draw on and the model fabricated a confident answer
+        -- (found live 2026-08-05, both a false "yes, connected, had a
+        -- pleasant conversation" and, once caught, a false "I can't
+        -- physically make calls" -- neither grounded in anything).
+        -- Surfaced ambiently in _build_system_prompt while recent,
+        -- not written into `messages` where a fabricated one could get
+        -- embedded and served back later as fact.
+        CREATE TABLE IF NOT EXISTS call_outcomes (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            number  TEXT    NOT NULL,
+            outcome TEXT    NOT NULL,
+            ts      REAL    NOT NULL
+        );
+        -- Web agent (file-reading) conversations, kept out of `messages` so a
+        -- summary of a file that later changes is never embedded and served
+        -- back as fact. Read explicitly by _agent_history_block(), dated.
+        CREATE TABLE IF NOT EXISTS agent_messages (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            role    TEXT    NOT NULL,
+            content TEXT    NOT NULL,
+            ts      REAL    NOT NULL
+        );
+        -- Semantic index over `messages`. Vectors are computed remotely on
+        -- bosgame (the Pi has neither the RAM nor the core to embed) and
+        -- cached here, so retrieval itself is a local dot product.
+        CREATE TABLE IF NOT EXISTS message_vecs (
+            message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+            dim        INTEGER NOT NULL,
+            vec        BLOB    NOT NULL
+        );
+        -- Per-completion finish_reason from Groq/OpenAI-compatible chat
+        -- completions ("stop" natural, "length" hit max_tokens, ...).
+        -- Read-only instrumentation, added 2026-08-06 to measure which
+        -- model/path actually hits its token ceiling most often -- before
+        -- this the only truncation signal anywhere was device mode's
+        -- _last_complete_sentence() punctuation heuristic, which infers
+        -- truncation from the spoken text rather than reading the API's
+        -- own answer. Logged only from the highest-traffic chat paths
+        -- (device_chat, web_chat, terminal_chat) to start narrow; see
+        -- _log_llm_finish call sites if this expands to more paths.
+        CREATE TABLE IF NOT EXISTS llm_finish_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts            REAL    NOT NULL,
+            path          TEXT    NOT NULL,
+            model         TEXT    NOT NULL,
+            max_tokens    INTEGER NOT NULL,
+            finish_reason TEXT    NOT NULL,
+            reply_chars   INTEGER NOT NULL
+        );
+        -- Curated world-news digests ("the shpeel"), built by the
+        -- news_digest.py cron job. "Give me the shpeel" reads the latest
+        -- row here first; a live Tavily+LLM pull only runs when this is
+        -- missing or stale, the same cache-first shape reflections use.
+        -- `snippets` (the raw Tavily text a digest was summarized from)
+        -- is what news_probe.py grades the LLM's summary against, the
+        -- same faithfulness-check shape as rag_probes.
+        CREATE TABLE IF NOT EXISTS world_news (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            content  TEXT    NOT NULL,
+            ts       REAL    NOT NULL,
+            snippets TEXT
+        );
+        -- Faithfulness grades for world_news rows -- see news_probe.py.
+        CREATE TABLE IF NOT EXISTS news_probes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            digest_id   INTEGER NOT NULL,
+            ts          REAL    NOT NULL,
+            grounded    INTEGER,
+            grader_note TEXT
+        );
+    """)
+    # `snippets` was added after world_news already shipped -- CREATE
+    # TABLE IF NOT EXISTS above won't retroactively add it to an
+    # existing zeev.db (matches the ALTER TABLE guard in news_digest.py,
+    # which opens its own connection to the same file).
+    try:
+        _db_con.execute("ALTER TABLE world_news ADD COLUMN snippets TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
+    _db_con.commit()
+    return _db_con
+
+
 def _db() -> sqlite3.Connection:
+    """The household database (`data/zeev.db`): Alex's personal tables AND
+    every table that is shared by design (world_news, quantum_insights,
+    settings, call_outcomes, dreams, llm_finish_log, gcal_reminders).
+
+    Personal tables (messages, message_vecs, facts, notes, reminders,
+    agent_messages, reflections) must go through `_udb()` instead.
+    """
     global _db_con
     if _db_con is None:
-        ZEEV_DB.parent.mkdir(parents=True, exist_ok=True)
-        _db_con = sqlite3.connect(str(ZEEV_DB), check_same_thread=False)
-        _db_con.execute("PRAGMA journal_mode=WAL")
-        _db_con.row_factory = sqlite3.Row
-        _db_con.executescript("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                role    TEXT    NOT NULL,
-                content TEXT    NOT NULL,
-                ts      TEXT    NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS facts (
-                id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                fact TEXT    NOT NULL UNIQUE
-            );
-            CREATE TABLE IF NOT EXISTS notes (
-                id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                text TEXT    NOT NULL,
-                ts   TEXT    NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS quantum_insights (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                idea           TEXT    NOT NULL,
-                spec_json      TEXT    NOT NULL,
-                result_json    TEXT    NOT NULL,
-                interpretation TEXT    NOT NULL,
-                ts             TEXT    NOT NULL
-            );
-            -- Dreams. Zeev and Sarina each dream on their own overnight; most
-            -- are dim and forgotten, a few are vivid and fully recalled.
-            --
-            -- Its OWN table, deliberately never `messages`: this is content an
-            -- LLM invented, and the camera-hallucination notes in CLAUDE.md
-            -- record what happens when fabricated text lands in `messages` --
-            -- _memory_maintenance_loop embeds it within 30 minutes and
-            -- retrieve_semantic serves it back under "Relevant past exchanges"
-            -- as though it happened.
-            --
-            -- UNIQUE(persona, night_date) because zeev-device restarts
-            -- overnight; without it a 2am restart gives the same night a
-            -- second dream. `vividness` is rolled ONCE, at dream time, and
-            -- recall is a pure function of it -- roll at question time and the
-            -- same dream flickers between remembered and forgotten.
-            CREATE TABLE IF NOT EXISTS dreams (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                persona    TEXT    NOT NULL,
-                night_date TEXT    NOT NULL,
-                content    TEXT    NOT NULL,
-                fragment   TEXT    NOT NULL,
-                vividness  REAL    NOT NULL,
-                ts         TEXT    NOT NULL,
-                UNIQUE(persona, night_date)
-            );
-            -- Structured breakdown of a dream: its opening/choice/closing
-            -- beats. A separate table rather than a new column on `dreams` --
-            -- no ALTER TABLE needed against the live Pi's existing rows, same
-            -- reasoning as `dreams` itself getting its own table instead of a
-            -- column on `messages`. `dreams.content` (the concatenated beats)
-            -- stays the source of truth for dream_reply(); this is debugging
-            -- detail and the seed for a future lucid/interactive mode, so a
-            -- write failure here must never take down dream saving above it.
-            CREATE TABLE IF NOT EXISTS dream_beats (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                dream_id     INTEGER NOT NULL,
-                seq          INTEGER NOT NULL,
-                kind         TEXT    NOT NULL,
-                text         TEXT    NOT NULL,
-                options_json TEXT,
-                chosen       TEXT,
-                ts           TEXT    NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_dream_beats_dream
-                ON dream_beats (dream_id);
-            CREATE TABLE IF NOT EXISTS reflections (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                period_start TEXT    NOT NULL,
-                period_end   TEXT    NOT NULL,
-                content      TEXT    NOT NULL,
-                ts           TEXT    NOT NULL
-            );
-            -- Daily suggestions (zeev/daily_suggestions.py, 9am timer): a
-            -- short personalized morning message synthesized from that day's
-            -- Google Calendar events and USER_FACTS. `date` (local YYYY-MM-DD)
-            -- is stored so load_latest_daily_suggestions() can refuse to
-            -- inject a stale one -- unlike the weekly reflection, a leftover
-            -- "today's suggestions" from a day the job didn't run would be
-            -- actively misleading, not just mildly stale.
-            CREATE TABLE IF NOT EXISTS daily_suggestions (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                date    TEXT    NOT NULL,
-                content TEXT    NOT NULL,
-                ts      REAL    NOT NULL
-            );
-            -- Reminders and timers. due_ts is epoch seconds (UTC); fired is 0
-            -- until the reminder has been announced, so a restart mid-window
-            -- still delivers it rather than dropping it.
-            CREATE TABLE IF NOT EXISTS reminders (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                text       TEXT    NOT NULL,
-                due_ts     REAL    NOT NULL,
-                created_ts REAL    NOT NULL,
-                fired      INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_reminders_due
-                ON reminders (fired, due_ts);
-            -- Calendar-derived reminders. Keyed by "<event id>:<lead minutes>"
-            -- so one event can carry several (a day before AND an hour before)
-            -- without either being mistaken for the other. start_ts is kept so a
-            -- rescheduled event is detectable: the key survives, the start moves,
-            -- and the stale pending reminder is cancelled rather than left to
-            -- announce the old time. reminder_id is the row in `reminders`.
-            CREATE TABLE IF NOT EXISTS gcal_reminders (
-                event_key   TEXT    PRIMARY KEY,
-                start_ts    REAL    NOT NULL,
-                reminder_id INTEGER,
-                created_ts  REAL    NOT NULL
-            );
-            -- Outcome of each outbound HFP call bt_call_loop runs. Its OWN
-            -- table, deliberately never `messages` -- same reasoning as
-            -- `dreams` above: bt_call_loop's actual result (voicemail/live/
-            -- hung up/no answer) never reached any later chat turn at all,
-            -- so a follow-up "did you get to make the call?" had nothing
-            -- true to draw on and the model fabricated a confident answer
-            -- (found live 2026-08-05, both a false "yes, connected, had a
-            -- pleasant conversation" and, once caught, a false "I can't
-            -- physically make calls" -- neither grounded in anything).
-            -- Surfaced ambiently in _build_system_prompt while recent,
-            -- not written into `messages` where a fabricated one could get
-            -- embedded and served back later as fact.
-            CREATE TABLE IF NOT EXISTS call_outcomes (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                number  TEXT    NOT NULL,
-                outcome TEXT    NOT NULL,
-                ts      REAL    NOT NULL
-            );
-            -- Web agent (file-reading) conversations, kept out of `messages` so a
-            -- summary of a file that later changes is never embedded and served
-            -- back as fact. Read explicitly by _agent_history_block(), dated.
-            CREATE TABLE IF NOT EXISTS agent_messages (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                role    TEXT    NOT NULL,
-                content TEXT    NOT NULL,
-                ts      REAL    NOT NULL
-            );
-            -- Semantic index over `messages`. Vectors are computed remotely on
-            -- bosgame (the Pi has neither the RAM nor the core to embed) and
-            -- cached here, so retrieval itself is a local dot product.
-            CREATE TABLE IF NOT EXISTS message_vecs (
-                message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-                dim        INTEGER NOT NULL,
-                vec        BLOB    NOT NULL
-            );
-            -- Per-completion finish_reason from Groq/OpenAI-compatible chat
-            -- completions ("stop" natural, "length" hit max_tokens, ...).
-            -- Read-only instrumentation, added 2026-08-06 to measure which
-            -- model/path actually hits its token ceiling most often -- before
-            -- this the only truncation signal anywhere was device mode's
-            -- _last_complete_sentence() punctuation heuristic, which infers
-            -- truncation from the spoken text rather than reading the API's
-            -- own answer. Logged only from the highest-traffic chat paths
-            -- (device_chat, web_chat, terminal_chat) to start narrow; see
-            -- _log_llm_finish call sites if this expands to more paths.
-            CREATE TABLE IF NOT EXISTS llm_finish_log (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts            REAL    NOT NULL,
-                path          TEXT    NOT NULL,
-                model         TEXT    NOT NULL,
-                max_tokens    INTEGER NOT NULL,
-                finish_reason TEXT    NOT NULL,
-                reply_chars   INTEGER NOT NULL
-            );
-            -- Curated world-news digests ("the shpeel"), built by the
-            -- news_digest.py cron job. "Give me the shpeel" reads the latest
-            -- row here first; a live Tavily+LLM pull only runs when this is
-            -- missing or stale, the same cache-first shape reflections use.
-            -- `snippets` (the raw Tavily text a digest was summarized from)
-            -- is what news_probe.py grades the LLM's summary against, the
-            -- same faithfulness-check shape as rag_probes.
-            CREATE TABLE IF NOT EXISTS world_news (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                content  TEXT    NOT NULL,
-                ts       REAL    NOT NULL,
-                snippets TEXT
-            );
-            -- Faithfulness grades for world_news rows -- see news_probe.py.
-            CREATE TABLE IF NOT EXISTS news_probes (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                digest_id   INTEGER NOT NULL,
-                ts          REAL    NOT NULL,
-                grounded    INTEGER,
-                grader_note TEXT
-            );
-        """)
-        # `snippets` was added after world_news already shipped -- CREATE
-        # TABLE IF NOT EXISTS above won't retroactively add it to an
-        # existing zeev.db (matches the ALTER TABLE guard in news_digest.py,
-        # which opens its own connection to the same file).
-        try:
-            _db_con.execute("ALTER TABLE world_news ADD COLUMN snippets TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already present
-        _db_con.commit()
+        _db_con = _open_db(ZEEV_DB)
     return _db_con
+
+
+_user_dbs: dict = {}
+_user_dbs_lock = threading.Lock()   # NOT _db_lock: callers already hold that (non-reentrant)
+
+
+def _user_db_path(user: str) -> Path:
+    return ZEEV_DB.parent / "users" / user / "zeev.db"
+
+
+def _udb(user: str | None = None) -> sqlite3.Connection:
+    """Connection for `user`'s PERSONAL tables (default: the active user).
+
+    Alex resolves to `_db()` itself -- his data never moved, and a test that
+    patches `_db` keeps working. Everyone else gets their own file, so a row
+    written in Maria's turn is physically absent from Alex's database.
+    """
+    user = user or userctx.current()
+    if user == userctx.DEFAULT_USER:
+        return _db()
+    if user not in userctx.USERS:
+        raise KeyError(f"unknown user {user!r}")
+    con = _user_dbs.get(user)
+    if con is None:
+        with _user_dbs_lock:
+            con = _user_dbs.get(user)
+            if con is None:
+                con = _user_dbs[user] = _open_db(_user_db_path(user))
+    return con
+
+
+# ---------------------------------------------------------------------------
+# Per-user in-memory state
+# ---------------------------------------------------------------------------
+# Switching the database file without switching these caches would be bleed by
+# another name: the prompt is built from USER_FACTS, not from a SELECT. The
+# module-level names below keep their old list/dict interface, so the ~30 call
+# sites (and the tests that monkeypatch them with plain lists) are unchanged.
+
+_user_state: dict = {}
+_user_state_lock = threading.Lock()
+
+
+def _ustate(user: str | None = None) -> dict:
+    user = user or userctx.current()
+    st = _user_state.get(user)
+    if st is None:
+        with _user_state_lock:
+            st = _user_state.setdefault(user, {
+                "facts": None, "notes": None, "session": None, "reflection": "",
+                "hist_entries": [], "hist_index": {},
+            })
+    return st
+
+
+class _UserList(collections.abc.MutableSequence):
+    """A list that is the active user's `key` list, loaded lazily on first use."""
+
+    def __init__(self, key, loader):
+        self._key, self._loader = key, loader
+
+    def _l(self):
+        st = _ustate()
+        if st.get(self._key) is None:
+            st[self._key] = self._loader()
+        return st[self._key]
+
+    def __getitem__(self, i): return self._l()[i]
+    def __setitem__(self, i, v): self._l()[i] = v
+    def __delitem__(self, i): del self._l()[i]
+    def __len__(self): return len(self._l())
+    def insert(self, i, v): self._l().insert(i, v)
+    def __repr__(self): return repr(self._l())
+
+
+class _UserDict(collections.abc.MutableMapping):
+    def __init__(self, key):
+        self._key = key
+
+    def _d(self): return _ustate()[self._key]
+    def __getitem__(self, k): return self._d()[k]
+    def __setitem__(self, k, v): self._d()[k] = v
+    def __delitem__(self, k): del self._d()[k]
+    def __iter__(self): return iter(self._d())
+    def __len__(self): return len(self._d())
+    def __repr__(self): return repr(self._d())
+
+
+class _UserEntries(_UserList):
+    """RAG history entries: always loaded by build_rag_index, never lazily."""
+    def _l(self): return _ustate()[self._key]
+
+
+USER_FACTS       = _UserList("facts", lambda: load_memory())
+USER_NOTES       = _UserList("notes", lambda: load_notes())
+_HISTORY_ENTRIES = _UserEntries("hist_entries", None)   # recent messages for RAG
+_HISTORY_INDEX   = _UserDict("hist_index")              # word -> [entry indices]
+
+
+def _reflection_text() -> str:
+    return _ustate()["reflection"]
 
 
 # ---------------------------------------------------------------------------
@@ -5709,7 +5830,7 @@ def _db() -> sqlite3.Connection:
 
 def load_prior():
     with _db_lock:
-        rows = _db().execute(
+        rows = _udb().execute(
             "SELECT role, content FROM messages ORDER BY id DESC LIMIT ?",
             (PRIOR_TURNS * 2,),
         ).fetchall()
@@ -5718,11 +5839,11 @@ def load_prior():
 
 def append_message(role, content):
     with _db_lock:
-        _db().execute(
+        _udb().execute(
             "INSERT INTO messages (role, content, ts) VALUES (?, ?, ?)",
             (role, content, datetime.now().isoformat()),
         )
-        _db().commit()
+        _udb().commit()
 
 
 _AGENT_HISTORY_WINDOW = 7 * 86400     # older file conversations are too stale to surface
@@ -5733,11 +5854,11 @@ _AGENT_HISTORY_TOTAL_CHARS = 1600
 
 def append_agent_message(role, content):
     with _db_lock:
-        _db().execute(
+        _udb().execute(
             "INSERT INTO agent_messages (role, content, ts) VALUES (?, ?, ?)",
             (role, content, time.time()),
         )
-        _db().commit()
+        _udb().commit()
 
 
 def _agent_history_block():
@@ -5750,7 +5871,7 @@ def _agent_history_block():
     """
     try:
         with _db_lock:
-            rows = _db().execute(
+            rows = _udb().execute(
                 "SELECT role, content, ts FROM agent_messages WHERE ts >= ? "
                 "ORDER BY id DESC LIMIT ?",
                 (time.time() - _AGENT_HISTORY_WINDOW, _AGENT_HISTORY_ROWS),
@@ -5760,7 +5881,7 @@ def _agent_history_block():
         return ""
     lines, used = [], 0
     for r in reversed(rows):
-        who = "Alex" if r["role"] == "user" else "You"
+        who = userctx.display_name() if r["role"] == "user" else "You"
         when = datetime.fromtimestamp(r["ts"]).strftime("%a %b %-d, %-I:%M %p")
         text = " ".join(r["content"].split())[:_AGENT_HISTORY_ITEM_CHARS]
         line = f"- [{when}] {who}: {text}"
@@ -5770,9 +5891,11 @@ def _agent_history_block():
         used += len(line)
     if not lines:
         return ""
-    return ("Recent conversations where Alex had you read files from his workspace "
+    _n = userctx.display_name()
+    _h = "his" if userctx.current() == userctx.DEFAULT_USER else "their"
+    return (f"Recent conversations where {_n} had you read files from {_h} workspace "
             "folder (the files may have changed since, so treat this as what was true "
-            "at the time, and re-read a file if he wants it current):\n" + "\n".join(lines))
+            f"at the time, and re-read a file if {_n} wants it current):\n" + "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -5781,7 +5904,7 @@ def _agent_history_block():
 
 def load_memory():
     with _db_lock:
-        rows = _db().execute("SELECT fact FROM facts ORDER BY id").fetchall()
+        rows = _udb().execute("SELECT fact FROM facts ORDER BY id").fetchall()
     return [r["fact"] for r in rows]
 
 
@@ -5793,7 +5916,7 @@ def save_memory(facts):
     Zeev. The explicit BEGIN makes the swap all-or-nothing.
     """
     with _db_lock:
-        con = _db()
+        con = _udb()
         try:
             con.execute("BEGIN IMMEDIATE")
             con.execute("DELETE FROM facts")
@@ -5865,9 +5988,8 @@ def _is_transient_fact(f):
 
 def extract_memory(session_msgs):
     """Extract new user facts from session_msgs via the active LLM. Updates USER_FACTS in-place."""
-    global USER_FACTS
     if not session_msgs:
-        return USER_FACTS
+        return list(USER_FACTS)
     transcript = "\n".join(
         ("USER" if m["role"] == "user" else "ZEEV") + ": " + m["content"]
         for m in session_msgs[-30:]
@@ -5924,11 +6046,11 @@ def extract_memory(session_msgs):
                 if key not in existing_keys:
                     merged.append(f.strip())
                     existing_keys.add(key)
-            USER_FACTS = merged
-            save_memory(USER_FACTS)
+            USER_FACTS[:] = merged
+            save_memory(list(USER_FACTS))
     except (json.JSONDecodeError, ValueError):
         pass
-    return USER_FACTS
+    return list(USER_FACTS)
 
 
 # ---------------------------------------------------------------------------
@@ -5937,16 +6059,19 @@ def extract_memory(session_msgs):
 
 def load_notes():
     with _db_lock:
-        rows = _db().execute("SELECT text, ts FROM notes ORDER BY id").fetchall()
+        rows = _udb().execute("SELECT text, ts FROM notes ORDER BY id").fetchall()
     return [{"text": r["text"], "ts": r["ts"]} for r in rows]
 
 
 def add_note(text):
-    global USER_NOTES
     ts = datetime.now().isoformat()
+    # Load this user's cached notes BEFORE inserting: the cache is lazy, so its
+    # first load after the INSERT would already contain the new row and the
+    # append below would then list it twice (found live, first note as Maria).
+    len(USER_NOTES)
     with _db_lock:
-        _db().execute("INSERT INTO notes (text, ts) VALUES (?, ?)", (text.strip(), ts))
-        _db().commit()
+        _udb().execute("INSERT INTO notes (text, ts) VALUES (?, ?)", (text.strip(), ts))
+        _udb().commit()
     note = {"text": text.strip(), "ts": ts}
     with _notes_lock:
         USER_NOTES.append(note)
@@ -6015,7 +6140,7 @@ def add_reminder(text, when):
         return None, None
     now = time.time()
     with _db_lock:
-        con = _db()
+        con = _udb()
         cur = con.execute(
             "INSERT INTO reminders (text, due_ts, created_ts, fired) VALUES (?, ?, ?, 0)",
             (text, due, now),
@@ -6036,7 +6161,7 @@ def add_reminder_at(text, due_ts):
         return None, None
     now = time.time()
     with _db_lock:
-        con = _db()
+        con = _udb()
         cur = con.execute(
             "INSERT INTO reminders (text, due_ts, created_ts, fired) VALUES (?, ?, ?, 0)",
             (text, float(due_ts), now),
@@ -6050,14 +6175,14 @@ def list_reminders(include_fired=False, limit=20):
         q = ("SELECT id, text, due_ts, fired FROM reminders "
              + ("" if include_fired else "WHERE fired = 0 ")
              + "ORDER BY due_ts LIMIT ?")
-        rows = _db().execute(q, (limit,)).fetchall()
+        rows = _udb().execute(q, (limit,)).fetchall()
     return [{"id": r["id"], "text": r["text"], "due_ts": r["due_ts"], "fired": bool(r["fired"])}
             for r in rows]
 
 
 def delete_reminder(rid):
     with _db_lock:
-        con = _db()
+        con = _udb()
         cur = con.execute("DELETE FROM reminders WHERE id = ?", (rid,))
         con.commit()
         return cur.rowcount > 0
@@ -6071,7 +6196,7 @@ def due_reminders(now=None):
     """
     now = now if now is not None else time.time()
     with _db_lock:
-        con = _db()
+        con = _udb()
         try:
             con.execute("BEGIN IMMEDIATE")
             rows = con.execute(
@@ -6272,7 +6397,7 @@ def _agent_followup(text, now=None):
         return False
     try:
         with _db_lock:
-            row = _db().execute("SELECT MAX(ts) AS t FROM agent_messages").fetchone()
+            row = _udb().execute("SELECT MAX(ts) AS t FROM agent_messages").fetchone()
     except Exception as e:
         print(f"[db] agent follow-up check failed: {e}", flush=True)
         return False
@@ -6340,6 +6465,8 @@ def run_agent_loop(history, on_step=None, post=None, max_steps=AGENT_MAX_STEPS, 
     from agent_fs import AGENT_TOOL_NAMES, run_agent_tool
     post = post or _agent_post
     sys_text = _AGENT_SYSTEM.format(now=_now_str())
+    if userctx.current() != userctx.DEFAULT_USER:
+        sys_text = sys_text.replace("Alex", userctx.display_name())
     if prior_block:
         sys_text += "\n\n" + prior_block
     msgs = [{"role": "system", "content": sys_text}] + list(history)[-_AGENT_HISTORY_MSGS:]
@@ -6477,15 +6604,18 @@ def _dream_material(limit=25):
     bits = []
     try:
         with _db_lock:
-            rows = _db().execute(
+            rows = _udb(userctx.DEFAULT_USER).execute(
                 "SELECT content FROM messages WHERE ts >= ? ORDER BY id DESC LIMIT ?",
                 ((datetime.now() - timedelta(hours=20)).isoformat(), limit),
             ).fetchall()
         bits += [r["content"][:160] for r in rows]
     except Exception as e:
         print(f"[dream] material query failed: {e}", flush=True)
-    if USER_FACTS:
-        bits += list(USER_FACTS)[:6]
+    with userctx.as_user(userctx.DEFAULT_USER):
+        # Dreams are household-wide and seeded from Alex's day only; another
+        # user's messages/facts never become dream material.
+        if USER_FACTS:
+            bits += list(USER_FACTS)[:6]
     return "\n".join(f"- {b}" for b in bits[:30]) or "- a quiet day"
 
 
@@ -6780,35 +6910,47 @@ def _dream_loop(idle_secs_fn):
             print(f"[dream] loop error: {e}", flush=True)
 
 
+def _active_user_slugs():
+    """Users that have a database: the default always, others once they exist.
+    (Never creates a file for someone who has not used Zeev yet.)"""
+    return [u for u in userctx.USERS
+            if u == userctx.DEFAULT_USER or u in _user_dbs or _user_db_path(u).exists()]
+
+
 def _reminder_loop():
-    """Announce reminders as they come due."""
+    """Announce reminders as they come due -- every user's, not just the one
+    at the speaker: a reminder is an actuator, and one Maria set must still
+    fire after the device has handed back to Alex."""
     while True:
-        try:
-            for rem in due_reminders():
-                if rem["text"] == _MORNING_SERENADE_SENTINEL:
-                    msg = _MORNING_SERENADE_SENTINEL
-                else:
-                    msg = f"Reminder: {rem['text']}"
-                print(f"[reminder] {msg}", flush=True)
-                notify = _reminder_notify[0]
-                if notify:
-                    try:
-                        notify(msg)
-                    except Exception as e:
-                        print(f"[reminder] notify failed: {e}", flush=True)
-        except Exception as e:
-            print(f"[reminder] loop error: {e}", flush=True)
+        for slug in _active_user_slugs():
+            try:
+                with userctx.as_user(slug):
+                    for rem in due_reminders():
+                        if rem["text"] == _MORNING_SERENADE_SENTINEL:
+                            msg = _MORNING_SERENADE_SENTINEL
+                        elif slug == userctx.DEFAULT_USER:
+                            msg = f"Reminder: {rem['text']}"
+                        else:
+                            msg = f"Reminder for {userctx.display_name()}: {rem['text']}"
+                        print(f"[reminder] {msg}", flush=True)
+                        notify = _reminder_notify[0]
+                        if notify:
+                            try:
+                                notify(msg)
+                            except Exception as e:
+                                print(f"[reminder] notify failed: {e}", flush=True)
+            except Exception as e:
+                print(f"[reminder] loop error ({slug}): {e}", flush=True)
         time.sleep(_REMINDER_POLL_SEC)
 
 
 def delete_note(idx):
-    global USER_NOTES
     with _notes_lock:
         if not (0 <= idx < len(USER_NOTES)):
             return False
         USER_NOTES.pop(idx)
     with _db_lock:
-        con = _db()
+        con = _udb()
         rows = con.execute("SELECT id FROM notes ORDER BY id").fetchall()
         if 0 <= idx < len(rows):
             con.execute("DELETE FROM notes WHERE id = ?", (rows[idx]["id"],))
@@ -6850,9 +6992,8 @@ def _tokenize(text):
 
 def build_rag_index():
     """Load messages from SQLite into module-level globals for retrieval."""
-    global _HISTORY_ENTRIES, _HISTORY_INDEX
     with _db_lock:
-        rows = _db().execute(
+        rows = _udb().execute(
             "SELECT role, content, ts FROM messages ORDER BY id DESC LIMIT 500"
         ).fetchall()
         rows = list(reversed(rows))
@@ -6861,8 +7002,8 @@ def build_rag_index():
     for i, entry in enumerate(entries):
         for word in _tokenize(entry.get("content", "")):
             index.setdefault(word, []).append(i)
-    _HISTORY_ENTRIES = entries
-    _HISTORY_INDEX   = index
+    st = _ustate()
+    st["hist_entries"], st["hist_index"] = entries, index
 
 
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
@@ -6950,7 +7091,7 @@ def index_message_vec(message_id, content):
         return False
     try:
         with _db_lock:
-            con = _db()
+            con = _udb()
             con.execute(
                 "INSERT OR REPLACE INTO message_vecs (message_id, dim, vec) VALUES (?, ?, ?)",
                 (message_id, len(vec), _vec_pack(vec)),
@@ -6969,7 +7110,7 @@ def backfill_message_vecs(limit=200, verbose=False):
     remote service, and the whole corpus at once would hammer both.
     """
     with _db_lock:
-        rows = _db().execute(
+        rows = _udb().execute(
             "SELECT m.id, m.content FROM messages m "
             "LEFT JOIN message_vecs v ON v.message_id = m.id "
             "WHERE v.message_id IS NULL AND length(m.content) > 15 "
@@ -6994,7 +7135,7 @@ def _message_date_str(content):
     must never block retrieval or raise into a live turn."""
     try:
         with _db_lock:
-            row = _db().execute(
+            row = _udb().execute(
                 "SELECT ts FROM messages WHERE role='user' AND content=? "
                 "ORDER BY id DESC LIMIT 1", (content,),
             ).fetchone()
@@ -7027,7 +7168,7 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
         return []
     try:
         with _db_lock:
-            rows = _db().execute(
+            rows = _udb().execute(
                 "SELECT v.message_id, v.dim, v.vec, m.role, m.content, m.ts "
                 "FROM message_vecs v JOIN messages m ON m.id = v.message_id "
                 "WHERE m.role = 'user'"
@@ -7058,7 +7199,7 @@ def retrieve_semantic(query, k=2, min_sim=0.55):
         if any(_cosine(vec, pv) >= _RAG_DEDUP_SIM for pv in picked_vecs):
             continue
         with _db_lock:
-            nxt = _db().execute(
+            nxt = _udb().execute(
                 "SELECT content FROM messages WHERE id > ? AND role = 'assistant' "
                 "ORDER BY id LIMIT 1", (mid,),
             ).fetchone()
@@ -7681,22 +7822,22 @@ def recent_call_outcome(max_age=_CALL_OUTCOME_AMBIENT_WINDOW):
 
 
 def load_latest_reflection():
-    """Load the most recent weekly reflection into _WEEKLY_REFLECTION.
+    """Load the active user's most recent weekly reflection into their cache.
 
     Called at startup *and* periodically: weekly_reflection.py runs from cron
     and writes a new row, but a device that stays up for weeks would otherwise
     keep injecting the reflection it read on boot.
     """
-    global _WEEKLY_REFLECTION
+    st = _ustate()
     try:
         with _db_lock:
-            row = _db().execute(
+            row = _udb().execute(
                 "SELECT content FROM reflections ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        _WEEKLY_REFLECTION = row["content"] if row else ""
+        st["reflection"] = row["content"] if row else ""
     except Exception as e:
         print(f"[db] load_latest_reflection failed: {e}", flush=True)
-        _WEEKLY_REFLECTION = ""
+        st["reflection"] = ""
 
 
 def load_latest_daily_suggestions():
@@ -7726,9 +7867,8 @@ def load_latest_daily_suggestions():
 
 def init_learning():
     """Load memory facts, notes, settings, reflection, and build RAG index. Call once at startup."""
-    global USER_FACTS, USER_NOTES
-    USER_FACTS = load_memory()
-    USER_NOTES = load_notes()
+    USER_FACTS[:] = load_memory()
+    USER_NOTES[:] = load_notes()
     load_settings()
     load_latest_reflection()
     load_latest_daily_suggestions()
@@ -7759,14 +7899,16 @@ def _memory_maintenance_loop():
     # Give startup (TTS warmup, wake model load) the core first.
     time.sleep(60)
     while True:
-        try:
-            backfill_message_vecs(limit=50)
-        except Exception as e:
-            print(f"[embed] backfill loop error: {e}", flush=True)
-        try:
-            load_latest_reflection()
-        except Exception as e:
-            print(f"[db] reflection refresh error: {e}", flush=True)
+        for slug in _active_user_slugs():
+            with userctx.as_user(slug):
+                try:
+                    backfill_message_vecs(limit=50)
+                except Exception as e:
+                    print(f"[embed] backfill loop error ({slug}): {e}", flush=True)
+                try:
+                    load_latest_reflection()
+                except Exception as e:
+                    print(f"[db] reflection refresh error ({slug}): {e}", flush=True)
         try:
             load_latest_daily_suggestions()
         except Exception as e:
@@ -8961,7 +9103,7 @@ def gcal_scan_once(now=None):
 
     created = rescheduled = pruned = 0
     with _db_lock:
-        con = _db()
+        con = _udb(userctx.DEFAULT_USER)
         existing = {r["event_key"]: r for r in
                     con.execute("SELECT event_key, start_ts, reminder_id FROM gcal_reminders")}
         for key, (due, text, start_ts) in planned.items():
@@ -10099,13 +10241,26 @@ def detect_active_speaker(user_text, session=None):
     return "Alex"
 
 
+_USER_BLURBS = {"maria": "Alex's wife"}   # relationship text per non-default user
+
+
 def _build_system_prompt(user_text, on_search=None, session=None):
     """Assemble system prompt: base + memory facts + RAG hits + optional web search."""
-    active_speaker = detect_active_speaker(user_text, session)
+    # Who is speaking comes from the ACTIVE USER (web login / device sign-in),
+    # not from scanning the words for "this is Maria" -- that scan only ever
+    # swapped one prompt line while every fact and memory stayed Alex's.
+    _uname = userctx.display_name()
+    _is_default_user = userctx.current() == userctx.DEFAULT_USER
     custom_sys_prompt = SYSTEM_PROMPT
-    if active_speaker == "Maria":
-        custom_sys_prompt = SYSTEM_PROMPT.replace("You are talking to Alex.", "You are talking to Maria (Alex's wife).")
-        
+    if not _is_default_user:
+        _blurb = _USER_BLURBS.get(userctx.current())
+        custom_sys_prompt = SYSTEM_PROMPT.replace(
+            "You are talking to Alex.",
+            f"You are talking to {_uname}" + (f" ({_blurb})" if _blurb else "") + ". "
+            f"Everything below about the person you are talking to is about {_uname}; "
+            "do not assume you know anything about anyone else in the household beyond what appears below.",
+        ).replace("When Alex recites", f"When {_uname} recites")
+
     parts = [custom_sys_prompt]
 
     # The wall clock belongs in *every* prompt, not just the tool prompt.
@@ -10141,7 +10296,7 @@ def _build_system_prompt(user_text, on_search=None, session=None):
     # reasoning as the ambient location/time blocks above. Expires after
     # _CALL_OUTCOME_AMBIENT_WINDOW so it doesn't linger into an unrelated
     # later conversation.
-    _call_outcome = recent_call_outcome()
+    _call_outcome = (recent_call_outcome() if _is_default_user else None)   # numbers dialled are Alex's
     if _call_outcome:
         parts.append(
             f"\n\n## Recent phone call: dialed {_call_outcome['number']} — {_call_outcome['outcome']}\n"
@@ -10156,27 +10311,28 @@ def _build_system_prompt(user_text, on_search=None, session=None):
 
     if USER_FACTS:
         facts_str = "\n".join(f"- {f}" for f in USER_FACTS[-20:])
+        _he, _his = ("he", "his") if _is_default_user else ("they", "their")
         parts.append(
-            f"\n\n## What I know about Alex:\n{facts_str}\n"
-            "A fact naming where Alex \"lives\"/\"is from\" is his home address, not "
-            "necessarily where he is right now -- for his *current* physical location, "
+            f"\n\n## What I know about {_uname}:\n{facts_str}\n"
+            f"A fact naming where {_uname} \"lives\"/\"is from\" is {_his} home address, not "
+            f"necessarily where {_he} {'is' if _is_default_user else 'are'} right now -- for {_his} *current* physical location, "
             "use the Approximate location / Current location blocks below instead, "
-            "never this list. If asked where he is right now and no location block is "
-            "present, say you don't know his current location rather than answering "
-            "from his home address."
+            f"never this list. If asked where {_he} {'is' if _is_default_user else 'are'} right now and no location block is "
+            f"present, say you don't know {_his} current location rather than answering "
+            f"from {_his} home address."
         )
 
-    if _WEEKLY_REFLECTION:
-        parts.append(f"\n\n## Weekly reflection:\n{_WEEKLY_REFLECTION[:1500]}")
+    if _reflection_text():
+        parts.append(f"\n\n## Weekly reflection:\n{_reflection_text()[:1500]}")
 
-    if _DAILY_SUGGESTIONS:
+    if _DAILY_SUGGESTIONS and _is_default_user:   # built from Alex's day
         parts.append(f"\n\n## Today's suggestions:\n{_DAILY_SUGGESTIONS[:1500]}")
 
     with _notes_lock:
         notes_snapshot = list(USER_NOTES)
     if notes_snapshot:
         notes_str = "\n".join(f"- {n['text']}" for n in notes_snapshot[-30:])
-        parts.append(f"\n\n## Alex's notes:\n{notes_str}")
+        parts.append(f"\n\n## {_uname}'s notes:\n{notes_str}")
 
     # Semantic first (reaches the whole corpus and any language), keyword index
     # as the offline fallback -- embed_text returns None when bosgame is
@@ -10312,7 +10468,11 @@ def _build_system_prompt(user_text, on_search=None, session=None):
                     " sentence limit."
                 )
 
-    if needs_calendar(user_text):
+    if needs_calendar(user_text) and not _is_default_user:
+        # The connected Google calendar is Alex's. Say so rather than serve it.
+        parts.append(f"\n\n## Calendar:\nNo calendar is connected for {_uname}. "
+                     "Say so plainly; do not guess at their schedule.")
+    elif needs_calendar(user_text):
         note_capability("calendar")
         _gcal_days = gcal_days_from_query(user_text)
         cal = gcal_fetch(_gcal_days)
@@ -12900,6 +13060,40 @@ _PWA_FILES = {
 }
 
 
+
+_PROXY_HEADERS = ("X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP")
+_STRICT_USER = os.environ.get("ZEEV_STRICT_USER", "1") != "0"
+
+
+def _request_user(headers, peer_ip, path=""):
+    """Which registered user is this web request from? -> (slug, error).
+
+    nginx authenticates (auth_request) and forwards the login as `X-Zeev-User`.
+    Three rules keep one person's data out of another's:
+      * the header is honoured only from the loopback peer (nginx) -- anyone
+        who can reach the port directly could otherwise claim to be anyone;
+      * a login that maps to no registered user is REJECTED, never defaulted
+        (defaulting would file a stranger's chat under Alex's memory);
+      * a request that came through the proxy but carries no identity is
+        rejected too (ZEEV_STRICT_USER=0 to disable), for the same reason.
+    A direct LAN request with no header is the device owner: the default user.
+    """
+    via_proxy = any(headers.get(h) for h in _PROXY_HEADERS)
+    raw = headers.get("X-Zeev-User")
+    if raw and peer_ip in ("127.0.0.1", "::1"):
+        slug = userctx.resolve(raw)
+        if slug is None:
+            return None, "unknown user"
+        return slug, None
+    if via_proxy and _STRICT_USER:
+        # The PWA install files are public on purpose (nginx serves them without
+        # the login check so Chrome can fetch them); they carry no user data.
+        if path.split("?")[0] in _PWA_FILES:
+            return userctx.DEFAULT_USER, None
+        return None, "no user identity on proxied request"
+    return userctx.DEFAULT_USER, None
+
+
 def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -12908,7 +13102,9 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
     init_learning()
     init_camera()
     init_thermal()
-    session = load_prior()
+    # One chat session PER USER: a single shared list would hand Maria's turns
+    # to Alex's prompt (and the reverse). Same list interface as before.
+    session = _UserList("session", load_prior)
     lock = threading.Lock()
     # Last camera frame shown over /chat or /snap, so a follow-up like
     # "describe the scene" can run vision on the actual image instead of
@@ -12923,7 +13119,26 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
         def log_message(self, fmt, *args):
             pass
 
+        def _with_user(self, fn):
+            slug, err = _request_user(self.headers, self.client_address[0], self.path)
+            if err:
+                body = json.dumps({"error": err}).encode()
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            with userctx.as_user(slug):
+                fn()
+
         def do_GET(self):
+            self._with_user(self._do_GET)
+
+        def do_POST(self):
+            self._with_user(self._do_POST)
+
+        def _do_GET(self):
             if self.path.split("?")[0] in ("/", "/index.html", "/classic"):
                 # `/` is the noir-splash UI (zeev/web_ui.html), read per request so edits
                 # show without a restart. `/classic` is the previous design, kept as the
@@ -12963,7 +13178,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.end_headers()
                 self.wfile.write(body)
             elif self.path == "/memory":
-                body = json.dumps({"facts": USER_FACTS}).encode()
+                body = json.dumps({"facts": list(USER_FACTS)}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -13025,7 +13240,7 @@ def run_web_server(host="0.0.0.0", port=5000, use_https=False):
                 self.send_response(404)
                 self.end_headers()
 
-        def do_POST(self):
+        def _do_POST(self):
             if self.path == "/clear":
                 with lock:
                     session.clear()
@@ -14387,7 +14602,85 @@ def note_capability(name):
         pass
 
 
+# ---------------------------------------------------------------------------
+# Device: who is at the speaker?
+# ---------------------------------------------------------------------------
+# There is no speaker identification (wake-word retraining is a recorded dead
+# end), so the device only changes user on an EXPLICIT self-introduction --
+# "this is Maria", "Maria here" -- and says so aloud ("Hi Maria"), which makes
+# a Whisper misfire audible instead of silently filing Alex's next question
+# under Maria. The choice is sticky, then falls back to the default user after
+# ZEEV_USER_IDLE_S of quiet so Maria's session cannot linger into Alex's
+# morning. The history-rescan in detect_active_speaker() is deliberately NOT
+# used for this: it was the self-reinforcing loop documented there.
+
+_DEVICE_USER = [userctx.DEFAULT_USER]
+_DEVICE_USER_LAST = [0.0]                     # time.time() of the last turn
+_DEVICE_SESSIONS: dict = {}                   # slug -> that user's ctx.session
+_DEVICE_USER_IDLE_S = float(os.environ.get("ZEEV_USER_IDLE_S", 600))
+
+
+def device_user_intent(text):
+    """A registered slug if `text` is a self-introduction, else None.
+
+    Anchored to the start of the utterance and must not be a possessive
+    ("it's Maria's birthday" is not Maria arriving). "back to Alex"/"switch to
+    Maria" are accepted so the device can be handed over explicitly too.
+    """
+    t = (text or "").strip().lower()[:60]
+    t = re.sub(r"^(?:(?:hey|hi|hello|ok|okay|zeev|sarina|serena|z)[\s,.!]+)+", "", t)
+    names = "|".join(re.escape(d.lower()) for d in userctx.USERS.values())
+    m = re.match(
+        rf"(?:this is|it'?s|it is|i'?m|i am|here is|here'?s|my name is|call me"
+        rf"|switch to|back to|change user to)\s+({names})\b(?!['’]s)", t) \
+        or re.match(rf"({names})\s+(?:speaking|here)\b", t)
+    return userctx.resolve(m.group(1)) if m else None
+
+
+def _switch_device_user(ctx, slug):
+    """Make `slug` the device's user: park the old user's session, load theirs."""
+    old = _DEVICE_USER[0]
+    if slug == old:
+        return
+    _DEVICE_SESSIONS[old] = ctx.session
+    _DEVICE_USER[0] = slug
+    with userctx.as_user(slug):
+        ctx.session = _DEVICE_SESSIONS.get(slug)
+        if ctx.session is None:
+            ctx.session = load_prior()
+    # A pre-generated "more detail" answer belongs to whoever asked for it.
+    ctx._pending_detail[0] = None
+    ctx._pending_detail_source[0] = None
+    print(f"[user] device user: {old} -> {slug}", flush=True)
+
+
 def handle_transcript(ctx, transcript, _depth=0):
+    """Run one device turn as the device's current user (see above), then
+    restore the caller's context. The real turn logic is _handle_transcript."""
+    slug = _DEVICE_USER[0]
+    now = time.time()
+    intro = device_user_intent(transcript)
+    if intro:
+        slug = intro
+    elif (slug != userctx.DEFAULT_USER and _DEVICE_USER_LAST[0]
+          and now - _DEVICE_USER_LAST[0] > _DEVICE_USER_IDLE_S):
+        slug = userctx.DEFAULT_USER          # idle: hand the device back
+    _DEVICE_USER_LAST[0] = now
+    _switch_device_user(ctx, slug)
+    with userctx.as_user(slug):
+        if intro and re.fullmatch(
+                r"\W*(?:(?:hey|hi|hello|ok|okay|zeev|sarina|serena)\W+)*"
+                r"(?:this is|it'?s|it is|i'?m|i am|here is|here'?s|my name is|call me|switch to|back to|change user to)?"
+                r"\s*\w+(?:\s+(?:speaking|here))?\W*", transcript, re.I):
+            # Pure introduction: greet by name so a misheard switch is audible.
+            reply = f"Hi {userctx.display_name()}."
+            print(f"Zeev: {reply}")
+            finish_turn(ctx, reply, user_text=transcript)
+            return
+        return _handle_transcript(ctx, transcript, _depth)
+
+
+def _handle_transcript(ctx, transcript, _depth=0):
     """Run LLM on transcript and speak the reply. Caller must set THINKING state first.
 
     `_depth` bounds follow-up chaining (see _followup_turn); callers outside
@@ -15482,7 +15775,7 @@ def handle_transcript(ctx, transcript, _depth=0):
             backfill_message_vecs(limit=4)
         except Exception as e:
             print(f"[embed] turn backfill failed: {e}", flush=True)
-    threading.Thread(target=_bg_index, daemon=True).start()
+    userctx.spawn(_bg_index)   # keeps this turn's user (a bare Thread would index ALEX's data)
 
     # A — auto-memorize every 5 turns in a background thread
     ctx._turn_count[0] += 1
@@ -15492,7 +15785,7 @@ def handle_transcript(ctx, transcript, _depth=0):
             facts = extract_memory(snap)
             if facts is not None:
                 print(f"[memory] {len(facts)} fact(s) stored", flush=True)
-        threading.Thread(target=_bg_memorize, daemon=True).start()
+        userctx.spawn(_bg_memorize)   # extraction must land in THIS user's facts
 
     # Truncate to last complete sentence so TTS never gets a dangling fragment
     # NOT `^(.*[.!?])\s*$`: that anchor only matches a reply which ALREADY ends
@@ -15568,7 +15861,7 @@ def handle_transcript(ctx, transcript, _depth=0):
                     print(f"[detail] pre-generation failed or empty [{status}]", flush=True)
             finally:
                 ctx._pending_detail_ready.set()
-        threading.Thread(target=_prefetch_detail, daemon=True).start()
+        userctx.spawn(_prefetch_detail)
 
     if not streamed:
         ctx.board.set_rgb(*ctx._LED_SPEAKING)
@@ -18038,8 +18331,8 @@ def main():
 
         if user_input.lower() == "/forget":
             with _db_lock:
-                _db().execute("DELETE FROM messages")
-                _db().commit()
+                _udb().execute("DELETE FROM messages")
+                _udb().commit()
             session.clear()
             print(f"{DIM}All history deleted.{RESET}\n")
             continue
@@ -18096,7 +18389,7 @@ def main():
             idx = int(parts[1]) - 1
             if 0 <= idx < len(USER_FACTS):
                 removed = USER_FACTS.pop(idx)
-                save_memory(USER_FACTS)
+                save_memory(list(USER_FACTS))
                 print(f"{DIM}Removed: {removed}{RESET}\n")
             else:
                 print(f"{DIM}No fact #{parts[1]}.{RESET}\n")

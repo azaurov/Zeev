@@ -261,6 +261,8 @@ def test_agent_workspace_is_a_sibling_folder_not_alexs(zeev, monkeypatch, tmp_pa
     ("Maria here", "maria"),
     ("it's Maria", "maria"),
     ("switch to Maria", "maria"),
+    ("this is Maria and remind me to sing", "maria"),
+    ("this is Maria, what's the weather", "maria"),
     ("this is Alex", "alex"),
     ("back to Alex", "alex"),
 ])
@@ -275,6 +277,9 @@ def test_device_user_intent_positive(zeev, text, who):
     "what's the weather",
     "is this Maria's phone number",
     "I'm going to the store with Maria",
+    "its Maria birthday tomorrow",          # Whisper drops the apostrophe
+    "this is Maria birthday party stuff",
+    "Maria here is a good idea",
 ])
 def test_device_user_intent_negative(zeev, text):
     """Talking ABOUT Maria must never sign her in (the loop documented in

@@ -23,6 +23,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Units depending on Tailscale/remote upstreams must not hard-fail at boot; add `After=network-online.target` and a retry/resolve guard.
 - Boot-verification scripts must handle `Type=oneshot` units (inactive/dead is success, not failure).
 
+### Per-user data (Alex + Maria, 2026-09-25)
+
+One SQLite file per person. **Alex stays in `data/zeev.db`**; everyone else gets `data/users/<slug>/zeev.db` (`ZEEV_USERS`, default `alex,maria`). `zeev/userctx.py` holds identity: a `ContextVar` (web is a `ThreadingHTTPServer`, a global would interleave people) and `spawn()`.
+
+- **Personal tables go through `_udb()`, shared ones through `_db()`.** Personal: `messages`, `message_vecs`, `facts`, `notes`, `reminders`, `agent_messages`, `reflections`. Shared on purpose (an empty per-user copy would make every Maria turn re-fetch the news live): `world_news`, `quantum_insights`, `settings`, `call_outcomes`, `dreams`, `llm_finish_log`, `gcal_reminders`. A new table must pick a side.
+- **A bare `threading.Thread` runs as ALEX** (empty context = default user). Any per-turn background job that touches personal data must use `userctx.spawn()`, or Maria's fact extraction lands in Alex's memory. Pinned structurally in `tests/test_multiuser.py`.
+- **`USER_FACTS`, `USER_NOTES`, `_HISTORY_*` and the web `session` are per-user views** (`_UserList`/`_UserDict`), same names and list/dict interface; caches load lazily (so `add_note` touches the cache *before* inserting).
+- **Web identity**: `mywebsite/public/auth_check.php` emits `X-Auth-User`; nginx `auth_request_set` forwards it as `X-Zeev-User` (client copies are overwritten). Honoured only from loopback. `ZEEV_USER_ALIASES=azaurov=alex,maryelena129=maria` maps login to slug. An unknown login, or a proxied request with no identity, is **403, never defaulted to Alex** (`ZEEV_STRICT_USER=0` disables). PWA files are the public exception.
+- **Device**: no speaker ID, so only an explicit "this is Maria" switches (Zeev answers "Hi Maria." so a misheard switch is audible); sticky, back to Alex after `ZEEV_USER_IDLE_S` (600s). Talking *about* her ("its Maria birthday" -- Whisper drops the apostrophe) must not sign her in. Session is swapped per user.
+- **Alex-only by design**: calendar, daily suggestions, dreams, call outcomes. Maria's workspace folder is a *sibling* (`~/zeev-workspace-maria`), never inside Alex's.
+- Her history before 2026-09-25 is still in Alex's file; not split.
+- `sync_pi_history.py` syncs each user's file Pi to bosgame.
+
 ## Secrets
 
 Never `cat`, `echo`, or dump `.env` files, key values, or credential blobs into the transcript. To inspect config, print only key NAMES (e.g. `grep -o '^[A-Z_]*=' .env`) or masked values. If a secret is ever printed, stop and tell me immediately so I can rotate it.

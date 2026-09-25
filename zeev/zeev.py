@@ -14630,10 +14630,16 @@ def device_user_intent(text):
     t = (text or "").strip().lower()[:60]
     t = re.sub(r"^(?:(?:hey|hi|hello|ok|okay|zeev|sarina|serena|z)[\s,.!]+)+", "", t)
     names = "|".join(re.escape(d.lower()) for d in userctx.USERS.values())
+    # The name must END the introduction: end of utterance, punctuation, or a
+    # request verb/conjunction. Whisper drops apostrophes, so "its Maria
+    # birthday" must not read as "it's Maria" -- a bare name followed by an
+    # ordinary noun is talk ABOUT her.
+    end = (r"(?=\s*$|[,.!?;:]|\s+(?:and|can|could|please|what|whats|how|remind|tell|play"
+           r"|i|do|will|would|set|call|dial|give)\b)")
     m = re.match(
         rf"(?:this is|it'?s|it is|i'?m|i am|here is|here'?s|my name is|call me"
-        rf"|switch to|back to|change user to)\s+({names})\b(?!['’]s)", t) \
-        or re.match(rf"({names})\s+(?:speaking|here)\b", t)
+        rf"|switch to|back to|change user to)\s+({names})\b(?!['’]s){end}", t) \
+        or re.match(rf"({names})\s+(?:speaking|here)\b{end}", t)
     return userctx.resolve(m.group(1)) if m else None
 
 

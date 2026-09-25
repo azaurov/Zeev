@@ -108,3 +108,48 @@ def test_loop_wired_into_device_mode_after_notify_and_toggleable():
     i = SRC.index("_reminder_notify[0] = _announce_reminder")
     tail = SRC[i:i + 400]
     assert "_WEATHER_ALERTS_ON" in tail and "_weather_alert_loop" in tail
+
+
+# --- Greater Boston / configured regions ------------------------------------
+
+def test_parse_alert_regions_tolerates_junk():
+    assert zeev.parse_alert_regions("MA:Suffolk, Norfolk;RI:Providence") == [
+        ("MA", ["suffolk", "norfolk"]), ("RI", ["providence"])]
+    assert zeev.parse_alert_regions("junk;;MA:;X:Foo;") == []
+    assert zeev.parse_alert_regions(None) == []
+
+
+def test_default_region_is_greater_boston():
+    st, names = zeev.parse_alert_regions(zeev._ALERT_REGIONS)[0]
+    assert st == "MA" and {"suffolk", "middlesex", "norfolk", "essex"} <= set(names)
+
+
+def test_region_fetch_keeps_only_named_counties(monkeypatch):
+    feats = [{"id": "u1", "properties": {"event": "High Wind Warning", "areaDesc": "Eastern Essex; Suffolk"}},
+             {"id": "u2", "properties": {"event": "High Wind Warning", "areaDesc": "Berkshire; Hampshire"}}]
+    class R:
+        status_code = 200
+        def json(self): return {"features": feats}
+    monkeypatch.setattr(zeev.requests, "get", lambda *a, **k: R())
+    got = zeev.nws_alerts_region("MA", ["suffolk"])
+    assert [a["id"] for a in got] == ["u1"]
+
+
+def test_region_failure_returns_none(monkeypatch):
+    def boom(*a, **k): raise OSError("down")
+    monkeypatch.setattr(zeev.requests, "get", boom)
+    assert zeev.nws_alerts_region("MA", ["suffolk"]) is None
+
+
+def test_gather_merges_point_and_region_and_dedups(monkeypatch):
+    a, b = _alert("Tornado Warning", id_="same"), _alert("High Wind Warning", id_="only-region")
+    monkeypatch.setattr(zeev, "nws_alerts", lambda lat, lon: [a])
+    monkeypatch.setattr(zeev, "nws_alerts_region", lambda st, n: [a, b])
+    got = zeev._gather_alerts((42.1, -71.1))
+    assert sorted(x["id"] for x in got) == ["only-region", "same"]
+
+
+def test_region_alerts_still_flow_when_device_has_no_fix(monkeypatch):
+    b = _alert("High Wind Warning", id_="r")
+    monkeypatch.setattr(zeev, "nws_alerts_region", lambda st, n: [b])
+    assert [x["id"] for x in zeev._gather_alerts(None)] == ["r"]

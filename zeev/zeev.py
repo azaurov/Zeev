@@ -8526,6 +8526,66 @@ def nws_alerts(lat, lon):
         return None
 
 
+# Regions watched regardless of where the device is: "ST:County,County;ST:..."
+# Greater Boston by default -- the household's people and errands live there even
+# when the device (which follows its own GPS fix) is elsewhere.
+_ALERT_REGIONS = os.environ.get(
+    "ZEEV_ALERT_REGIONS", "MA:Suffolk,Middlesex,Norfolk,Essex")
+
+
+def parse_alert_regions(spec):
+    """'MA:Suffolk,Norfolk;RI:Providence' -> [('MA', ['suffolk','norfolk']), ...].
+    Malformed entries are skipped, never raised (this runs in a daemon thread)."""
+    out = []
+    for chunk in (spec or "").split(";"):
+        st, _, names = chunk.partition(":")
+        st = st.strip().upper()
+        names = [n.strip().lower() for n in names.split(",") if n.strip()]
+        if len(st) == 2 and st.isalpha() and names:
+            out.append((st, names))
+    return out
+
+
+def nws_alerts_region(state, county_names):
+    """Active NWS alerts for a state, narrowed to those whose area text names one
+    of `county_names` (NWS areaDesc reads like "Eastern Essex; Suffolk"), or None
+    on failure. State-level fetch because a single point misses most of a metro
+    area: Boston's Suffolk County alone leaves out Cambridge and Lynn."""
+    try:
+        r = requests.get(
+            "https://api.weather.gov/alerts/active",
+            params={"area": state},
+            headers={"User-Agent": "Zeev-AI-Companion/1.0", "Accept": "application/geo+json"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"[weather-alert] NWS {state} HTTP {r.status_code}", flush=True)
+            return None
+        out = []
+        for f in r.json().get("features", []):
+            props = f["properties"]
+            area = (props.get("areaDesc") or "").lower()
+            if any(n in area for n in county_names):
+                out.append(props | {"id": f.get("id") or props.get("id")})
+        return out
+    except Exception as e:
+        print(f"[weather-alert] NWS {state} error: {e}", flush=True)
+        return None
+
+
+def _gather_alerts(coords):
+    """Point alerts for the device plus every configured region, deduped by id."""
+    seen, merged = set(), []
+    batches = [nws_alerts(*coords) if coords else None]
+    batches += [nws_alerts_region(st, names) for st, names in parse_alert_regions(_ALERT_REGIONS)]
+    for batch in batches:
+        for a in batch or []:
+            if a.get("id") not in seen:
+                seen.add(a.get("id"))
+                merged.append(a)
+    return merged
+
+
 def _is_critical_alert(a):
     if a.get("status") not in (None, "Actual") or a.get("messageType") == "Cancel":
         return False          # exercises/tests and cancellations are never announced
@@ -8598,7 +8658,7 @@ def _weather_alert_loop(notify):
                 coords = (loc["lat"], loc["lon"])
             elif _HOME_LAT is not None and _HOME_LON is not None:
                 coords = (_HOME_LAT, _HOME_LON)
-            alerts = nws_alerts(*coords) if coords else None
+            alerts = _gather_alerts(coords)
             if alerts:
                 fresh = new_critical_alerts(alerts, announced)
                 if fresh:

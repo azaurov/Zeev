@@ -584,6 +584,10 @@ def needs_search(text):
 
 _WEATHER_RE = re.compile(r"\b(weather|forecast|temperature outside|how (hot|cold) is it)\b", re.IGNORECASE)
 
+_WX_ONLY_RE = re.compile(
+    r"\b(weather|forecast|today|tonight|tomorrow|current|right now|this week|this month|"
+    r"temperature outside|how (hot|cold) is it)\b", re.IGNORECASE)
+
 def needs_weather(text):
     return bool(_WEATHER_RE.search(text))
 
@@ -8392,6 +8396,83 @@ def gps_cached() -> dict | None:
     return r
 
 
+_WMO_CODES = {
+    0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
+    45: "fog", 48: "freezing fog", 51: "light drizzle", 53: "drizzle",
+    55: "heavy drizzle", 56: "freezing drizzle", 57: "heavy freezing drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain",
+    67: "heavy freezing rain", 71: "light snow", 73: "snow", 75: "heavy snow",
+    77: "snow grains", 80: "light rain showers", 81: "rain showers",
+    82: "violent rain showers", 85: "light snow showers", 86: "heavy snow showers",
+    95: "thunderstorm", 96: "thunderstorm with hail", 99: "severe thunderstorm with hail",
+}
+
+
+def open_meteo_weather(lat, lon, place=""):
+    """Weather text for a coordinate from Open-Meteo (free, no key), or None.
+
+    Replaces scraping Tavily search results for weather: the digest uses most
+    of Tavily's monthly free plan, and a search page is a poor source for
+    "is it raining right now" anyway. Units are requested imperial and worded
+    in full for TTS. Returns None on ANY failure (network, bad JSON, missing
+    field) so the caller falls back to the search path instead of speaking an
+    empty forecast.
+    """
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": round(float(lat), 2), "longitude": round(float(lon), 2),
+                "current": "temperature_2m,apparent_temperature,weather_code,"
+                           "wind_speed_10m,relative_humidity_2m,precipitation",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                         "precipitation_probability_max",
+                "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+                "precipitation_unit": "inch", "timezone": "auto", "forecast_days": 3,
+            },
+            timeout=6,
+        )
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        cur, day = d["current"], d["daily"]
+        lines = [
+            f"Now: {_WMO_CODES.get(cur['weather_code'], 'unknown conditions')}, "
+            f"{cur['temperature_2m']:.0f} degrees Fahrenheit "
+            f"(feels like {cur['apparent_temperature']:.0f}), wind {cur['wind_speed_10m']:.0f} "
+            f"miles per hour, humidity {cur['relative_humidity_2m']:.0f} percent."
+        ]
+        for i, label in enumerate(("Today", "Tomorrow", "Day after")):
+            pop = day["precipitation_probability_max"][i]
+            lines.append(
+                f"{label} ({day['time'][i]}): {_WMO_CODES.get(day['weather_code'][i], 'unknown')}, "
+                f"high {day['temperature_2m_max'][i]:.0f}, low {day['temperature_2m_min'][i]:.0f} "
+                f"degrees Fahrenheit, chance of precipitation "
+                f"{'unknown' if pop is None else f'{pop:.0f} percent'}."
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[weather] open-meteo error: {e}", flush=True)
+        return None
+
+
+def _weather_coords(client_loc):
+    """(lat, lon) for a weather turn: the browser's fix, else the server's cached
+    one. Weather varies on the scale of tens of km, so even an IP fix is usable
+    here -- unlike a street name, which is why the ambient block hides it."""
+    try:
+        if client_loc:
+            lat, lon = float(client_loc["lat"]), float(client_loc["lon"])
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return lat, lon
+    except (TypeError, KeyError, ValueError):
+        pass
+    loc = gps_cached()
+    if loc and "error" not in loc and loc.get("lat") is not None and loc.get("lon") is not None:
+        return loc["lat"], loc["lon"]
+    return None
+
+
 _CLIENT_PLACE_CACHE = {}
 
 def client_place(loc) -> str:
@@ -10649,7 +10730,29 @@ def _build_system_prompt(user_text, on_search=None, session=None, client_loc=Non
             "guess or fill in a plausible-sounding scene instead."
         )
 
-    if needs_search(user_text) and TAVILY_API_KEY:
+    # Weather comes from Open-Meteo, not a Tavily search. Tavily is only used
+    # for a weather turn if Open-Meteo fails or the message also asks for
+    # something else that needs a search.
+    weather_done = False
+    if needs_weather(user_text):
+        coords = _weather_coords(client_loc)
+        wx = open_meteo_weather(*coords) if coords else None
+        if wx:
+            weather_done = True
+            note_capability("weather")
+            wplace = (client_place(client_loc) if client_loc else "") or ambient_place_str
+            parts.append(
+                f"\n\n[Weather data{' for ' + wplace if wplace else ''} (Open-Meteo, live)]\n{wx}\n"
+                "Answer from this data only. These replies are spoken aloud via TTS: "
+                "say \"72 degrees Fahrenheit\", not \"72°F\"; \"10 miles per hour\", not \"10 mph\"."
+            )
+    # _SEARCH_RE itself matches "weather"/"today"/"this week", so strip the
+    # words that only describe the weather ask before asking "does this need a
+    # search for some other reason?" ("weather and the latest news" still does).
+    _non_wx = _WX_ONLY_RE.sub(" ", user_text)
+    if weather_done and not _SEARCH_RE.search(_non_wx) and not _NAMED_CASE_RE.search(user_text):
+        pass
+    elif needs_search(user_text) and TAVILY_API_KEY:
         if on_search:
             on_search(user_text)
         search_query = user_text

@@ -133,16 +133,19 @@ def _tavily(zeev, monkeypatch):
     return captured
 
 
-def test_weather_query_anchored_to_ambient_place(zeev, _gps, _tavily):
+def test_weather_query_anchored_to_ambient_place(zeev, _gps, _tavily, monkeypatch):
+    # Tavily is now only the FALLBACK for weather (Open-Meteo is primary).
+    monkeypatch.setattr(zeev, "open_meteo_weather", lambda *a: None)
     _fix(zeev, _gps)
     zeev._build_system_prompt("what's the weather today?")
     assert "Fairview" in _tavily["query"]
     assert "Massachusetts" in _tavily["query"]
 
 
-def test_weather_query_unanchored_without_a_fix(zeev, _gps, _tavily):
+def test_weather_query_unanchored_without_a_fix(zeev, _gps, _tavily, monkeypatch):
     """No GPS fix at all -- the query must fall back to the raw text rather
     than injecting an empty/garbled place string."""
+    monkeypatch.setattr(zeev, "open_meteo_weather", lambda *a: None)
     zeev._build_system_prompt("what's the weather today?")
     assert _tavily["query"] == "what's the weather today?"
 
